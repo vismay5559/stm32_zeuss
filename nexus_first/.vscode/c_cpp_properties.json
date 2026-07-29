@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "STM32_Appli",
+            "compileCommands": "${workspaceFolder}/Appli/build/compile_commands.json",
+            "intelliSenseMode": "windows-msvc-x64",
+            "cStandard": "c17",
+            "cppStandard": "c++17"
+        },
+        {
+            "name": "STM32_Boot",
+            "compileCommands": "${workspaceFolder}/Boot/build/compile_commands.json",
+            "intelliSenseMode": "windows-msvc-x64",
+            "cStandard": "c17",
+            "cppStandard": "c++17"
+        }
+    ],
+    "version": 4
+}
