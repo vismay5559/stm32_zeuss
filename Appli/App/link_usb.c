@@ -23,6 +23,9 @@ static uint8_t  s_sync_seen;
 static nexus_cmd_t s_cmd;
 static volatile uint8_t s_cmd_ready;
 
+/* Commands accepted from the Pi. Used to detect a dead link. */
+static volatile uint32_t s_cmd_count;
+
 uint16_t nexus_crc16(const uint8_t *data, uint32_t len)
 {
     uint16_t crc = 0xFFFFu;
@@ -100,6 +103,7 @@ static void feed(uint8_t b)
     {
         memcpy(&s_cmd, c, sizeof(s_cmd));
         s_cmd_ready = 1;
+        s_cmd_count++;
     }
 
     s_acc_len = 0;
@@ -111,6 +115,11 @@ void link_usb_on_rx(uint8_t *buf, uint32_t len)
     {
         feed(buf[i]);
     }
+}
+
+uint32_t link_usb_cmd_count(void)
+{
+    return s_cmd_count;
 }
 
 uint8_t link_usb_take_command(nexus_cmd_t *out)

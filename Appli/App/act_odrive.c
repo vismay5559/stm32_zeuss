@@ -51,6 +51,10 @@ static uint8_t        s_txq_head[2];
 static uint8_t        s_txq_tail[2];
 static uint32_t       s_tx_dropped[2];
 
+/* Frames accepted from each bus. Only ever increments, so a health check can
+   detect "this bus has gone quiet" by watching it stop changing. */
+static volatile uint32_t s_rx_count[2];
+
 static act_telemetry_t s_telem;
 
 static float    s_seg_start[NEXUS_NUM_JOINTS];
@@ -158,6 +162,11 @@ uint32_t act_tx_dropped(uint8_t bus)
     return (bus < 2u) ? s_tx_dropped[bus] : 0u;
 }
 
+uint32_t act_rx_count(uint8_t bus)
+{
+    return (bus < 2u) ? s_rx_count[bus] : 0u;
+}
+
 void act_init(void)
 {
     memset(&s_telem, 0, sizeof(s_telem));
@@ -197,6 +206,8 @@ void act_on_rx(uint8_t bus_index)
         {
             continue;
         }
+
+        s_rx_count[bus_index & 1u]++;
 
         int j = (int)(bus_index * ODRV_NODES_PER_BUS) + (int)(node - 1u);
 

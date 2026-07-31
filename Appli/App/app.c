@@ -7,6 +7,7 @@
 #include "act_odrive.h"
 #include "contact.h"
 #include "critical.h"
+#include "health.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -84,22 +85,76 @@ static void check_noncacheable_region(void)
  */
 #define HEARTBEAT_TICKS  500u   /* toggle every 500 ms -> 1 Hz full cycle */
 
+/*
+ * Red LED blink code. Rather than "something is wrong", it blinks the number
+ * of the first faulted subsystem, pauses, and repeats - so one LED diagnoses
+ * six things from across the room:
+ *
+ *   1 = IMU stale    2 = encoders invalid   3 = CAN bus 1 silent
+ *   4 = CAN2 silent  5 = Pi link stale      6 = loop overrun
+ *
+ * Timing: 150 ms on, 150 ms off per blink, then a 1 s gap so the count is
+ * easy to read. Driven from the 1 kHz tick, so these are just tick counts.
+ */
+#define BLINK_ON_TICKS    150u
+#define BLINK_OFF_TICKS   150u
+#define BLINK_GAP_TICKS  1000u
+
 static void update_health_leds(void)
 {
     static uint32_t beat;
-    static uint8_t  fault_latched;
+    static uint32_t phase;      /* ticks into the current blink sequence */
+    static uint8_t  shown_code; /* code being blinked out right now      */
 
+    /* Green heartbeat: independent of everything else, always runs. */
     if (++beat >= HEARTBEAT_TICKS)
     {
         beat = 0;
         BSP_LED_Toggle(LED_GREEN);
     }
 
-    if (!fault_latched &&
-        ((s_overruns != 0u) || (act_tx_dropped(0) != 0u) || (act_tx_dropped(1) != 0u)))
+    uint8_t code = health_blink_code();
+
+    if (code == 0u)
     {
-        fault_latched = 1;
-        BSP_LED_On(LED_RED);
+        BSP_LED_Off(LED_RED);
+        phase      = 0;
+        shown_code = 0;
+        return;
+    }
+
+    /* Latch onto a code for one full sequence so the count stays readable
+       even if a different fault appears midway through. */
+    if (shown_code == 0u)
+    {
+        shown_code = code;
+        phase      = 0;
+    }
+
+    uint32_t blink_len = BLINK_ON_TICKS + BLINK_OFF_TICKS;
+    uint32_t seq_len   = ((uint32_t)shown_code * blink_len) + BLINK_GAP_TICKS;
+    uint32_t pos       = phase % seq_len;
+
+    if (pos < ((uint32_t)shown_code * blink_len))
+    {
+        if ((pos % blink_len) < BLINK_ON_TICKS)
+        {
+            BSP_LED_On(LED_RED);
+        }
+        else
+        {
+            BSP_LED_Off(LED_RED);
+        }
+    }
+    else
+    {
+        BSP_LED_Off(LED_RED);   /* the gap between repetitions */
+    }
+
+    if (++phase >= seq_len)
+    {
+        phase      = 0;
+        shown_code = 0;         /* re-evaluate which fault to show */
     }
 }
 
@@ -119,6 +174,11 @@ void app_init(void)
     s_seq          = 0;
     s_overruns     = 0;
     s_startup_grace = 0;
+
+    /* Nothing is wired up yet, so only the timing check is armed. Add each
+       flag here (or call health_set_expected) as you connect that hardware -
+       the red LED then tells you the moment it starts talking. */
+    health_init(HEALTH_EXPECTED_NOW);
 
     contact_init();
     enc_init();
@@ -229,6 +289,7 @@ void app_run(void)
         contact_poll();
         act_tick_1khz();
         build_and_send_state();
+        health_tick();
         update_health_leds();
 
         uint32_t dt = __HAL_TIM_GET_COUNTER(&htim2) - t_start;
@@ -247,10 +308,14 @@ void app_run(void)
             uint32_t ovr = s_overruns;
             uint32_t mx  = s_loop_us_max;
 
-            printf("loop max %lu us | overruns %lu | can drop %lu/%lu\r\n",
+            printf("loop max %lu us | overruns %lu | can drop %lu/%lu | "
+                   "health 0x%02lX watching 0x%02lX blink %u\r\n",
                    (unsigned long)mx, (unsigned long)ovr,
                    (unsigned long)act_tx_dropped(0),
-                   (unsigned long)act_tx_dropped(1));
+                   (unsigned long)act_tx_dropped(1),
+                   (unsigned long)health_faults(),
+                   (unsigned long)health_expected(),
+                   (unsigned)health_blink_code());
 
             s_loop_us_max = 0;
 

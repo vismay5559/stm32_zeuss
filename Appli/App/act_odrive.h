@@ -27,4 +27,7 @@ void act_tx_pump(void);
 /* Non-zero means that bus is oversubscribed and frames are being lost. */
 uint32_t act_tx_dropped(uint8_t bus);
 
+/* Total frames accepted from a bus. Stops changing when the bus goes quiet. */
+uint32_t act_rx_count(uint8_t bus);
+
 #endif /* ACT_ODRIVE_H */
