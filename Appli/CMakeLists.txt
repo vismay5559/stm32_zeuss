@@ -61,6 +61,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app.c
     App/contact.c
     App/health.c
+    App/test_leg_can.c
     App/enc_as5048a.c
     App/imu_bno085.c
     App/act_odrive.c

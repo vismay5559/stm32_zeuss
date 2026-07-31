@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app.h"
+#include "nexus_mode.h"
+#include "test_leg_can.h"
 #include "imu_bno085.h"
 #include "enc_as5048a.h"
 #include "act_odrive.h"
@@ -161,9 +163,14 @@ int main(void)
    */
   /* MX_XSPI2_Init(); */
   /* USER CODE BEGIN 2 */
+#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+  printf("APPLI: mode = LEG_CAN (CAN-FD single leg test)\r\n");
+  legtest_init();
+#else
   printf("APPLI: peripheral init done, entering app_init()\r\n");
   app_init();
   printf("APPLI: app_init() done\r\n");
+#endif
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -187,7 +194,11 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+  legtest_run();
+#else
   app_run();
+#endif
 
   while (1)
   {
@@ -595,7 +606,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM6)
   {
+#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+    legtest_on_tick();
+#else
     app_on_tick();
+#endif
   }
 }
 
@@ -622,6 +637,12 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     return;
   }
 
+#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+  if (hfdcan->Instance == FDCAN1)
+  {
+    legtest_on_rx();
+  }
+#else
   if (hfdcan->Instance == FDCAN1)
   {
     act_on_rx(0);
@@ -630,6 +651,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
   {
     act_on_rx(1);
   }
+#endif
 }
 /* USER CODE END 4 */
 

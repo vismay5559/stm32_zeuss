@@ -145,6 +145,80 @@ Notes:
 
 ---
 
+## Test modes
+
+The full robot loop touches every peripheral at once, which is the worst way
+to bring hardware up — when nothing works you cannot tell which of six
+subsystems is at fault. So the firmware has single-purpose modes, selected at
+build time in `Appli/App/nexus_mode.h`:
+
+```c
+#define NEXUS_MODE  NEXUS_MODE_LEG_CAN
+```
+
+| Mode | Exercises |
+|---|---|
+| `NEXUS_MODE_ROBOT` | Everything — the real 1 kHz loop |
+| `NEXUS_MODE_LEG_CAN` | **CAN-FD only.** One leg, 4 ODrives |
+| `NEXUS_MODE_IMU` | *(planned)* IMU only |
+
+Change it, rebuild, reflash the Appli. `main()` dispatches on it; unused code
+is simply never entered.
+
+### `NEXUS_MODE_LEG_CAN` — single leg over CAN-FD
+
+Talks to four ODrive S1 axes on **FDCAN1** (PB8 rx / PD1 tx) and touches
+nothing else. Per joint: 1 TX (`Set_Input_Pos`) and 2 RX
+(`Get_Encoder_Estimates`, `Get_Torques`), plus the ODrive heartbeat.
+
+Configuration lives at the top of `Appli/App/test_leg_can.c`:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `s_node_id[]` | `{1,2,3,4}` | hip_roll, hip_pitch, knee, ankle. Must match `axis0.config.can.node_id` |
+| `LEGTEST_ENABLE_CLOSED_LOOP` | **0** | **Safety.** At 0 the axes are never commanded into closed loop, so motors stay unpowered and cannot move — positions are still transmitted, so TX is fully testable |
+| `LEGTEST_AMPLITUDE_TURNS` | 0.05 | Only matters with closed loop on |
+| `LEGTEST_FREQ_HZ` | 0.25 | Slow enough to watch |
+| `LEGTEST_USE_CAN_FD` | 1 | Set to 0 for classic CAN 2.0 @ 1 Mbit if your ODrive firmware does not do FD |
+
+Commands are sent **one node per tick, round-robin**, so each joint is driven
+at 250 Hz. That deliberately avoids the 3-deep hardware TX FIFO overflowing
+with four nodes, and keeps the bus evenly loaded instead of bursting.
+
+On the ODrive side, telemetry must be published cyclically:
+
+```
+axis0.config.can.encoder_msg_rate_ms   = 10
+axis0.config.can.torque_msg_rate_ms    = 10
+axis0.config.can.heartbeat_msg_rate_ms = 100
+```
+
+Output, once per second:
+
+```
+--- t=12s  rx=4821 (unknown=0)  txfail=0 ---
+  node 1 hip_roll  : pos= +0.0031 vel=  +0.002 trq= +0.014 state=1 err=0x00000000  hb=12 enc=120 trq=120  cmd=+0.0000
+  node 2 hip_pitch : ---- SILENT ----  (hb=0 enc=0 trq=0)
+```
+
+Reading it:
+
+- **`txfail` climbing at ~1000/s means nobody is on the bus.** CAN needs
+  another node to acknowledge every frame; with no transceiver or no powered
+  ODrive, nothing ACKs, retransmission fills the FIFO, and all sends fail.
+  This is your *first* proof of working wiring — it drops to ~0 before any
+  telemetry appears.
+- `rx` climbing and `hb`/`enc`/`trq` rising per node = that node is healthy.
+- `unknown` counts frames from node IDs you did not configure — a
+  misconfigured ODrive shows up here rather than vanishing.
+- `SILENT` = nothing heard from that node for 500 ms.
+
+**Bench safety before enabling closed loop:** leg in a fixture and off the
+ground, physical e-stop within reach, low current and velocity limits set in
+odrivetool, and bring up one node at a time before running all four. Also
+enable ODrive's own watchdog (`axis0.config.enable_watchdog`) — that is the
+layer that protects the hardware if this firmware stops.
+
 ## Diagnostics
 
 ### Serial console
