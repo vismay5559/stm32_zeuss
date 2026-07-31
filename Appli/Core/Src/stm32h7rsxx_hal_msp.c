@@ -74,7 +74,9 @@ void HAL_MspInit(void)
 {
 
   /* USER CODE BEGIN MspInit 0 */
-
+  /* Same fix as in the Boot project: the USB voltage detector below waits on
+     USB33RDY, which requires the USB regulators to be powered first. Without
+     this the generated Error_Handler() stops the Appli inside HAL_Init(). */
   /* USER CODE END MspInit 0 */
 
   /* System interrupt init*/
@@ -85,8 +87,13 @@ void HAL_MspInit(void)
   /* Enable USB Voltage detector */
   if(HAL_PWREx_EnableUSBVoltageDetector() != HAL_OK)
   {
-   /* Initialization error */
-   Error_Handler();
+    /*
+     * NOT fatal - do not call Error_Handler() here. USB33RDY needs VDD33USB,
+     * which comes from VBUS on the USER USB connector. On the bench, with only
+     * the ST-LINK cable plugged in, this always times out. Failing hard here
+     * means the whole robot refuses to boot just because no USB host is
+     * attached. Carry on; USB simply will not enumerate until a cable is in.
+     */
   }
 
   /* USER CODE BEGIN MspInit 1 */

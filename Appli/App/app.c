@@ -7,6 +7,7 @@
 #include "act_odrive.h"
 #include "contact.h"
 #include "critical.h"
+#include <stdio.h>
 #include <string.h>
 
 extern TIM_HandleTypeDef htim2;
@@ -15,6 +16,18 @@ extern TIM_HandleTypeDef htim6;
 static volatile uint32_t s_tick_pending;
 static uint32_t          s_seq;
 static uint32_t          s_overruns;
+static uint32_t          s_loop_us_max;
+static uint32_t          s_report_tick;
+static uint32_t          s_startup_grace;
+
+/* Ticks to ignore at startup before overruns count as real faults. */
+#define STARTUP_GRACE_TICKS  50u
+
+/* Periodic loop-timing report on the serial console. Costs real time - a
+   ~45 character line at 115200 baud blocks for ~4 ms, i.e. four missed ticks -
+   so the backlog it creates is discarded afterwards and it is easy to switch
+   off entirely once timing is trusted. */
+#define NEXUS_LOOP_STATS  1
 static nexus_state_t     s_state;
 
 uint32_t app_overruns(void)
@@ -105,6 +118,7 @@ void app_init(void)
     s_tick_pending = 0;
     s_seq          = 0;
     s_overruns     = 0;
+    s_startup_grace = 0;
 
     contact_init();
     enc_init();
@@ -193,15 +207,62 @@ void app_run(void)
         s_tick_pending = 0;
         critical_exit(primask);
 
-        if (pending > 1u)
+        /* Ignore the first few ticks. The very first cycle runs with a cold
+           I-cache and does one-time work, and is legitimately slow (~1.4 ms
+           measured) - counting it would latch the fault LED on every boot for
+           a condition that is not a fault. */
+        if (s_startup_grace < STARTUP_GRACE_TICKS)
+        {
+            s_startup_grace++;
+        }
+        else if (pending > 1u)
         {
             s_overruns += (pending - 1u);
         }
+
+        /* Time the actual work of one tick, in microseconds (TIM2 runs at
+           1 MHz). Measured BEFORE any printf so the diagnostic does not
+           pollute the number it is reporting. */
+        uint32_t t_start = __HAL_TIM_GET_COUNTER(&htim2);
 
         enc_start_read();
         contact_poll();
         act_tick_1khz();
         build_and_send_state();
         update_health_leds();
+
+        uint32_t dt = __HAL_TIM_GET_COUNTER(&htim2) - t_start;
+        if (dt > s_loop_us_max)
+        {
+            s_loop_us_max = dt;
+        }
+
+        /* Status line every 2 s. printf over a 115200 UART costs ~87 us per
+           character and will itself cause overruns, so the counters are
+           snapshotted first and the max is reset after reporting. */
+        if (++s_report_tick >= 2000u)
+        {
+            s_report_tick = 0;
+
+            uint32_t ovr = s_overruns;
+            uint32_t mx  = s_loop_us_max;
+
+            printf("loop max %lu us | overruns %lu | can drop %lu/%lu\r\n",
+                   (unsigned long)mx, (unsigned long)ovr,
+                   (unsigned long)act_tx_dropped(0),
+                   (unsigned long)act_tx_dropped(1));
+
+            s_loop_us_max = 0;
+
+            /* That printf blocks for ~4 ms at 115200 baud and unavoidably
+               misses 3-4 ticks. Discard the backlog WITHOUT counting it:
+               those are an artifact of the diagnostic itself, not a real
+               overrun, and letting them accumulate lights the fault LED and
+               makes the counter meaningless. Real overruns still register on
+               every other tick. */
+            uint32_t pm = critical_enter();
+            s_tick_pending = 0;
+            critical_exit(pm);
+        }
     }
 }

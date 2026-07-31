@@ -47,7 +47,17 @@ COM_InitTypeDef BspCOMInit;
 XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
-
+/*
+ * Boot progress breadcrumb. Written at each checkpoint so that when Boot dies
+ * before GPIO/serial are up - the only channels it has to report anything -
+ * the debugger can still read exactly how far it got:
+ *
+ *   STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -r32 <addr-of-g_boot_stage> 4
+ *
+ * Lives in .data (initialised non-zero) so it is not confused with cleared
+ * .bss, and volatile so the compiler cannot optimise the stores away.
+ */
+volatile uint32_t g_boot_stage = 0xFF;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/

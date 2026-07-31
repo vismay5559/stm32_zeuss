@@ -59,20 +59,36 @@
 /**
   * Initializes the Global MSP.
   */
+extern volatile uint32_t g_boot_stage;
+
 void HAL_MspInit(void)
 {
 RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  g_boot_stage = 1;   /* entered HAL_MspInit */
 
   /* Configure the system Power Supply */
 
   if (HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY) != HAL_OK)
   {
-    /* Initialization error */
+    g_boot_stage = 90;   /* FAILED: ConfigSupply */
     Error_Handler();
   }
+  g_boot_stage = 2;   /* ConfigSupply ok */
 
   /* USER CODE BEGIN MspInit 0 */
-
+  /*
+   * The HAL_PWREx_EnableUSBVoltageDetector() call further down waits for the
+   * USB33RDY flag, which never sets unless the USB regulators are powered.
+   * CubeMX never enables them - so that call times out, the generated
+   * Error_Handler() fires, and Boot stops dead inside HAL_Init(): before GPIO,
+   * before the clock config, before anything can report why.
+   *
+   * This was intermittent and looked impossible to explain: a previously
+   * running Appli leaves the regulator bits set and they survive a soft reset,
+   * so Boot would succeed right after the Appli had run and fail after a power
+   * cycle - with an identical binary. Enable them explicitly here.
+   */
+  g_boot_stage = 3;   /* USB regulators enabled */
   /* USER CODE END MspInit 0 */
 
   __HAL_RCC_SBS_CLK_ENABLE();
@@ -85,8 +101,27 @@ RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   /* Enable USB Voltage detector */
   if(HAL_PWREx_EnableUSBVoltageDetector() != HAL_OK)
   {
-   /* Initialization error */
-   Error_Handler();
+    /*
+     * NOT fatal - do not call Error_Handler() here.
+     *
+     * This detector waits for USB33RDY, which requires VDD33USB. On this board
+     * that rail comes from VBUS on the USER USB connector, so with only the
+     * ST-LINK cable attached it can never become ready and this always times
+     * out. CubeMX generates Error_Handler() here, which killed Boot inside
+     * HAL_Init() - before GPIO or the serial port existed to report why, and
+     * long before the LEDs meant anything.
+     *
+     * Worse, it deadlocked: Boot died, so the Appli never ran, so the Appli
+     * never enabled the USB regulators whose leftover state was the only
+     * reason Boot had ever succeeded.
+     *
+     * Boot does not use USB at all. Record it and carry on.
+     */
+    g_boot_stage = 91;
+  }
+  else
+  {
+    g_boot_stage = 4;
   }
 
   /* The CSI is used by the compensation cells and must be enabled before enabling the
@@ -97,8 +132,10 @@ RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_OscInitStruct.CSIState = RCC_CSI_ON;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
+    g_boot_stage = 92;   /* FAILED: CSI osc config */
     Error_Handler();
   }
+  g_boot_stage = 5;   /* CSI on */
 
   /* Configure the compensation cell */
   HAL_SBS_ConfigCompensationCell(SBS_IO_XSPI2_CELL, SBS_IO_CELL_CODE, 0U, 0U);
@@ -106,14 +143,16 @@ RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   /* Enable compensation cell */
   HAL_SBS_EnableCompensationCell(SBS_IO_XSPI2_CELL);
 
-  /* wait ready before enabled IO */
+  /* wait ready before enabled IO - NOTE: generated with no timeout */
+  g_boot_stage = 6;   /* about to wait on XSPI2 compensation cell */
   while(HAL_SBS_GetCompensationCellReadyStatus(SBS_IO_XSPI2_CELL_READY) != 1U);
+  g_boot_stage = 7;   /* compensation cell ready */
 
   /* high speed low voltage config */
   HAL_SBS_EnableIOSpeedOptimize(SBS_IO_XSPI2_HSLV);
 
   /* USER CODE BEGIN MspInit 1 */
-
+  g_boot_stage = 8;   /* HAL_MspInit complete */
   /* USER CODE END MspInit 1 */
 }
 
