@@ -78,6 +78,14 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined libraries
 )
 
+# Pull in newlib-nano's floating-point printf support.
+#
+# nano.specs links a cut-down printf that silently prints NOTHING for %f - so
+# "pos=%.4f" comes out as "pos=" with no warning at compile or run time. Any
+# diagnostic that reports a float (encoder position, velocity, torque, IMU
+# quaternions) needs this or it quietly reports blanks.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -u _printf_float)
+
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 

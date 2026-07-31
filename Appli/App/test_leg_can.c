@@ -25,15 +25,31 @@ static const char *const s_joint_name[JOINT_COUNT] = {
 };
 
 /*
- * SAFETY: with this at 0 the test never commands an axis into closed loop, so
- * the motors stay unpowered and cannot move no matter what positions are sent.
- * That makes it safe to run on a bench with the leg attached.
+ * ======================= MOTORS LIVE WHEN THIS IS 1 =======================
  *
- * Only set it to 1 once you have: the leg in a fixture and off the ground, a
- * physical e-stop within reach, and low current/velocity limits configured in
- * odrivetool. Bring up ONE node at a time before running all four.
+ * Commands each axis into CLOSED_LOOP_CONTROL over CAN (Set_Axis_State), which
+ * energises the motors. Set_Input_Pos alone does NOT do this - an IDLE axis
+ * accepts positions and stays unpowered, which is why this is separate.
+ *
+ * Before running with this at 1:
+ *   - leg in a fixture, off the ground, nothing in its swing range
+ *   - physical e-stop that cuts actuator power within reach
+ *   - low current and velocity limits set in odrivetool
+ *   - ODrive watchdog enabled (axis0.config.enable_watchdog = True) so the
+ *     actuators shut down by themselves if this firmware ever stops
+ *   - bring up ONE node at a time before running all four
+ *
+ * Set back to 0 to transmit positions without ever energising anything, which
+ * is still a complete test of the TX path.
+ * ==========================================================================
  */
-#define LEGTEST_ENABLE_CLOSED_LOOP   0
+#define LEGTEST_ENABLE_CLOSED_LOOP   1
+
+/*
+ * Delay before arming, in ticks (ms). A reset must never energise motors
+ * instantly - this gives you time to see the countdown and pull power.
+ */
+#define LEGTEST_ARM_DELAY_MS         3000u
 
 /* Motion profile. Only has any effect when closed loop is enabled above. */
 #define LEGTEST_AMPLITUDE_TURNS      0.05f   /* +/- turns, after gearbox      */
@@ -265,7 +281,6 @@ static void send_input_pos(int j, float pos)
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_POS, data, 8u);
 }
 
-#if LEGTEST_ENABLE_CLOSED_LOOP
 static void send_axis_state(int j, uint32_t state)
 {
     uint8_t data[4];
@@ -277,7 +292,6 @@ static void send_axis_state(int j, uint32_t state)
 
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_AXIS_STATE, data, 4u);
 }
-#endif
 
 /* ------------------------------------------------------------------ */
 /*  Receive - called from the FDCAN1 interrupt                         */
@@ -514,9 +528,18 @@ void legtest_run(void)
          * still gets commanded at 250 Hz, far more than enough to watch a leg
          * move.
          */
-        float phase = 2.0f * 3.14159265f * LEGTEST_FREQ_HZ *
-                      ((float)s_tick * 0.001f);
-        float target = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
+        float target = 0.0f;
+
+#if LEGTEST_ENABLE_CLOSED_LOOP
+        /* Stay at zero through the arming delay so the leg does not lurch the
+           instant the axes come live. */
+        if (s_tick > LEGTEST_ARM_DELAY_MS)
+        {
+            float t     = (float)(s_tick - LEGTEST_ARM_DELAY_MS) * 0.001f;
+            float phase = 2.0f * 3.14159265f * LEGTEST_FREQ_HZ * t;
+            target = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
+        }
+#endif
 
         if ((s_tick % LEGTEST_TX_DIV) == 0u)
         {
@@ -534,14 +557,32 @@ void legtest_run(void)
         }
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
-        /* Re-assert closed loop every 2 s: an ODrive that trips into IDLE on a
-           fault would otherwise sit there silently ignoring position commands. */
-        if ((s_tick % 2000u) == 500u)
+        /* Countdown, so a reset never energises motors without warning. */
+        if ((s_tick <= LEGTEST_ARM_DELAY_MS) && ((s_tick % 1000u) == 0u))
+        {
+            printf("*** ARMING in %lu s - motors will become live ***\r\n",
+                   (unsigned long)((LEGTEST_ARM_DELAY_MS - s_tick) / 1000u));
+        }
+
+        /*
+         * Re-assert closed loop every 2 s. An ODrive that trips into IDLE on a
+         * fault would otherwise sit there silently ignoring position commands,
+         * and the leg would look "dead" for no visible reason.
+         *
+         * Only re-arm an axis reporting no error: repeatedly forcing a faulted
+         * axis back into closed loop fights whatever protection tripped it,
+         * which is exactly the wrong response to a real fault.
+         */
+        if ((s_tick > LEGTEST_ARM_DELAY_MS) && ((s_tick % 2000u) == 500u))
         {
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                if (s_joint[j].axis_state != ODRV_AXIS_STATE_CLOSED_LOOP)
+                if ((s_joint[j].axis_state != ODRV_AXIS_STATE_CLOSED_LOOP) &&
+                    (s_joint[j].axis_error == 0u) &&
+                    (s_joint[j].n_heartbeat > 0u))
                 {
+                    printf("arming node %u (%s)\r\n",
+                           (unsigned)s_node_id[j], s_joint_name[j]);
                     send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                 }
             }

@@ -215,8 +215,8 @@ The test prints a live `bus~NN%` estimate so you can watch this directly.
 On the ODrive side, telemetry must be published cyclically:
 
 ```
-axis0.config.can.encoder_msg_rate_ms   = 1
-axis0.config.can.torque_msg_rate_ms    = 1
+axis0.config.can.encoder_msg_rate_ms   = 1     # 1 kHz - needed by the estimator
+axis0.config.can.torque_msg_rate_ms    = 4     # 250 Hz - see bus load below
 axis0.config.can.heartbeat_msg_rate_ms = 100
 ```
 
