@@ -101,7 +101,31 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /*
+   * Board smoke test. Uncomment the #define below to blink LD1 (green, PD10)
+   * forever, right after the clock comes up and BEFORE any peripheral or
+   * external-flash init runs.
+   *
+   * If it blinks, you have proven: board power, ST-LINK/SWD, the toolchain,
+   * and the 600 MHz clock tree - with nothing else able to get in the way.
+   * (A wrong clock config shows up as an obviously wrong blink rate, which
+   * makes this a clock check as well as a "is it alive" check.)
+   *
+   * Re-comment it to resume the normal boot path: Boot -> jump to the Appli
+   * living in external XSPI2 flash at 0x70000000.
+   */
+/* #define BOOT_LED_SMOKE_TEST */
+#ifdef BOOT_LED_SMOKE_TEST
+  BSP_LED_Init(LED_GREEN);
+  while (1)
+  {
+    BSP_LED_Toggle(LED_GREEN);
+    /* 1 s on, 1 s off. Count it against a watch: 5 full on-off cycles in
+       10 seconds means SysTick - and therefore the whole clock tree - is
+       running at the 600 MHz the code thinks it is. */
+    HAL_Delay(1000);
+  }
+#endif
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -387,8 +411,8 @@ static void MPU_Config(void)
   /** Initializes and configures the Region and the memory to be protected
   */
   MPU_InitStruct.Number = MPU_REGION_NUMBER2;
-  MPU_InitStruct.BaseAddress = 0x0;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_16KB;
+  MPU_InitStruct.BaseAddress = 0x24070000;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_8KB;
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;

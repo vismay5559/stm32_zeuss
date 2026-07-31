@@ -1,4 +1,5 @@
 #include "enc_as5048a.h"
+#include "critical.h"
 #include "main.h"
 #include <string.h>
 
@@ -81,9 +82,16 @@ void enc_on_dma_complete(void)
 
 void enc_get(uint16_t angle[NEXUS_NUM_ENCODERS], uint8_t *valid_mask)
 {
+    /* enc_on_dma_complete() runs in the GPDMA1 Channel 0 ISR and rewrites both
+       arrays, so read them as one indivisible step. Otherwise the valid mask
+       can describe a different sample than the angles handed back. */
+    uint32_t primask = critical_enter();
+
     for (int i = 0; i < NEXUS_NUM_ENCODERS; i++)
     {
         angle[i] = s_angle[i];
     }
     *valid_mask = s_valid;
+
+    critical_exit(primask);
 }

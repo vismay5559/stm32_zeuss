@@ -20,4 +20,11 @@ void act_set_targets(const float target_pos[NEXUS_NUM_JOINTS]);
 void act_tick_1khz(void);
 void act_get(act_telemetry_t *out);
 
+/* Moves queued frames into the hardware TX FIFO. Must be called often from
+   the main loop - see the queue comment in act_odrive.c. */
+void act_tx_pump(void);
+
+/* Non-zero means that bus is oversubscribed and frames are being lost. */
+uint32_t act_tx_dropped(uint8_t bus);
+
 #endif /* ACT_ODRIVE_H */

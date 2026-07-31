@@ -84,6 +84,25 @@ if((CMAKE_C_STANDARD EQUAL 90) OR (CMAKE_C_STANDARD EQUAL 99))
     message(ERROR "Generated code requires C11 or higher")
 endif()
 
+# Produce a .hex next to the .elf - FLASH THE .hex, NOT THE .elf.
+#
+# STM32CubeProgrammer walks every LOAD segment in an ELF and tries to erase at
+# each segment address. This ELF has two segments that hold no data at all:
+#   0x20000000  heap + stack in DTCM   (FileSiz 0)
+#   0x24070000  non-cacheable buffers  (FileSiz 0)
+# With the external loader attached - which only knows how to drive flash at
+# 0x70000000 - erasing 0x20000000 fails and the whole download aborts with
+# "Error: failed to download Sector[0]".
+#
+# A .hex only records sections that actually contain data, at their load
+# addresses, so it programs cleanly (0x70000000-0x70011600 and nothing else).
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.hex
+    COMMENT "Generating ${CMAKE_PROJECT_NAME}.hex (flash this, not the .elf)"
+)
+
 
 
 

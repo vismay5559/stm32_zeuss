@@ -79,6 +79,16 @@ if((CMAKE_C_STANDARD EQUAL 90) OR (CMAKE_C_STANDARD EQUAL 99))
     message(ERROR "Generated code requires C11 or higher")
 endif()
 
+# Produce a .hex next to the .elf, for the same reason as the Appli project:
+# CubeProgrammer tries to erase at every LOAD segment address, including the
+# zero-length DTCM segment at 0x20000000. See Appli/CMakeLists.txt for details.
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.hex
+    COMMENT "Generating ${CMAKE_PROJECT_NAME}.hex (flash this, not the .elf)"
+)
+
 
 
 

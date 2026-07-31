@@ -15,5 +15,6 @@ void imu_init(void);
 void imu_service(void);
 void imu_get(imu_sample_t *out);
 void imu_on_rx_event(uint16_t size);
+uint32_t imu_rx_events(void);
 
 #endif /* IMU_BNO085_H */

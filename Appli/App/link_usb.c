@@ -1,4 +1,5 @@
 #include "link_usb.h"
+#include "critical.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
 #include <string.h>
@@ -119,7 +120,14 @@ uint8_t link_usb_take_command(nexus_cmd_t *out)
         return 0;
     }
 
+    /* s_cmd is written by feed() from the USB OTG_HS ISR. Without this guard a
+       command arriving mid-copy blends two different frames, which would hand
+       a target position that was never sent to all ten actuators. */
+    uint32_t primask = critical_enter();
+
     memcpy(out, &s_cmd, sizeof(*out));
     s_cmd_ready = 0;
+
+    critical_exit(primask);
     return 1;
 }

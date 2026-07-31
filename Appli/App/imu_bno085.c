@@ -30,8 +30,8 @@ extern UART_HandleTypeDef huart1;
 
 static uint8_t s_dma[IMU_RX_BUF] __attribute__((section("noncacheable_buffer"), aligned(32)));
 
-static volatile uint16_t s_wr;
 static uint16_t s_rd;
+static volatile uint32_t s_rx_events;
 
 static uint8_t  s_frame[IMU_FRAME_MAX];
 static uint16_t s_flen;
@@ -238,8 +238,8 @@ void imu_init(void)
     memset(&s_sample, 0, sizeof(s_sample));
     s_sample.quat[0] = 1.0f;
 
-    s_wr    = 0;
     s_rd    = 0;
+    s_rx_events = 0;
     s_flen  = 0;
     s_esc   = 0;
     s_state = ST_WAIT_START;
@@ -255,20 +255,62 @@ void imu_init(void)
     imu_enable_report(SH2_GYRO,            IMU_REPORT_INTERVAL_US);
 }
 
+/*
+ * The DMA controller is the only thing that knows exactly how much it has
+ * written, so ask it directly instead of trusting the HAL's event callback.
+ *
+ * The callback cannot be used as a write index: in circular mode the HAL
+ * reports Size == RxXferSize (1024) on transfer-complete, but s_rd only ever
+ * counts 0..1023, so "while (s_rd != 1024)" never terminates and the whole
+ * main loop hangs.
+ *
+ * CBR1.BNDT counts *down* the bytes still to be written in the current block,
+ * so bytes_written = IMU_RX_BUF - BNDT. It reloads to IMU_RX_BUF on wrap.
+ */
+static uint16_t imu_write_index(void)
+{
+    if (huart1.hdmarx == NULL)
+    {
+        return s_rd;
+    }
+
+    uint32_t remaining = __HAL_DMA_GET_COUNTER(huart1.hdmarx);
+
+    /* remaining == 0 means the block just finished and is about to reload;
+       remaining > IMU_RX_BUF means the channel is not running yet. Both map
+       to index 0, which makes the ring drain cleanly up to the buffer end. */
+    if ((remaining == 0u) || (remaining > IMU_RX_BUF))
+    {
+        return 0u;
+    }
+
+    return (uint16_t)(IMU_RX_BUF - remaining);
+}
+
+/*
+ * Kept so main.c's HAL_UARTEx_RxEventCallback still has somewhere to go.
+ * The reported size is deliberately ignored - see imu_write_index() above.
+ */
 void imu_on_rx_event(uint16_t size)
 {
-    s_wr = size;
+    (void)size;
+    s_rx_events++;
 }
 
 void imu_service(void)
 {
-    uint16_t wr = s_wr;
+    uint16_t wr = imu_write_index();
 
     while (s_rd != wr)
     {
         feed(s_dma[s_rd]);
         s_rd = (uint16_t)((s_rd + 1u) % IMU_RX_BUF);
     }
+}
+
+uint32_t imu_rx_events(void)
+{
+    return s_rx_events;
 }
 
 void imu_get(imu_sample_t *out)

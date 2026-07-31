@@ -283,6 +283,17 @@ uint8_t CDC_Transmit_HS(uint8_t* Buf, uint16_t Len)
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 12 */
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
+
+  /* pClassData is only allocated once a USB host has enumerated and configured
+     the device (USBD_CDC_Init runs on SetConfig). With the USER USB cable
+     unplugged - which is the normal case on the bench, when only ST-LINK is
+     connected - it stays NULL. The 1 kHz loop calls this every single tick, so
+     without this guard an unplugged cable means a NULL dereference every
+     millisecond. */
+  if ((hcdc == NULL) || (hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED)){
+    return USBD_FAIL;
+  }
+
   if (hcdc->TxState != 0){
     return USBD_BUSY;
   }
