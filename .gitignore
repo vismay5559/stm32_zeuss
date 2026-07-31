@@ -1,3 +1,10 @@
 build
 mx.scratch
-!.settings
+
+# IDE / tool state (machine-specific, not useful to others)
+.settings/
+.vscode/*
+!.vscode/launch.json
+mx.scratch/
+*.map
+*.su
