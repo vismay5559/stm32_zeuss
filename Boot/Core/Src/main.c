@@ -102,6 +102,27 @@ int main(void)
 
   /* USER CODE BEGIN SysInit */
   /*
+   * Bring the ST-LINK virtual COM port up EARLY. main() only calls
+   * BSP_COM_Init much further down - long after MX_EXTMEM_MANAGER_Init() has
+   * already run and failed silently. Initialising it here means printf()
+   * works during external-memory setup, which is where the trouble is.
+   *
+   * Open a serial terminal at 115200 8N1 on the ST-LINK COM port to read it.
+   */
+  BspCOMInit.BaudRate   = 115200;
+  BspCOMInit.WordLength = COM_WORDLENGTH_8B;
+  BspCOMInit.StopBits   = COM_STOPBITS_1;
+  BspCOMInit.Parity     = COM_PARITY_NONE;
+  BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
+  (void)BSP_COM_Init(COM1, &BspCOMInit);
+
+  printf("\r\n\r\n===== nexus BOOT starting =====\r\n");
+  printf("SYSCLK = %lu Hz\r\n", (unsigned long)HAL_RCC_GetSysClockFreq());
+  printf("XSPI2 kernel clk = %lu Hz\r\n",
+         (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_XSPI2));
+  printf("--- EXTMEM init trace follows ---\r\n");
+
+  /*
    * Board smoke test. Uncomment the #define below to blink LD1 (green, PD10)
    * forever, right after the clock comes up and BEFORE any peripheral or
    * external-flash init runs.
@@ -135,7 +156,174 @@ int main(void)
   MX_XSPI2_Init();
   MX_EXTMEM_MANAGER_Init();
   /* USER CODE BEGIN 2 */
+  /*
+   * Boot progress marker. Yellow ON here means Boot got all the way through
+   * peripheral + external-memory init and is about to hand over to the Appli.
+   * The Appli turns it back OFF as the first thing it does, so:
+   *
+   *   yellow ON, red OFF   -> the jump never reached the Appli
+   *   yellow ON, red ON    -> Boot hit Error_Handler (BOOT_Application failed)
+   *   yellow OFF, red OFF  -> Appli started; hang is inside the Appli
+   *   yellow OFF, red ON   -> Appli started, MPU region check failed
+   *   yellow OFF, green 1 Hz -> everything works
+   */
+  BSP_LED_Init(LED_YELLOW);
+  BSP_LED_On(LED_YELLOW);
 
+  /*
+   * Stage-2 bisect. Uncomment to blink GREEN fast (5 Hz) right here, at the
+   * point where Boot has finished ALL init - GPIO, GPDMA, SBS, XSPI2 and
+   * EXTMEM_MANAGER - and is about to hand over to the Appli.
+   *
+   *   fast green blink -> Boot is fine; the fault is in BOOT_Application()
+   *                       or in the Appli itself
+   *   nothing          -> Boot hangs earlier, inside one of the MX_*_Init
+   *                       calls above (XSPI2 / EXTMEM_MANAGER most likely)
+   *
+   * Deliberately GREEN and deliberately a *blink*: a blinking LED cannot be
+   * confused with "off", and green at 1 Hz has already been read successfully
+   * on this board, so 5 Hz vs 1 Hz vs nothing is unambiguous.
+   */
+/* #define BOOT_STAGE2_BLINK */
+#ifdef BOOT_STAGE2_BLINK
+  BSP_LED_Init(LED_GREEN);
+  while (1)
+  {
+    BSP_LED_Toggle(LED_GREEN);
+    HAL_Delay(100);   /* 5 Hz - clearly faster than the 1 Hz heartbeat */
+  }
+#endif
+
+  /*
+   * Stage-3 bisect. Stage 2 proved Boot reaches this point, so the fault is
+   * inside BOOT_Application(). That does two things - MapMemory() then
+   * JumpToApplication() - so run them apart and report between.
+   *
+   *   yellow ON  + red ON            MapMemory() returned an error
+   *   yellow ON  + no green          MapMemory() hung
+   *   yellow OFF + red ON            reading 0x70000000 hard-faulted:
+   *                                  the XIP mapping is broken
+   *   yellow OFF + green SLOW 1 Hz   mapping works AND the data is correct;
+   *                                  fault is in JumpToApplication/the Appli
+   *   yellow OFF + green FAST 5 Hz   mapping works but reads back wrong data
+   */
+/* #define BOOT_STAGE3_TEST */
+#ifdef BOOT_STAGE3_TEST
+  {
+    extern BOOTStatus_TypeDef MapMemory(void);
+
+    BSP_LED_Init(LED_GREEN);
+    BSP_LED_Init(LED_RED);
+
+    if (BOOT_OK != MapMemory())
+    {
+      BSP_LED_On(LED_RED);
+      while (1) {}
+    }
+
+    /* MapMemory() returned OK - record that by dropping yellow. */
+    BSP_LED_Off(LED_YELLOW);
+
+    /* Now actually read through the mapping. If XIP is misconfigured this
+       faults, and HardFault_Handler lights red. */
+    uint32_t sp = *(volatile uint32_t *)0x70000000u;
+
+    /* 0x20010000 is the Appli's initial stack pointer - top of DTCM. */
+    uint32_t period = (sp == 0x20010000u) ? 500u : 100u;
+
+    while (1)
+    {
+      BSP_LED_Toggle(LED_GREEN);
+      HAL_Delay(period);
+    }
+  }
+#endif
+
+  /*
+   * Stage-4: report what EXTMEM_Init() actually returned.
+   *
+   * Stage 3 showed MapMemory() succeeding but the first memory-mapped read
+   * hanging the bus - the classic signature of enabling mapped mode on a flash
+   * that was never successfully configured. CubeMX throws away EXTMEM_Init()'s
+   * return value, so that failure has been invisible until now.
+   *
+   * GREEN blinks N times, pauses 2 s, repeats. Count the blinks:
+   *   steady 1 Hz   EXTMEM_OK - init succeeded, look elsewhere
+   *   1 blink       EXTMEM_ERROR_NOTSUPPORTED
+   *   2 blinks      EXTMEM_ERROR_UNKNOWNMEMORY
+   *   3 blinks      EXTMEM_ERROR_DRIVER      <- expected if SFDP/comms failed
+   *   4 blinks      EXTMEM_ERROR_SECTOR_SIZE
+   *   5 blinks      EXTMEM_ERROR_INVALID_ID
+   *   6 blinks      EXTMEM_ERROR_PARAM
+   */
+/* #define BOOT_STAGE4_EXTMEM_STATUS */
+#ifdef BOOT_STAGE4_EXTMEM_STATUS
+  {
+    extern EXTMEM_StatusTypeDef g_extmem_status;
+
+    BSP_LED_Init(LED_GREEN);
+    BSP_LED_Off(LED_YELLOW);
+
+    int code = (g_extmem_status == EXTMEM_OK) ? 0 : (int)(-(int)g_extmem_status);
+
+    printf("--- EXTMEM init trace end ---\r\n");
+    printf("EXTMEM_Init() returned %d (%s)\r\n", (int)g_extmem_status,
+           (g_extmem_status == EXTMEM_OK)      ? "EXTMEM_OK" :
+           (code == 1) ? "ERROR_NOTSUPPORTED"  :
+           (code == 2) ? "ERROR_UNKNOWNMEMORY" :
+           (code == 3) ? "ERROR_DRIVER"        :
+           (code == 4) ? "ERROR_SECTOR_SIZE"   :
+           (code == 5) ? "ERROR_INVALID_ID"    :
+           (code == 6) ? "ERROR_PARAM"         : "unknown");
+    printf("XSPI2 kernel clk (after MSP) = %lu Hz\r\n",
+           (unsigned long)HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_XSPI2));
+
+    if (g_extmem_status == EXTMEM_OK)
+    {
+      extern BOOTStatus_TypeDef MapMemory(void);
+
+      printf("Calling MapMemory()... ");
+      if (BOOT_OK != MapMemory())
+      {
+        printf("FAILED\r\n");
+      }
+      else
+      {
+        printf("ok\r\n");
+        printf("Reading 0x70000000 through the mapping... ");
+        uint32_t w0 = *(volatile uint32_t *)0x70000000u;
+        uint32_t w1 = *(volatile uint32_t *)0x70000004u;
+        printf("got 0x%08lX 0x%08lX\r\n", (unsigned long)w0, (unsigned long)w1);
+        printf("expected 0x20010000 0x7000FA5D\r\n");
+        printf(((w0 == 0x20010000u) && (w1 == 0x7000FA5Du))
+               ? "XIP MAPPING WORKS - Appli image is readable\r\n"
+               : "MAPPING RETURNS WRONG DATA\r\n");
+      }
+    }
+
+    printf("Boot halted here on purpose - not jumping to the Appli.\r\n");
+
+    while (1)
+    {
+      if (code == 0)
+      {
+        BSP_LED_Toggle(LED_GREEN);
+        HAL_Delay(500);              /* steady 1 Hz = init was fine */
+      }
+      else
+      {
+        for (int i = 0; i < code; i++)
+        {
+          BSP_LED_On(LED_GREEN);
+          HAL_Delay(200);
+          BSP_LED_Off(LED_GREEN);
+          HAL_Delay(200);
+        }
+        HAL_Delay(2000);             /* gap so the count is easy to read */
+      }
+    }
+  }
+#endif
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -430,7 +618,11 @@ static void MPU_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* Make the failure visible - otherwise Boot dies completely silently and
+     looks identical to "the Appli hung". */
+  BSP_LED_Init(LED_RED);
+  BSP_LED_On(LED_RED);
+
   __disable_irq();
   while (1)
   {

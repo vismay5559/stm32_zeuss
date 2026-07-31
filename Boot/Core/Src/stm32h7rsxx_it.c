@@ -84,7 +84,10 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  /* A hard fault here is otherwise completely silent - light red so a bad
+     memory access (e.g. reading through a broken XIP mapping) is visible. */
+  BSP_LED_Init(LED_RED);
+  BSP_LED_On(LED_RED);
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {

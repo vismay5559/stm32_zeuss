@@ -44,6 +44,17 @@
 #define EXTMEM_SAL_SD     0
 
 /* Includes ------------------------------------------------------------------*/
+/* --- DEBUG TRACING (temporary, for diagnosing the XIP boot failure) ---------
+ * The SFDP driver is full of trace points but they compile to nothing unless
+ * both of these are defined. Level 3 turns on the most detail. Output goes to
+ * printf, which the Nucleo BSP routes to the ST-LINK virtual COM port
+ * (USE_COM_LOG=1), so it appears in a serial terminal at 115200 baud.
+ *
+ * This header is CubeMX-generated - regeneration will drop these two lines.
+ * -------------------------------------------------------------------------*/
+#define EXTMEM_DRIVER_NOR_SFDP_DEBUG_LEVEL  3
+#define EXTMEM_MACRO_DEBUG(...)             printf(__VA_ARGS__)
+
 #include "stm32h7rsxx_hal.h"
 #include "stm32_extmem.h"
 #include "stm32_extmem_type.h"

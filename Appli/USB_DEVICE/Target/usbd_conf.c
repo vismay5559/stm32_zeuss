@@ -67,7 +67,15 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
   if(pcdHandle->Instance==USB_OTG_HS)
   {
   /* USER CODE BEGIN USB_OTG_HS_MspInit 0 */
-
+  /*
+   * The embedded USB HS PHY needs its supplies up BEFORE anything touches a
+   * USB register. CubeMX only generates the USB voltage-detector call below,
+   * and never enables the regulators that the detector is waiting on - so it
+   * times out (its return value is discarded), the PHY stays unpowered, and a
+   * later PHY access hangs the CPU with no fault and no message.
+   */
+  HAL_PWREx_EnableUSBReg();
+  HAL_PWREx_EnableUSBHSregulator();
   /* USER CODE END USB_OTG_HS_MspInit 0 */
 
   /** Initializes the peripherals clock

@@ -92,6 +92,13 @@ static void update_health_leds(void)
 
 void app_init(void)
 {
+    /* Clear the marker Boot left on. Doing this first - before anything that
+       could hang - means yellow staying lit points the finger squarely at the
+       Boot-to-Appli handover rather than at anything in here.
+       main() has not run its BSP_LED_Init calls yet, hence the init here. */
+    BSP_LED_Init(LED_YELLOW);
+    BSP_LED_Off(LED_YELLOW);
+
     check_noncacheable_region();
 
     memset(&s_state, 0, sizeof(s_state));

@@ -29,6 +29,19 @@
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
 
+/* Result of EXTMEM_Init(). 0 = EXTMEM_OK, negative values are the
+   EXTMEM_ERROR_* codes in stm32_extmem.h. */
+EXTMEM_StatusTypeDef g_extmem_status;
+
+/* Number of data lines used to talk to the external flash.
+   CubeMX configures 8LINES (octal). Lowering it is a useful bisect: SFDP init
+   fails at step 11 (re-reading the SFDP header through the freshly configured
+   octal mode), so if 1LINE succeeds the fault is in the switch into octal
+   mode - not the wiring, the chip, or the SFDP data. */
+#ifndef NEXUS_EXTMEM_LINES
+#define NEXUS_EXTMEM_LINES  EXTMEM_LINK_CONFIG_1LINE
+#endif
+
 /* USER CODE END PV */
 
 /* USER CODE BEGIN PFP */
@@ -68,9 +81,12 @@ void MX_EXTMEM_MANAGER_Init(void)
   /* EXTMEMORY_1 */
   extmem_list_config[0].MemType = EXTMEM_NOR_SFDP;
   extmem_list_config[0].Handle = (void*)&hxspi2;
-  extmem_list_config[0].ConfigType = EXTMEM_LINK_CONFIG_8LINES;
+  extmem_list_config[0].ConfigType = NEXUS_EXTMEM_LINES;
 
-  EXTMEM_Init(EXTMEMORY_1, HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_XSPI2));
+  /* NOTE: CubeMX generates this call with the return value discarded, which is
+     why a failed SFDP discovery is completely silent and only shows up later as
+     a hung memory-mapped read. Captured here so Boot can report it. */
+  g_extmem_status = EXTMEM_Init(EXTMEMORY_1, HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_XSPI2));
 
   /* USER CODE BEGIN MX_EXTMEM_Init_PostTreatment */
 

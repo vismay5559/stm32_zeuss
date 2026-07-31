@@ -120,22 +120,50 @@ int main(void)
   /* USER CODE END Init */
 
   /* USER CODE BEGIN SysInit */
+  /* Serial up early so the Appli can report progress on the ST-LINK VCOM
+     (115200 8N1), same channel Boot uses. */
+  BspCOMInit.BaudRate   = 115200;
+  BspCOMInit.WordLength = COM_WORDLENGTH_8B;
+  BspCOMInit.StopBits   = COM_STOPBITS_1;
+  BspCOMInit.Parity     = COM_PARITY_NONE;
+  BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
+  (void)BSP_COM_Init(COM1, &BspCOMInit);
 
+  printf("\r\n>>> APPLI running from XIP at 0x70000000 <<<\r\n");
+  printf("APPLI: starting peripheral init\r\n");
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_GPDMA1_Init();
-  MX_FDCAN1_Init();
-  MX_FDCAN2_Init();
-  MX_SPI1_Init();
-  MX_USART1_UART_Init();
-  MX_TIM2_Init();
-  MX_TIM6_Init();
-  MX_USB_DEVICE_Init();
-  MX_XSPI2_Init();
+  /* TEMPORARY per-peripheral tracing: whichever line prints last is the one
+     that hung. Remove once the Appli boots cleanly. */
+  printf("  GPIO...\r\n");    MX_GPIO_Init();
+  printf("  GPDMA1...\r\n");  MX_GPDMA1_Init();
+  printf("  FDCAN1...\r\n");  MX_FDCAN1_Init();
+  printf("  FDCAN2...\r\n");  MX_FDCAN2_Init();
+  printf("  SPI1...\r\n");    MX_SPI1_Init();
+  printf("  USART1...\r\n");  MX_USART1_UART_Init();
+  printf("  TIM2...\r\n");    MX_TIM2_Init();
+  printf("  TIM6...\r\n");    MX_TIM6_Init();
+  printf("  USB...\r\n");     MX_USB_DEVICE_Init();
+  printf("  (XSPI2 skipped - we are executing from it)\r\n");
+  /*
+   * MX_XSPI2_Init() DELIBERATELY DISABLED.
+   *
+   * This application executes in place from the external flash behind XSPI2.
+   * Boot already configured that peripheral and put it into memory-mapped mode
+   * before jumping here. Re-initialising it from code that is itself being
+   * fetched through it tears down the mapping, and the very next instruction
+   * fetch hangs the bus forever - no crash, no fault, just a frozen CPU.
+   *
+   * CubeMX generates this call because XSPI2 is enabled in the Appli context.
+   * If you regenerate, comment it out again (or drop XSPI2 from the Appli
+   * context in the .ioc).
+   */
+  /* MX_XSPI2_Init(); */
   /* USER CODE BEGIN 2 */
+  printf("APPLI: peripheral init done, entering app_init()\r\n");
   app_init();
+  printf("APPLI: app_init() done\r\n");
   /* USER CODE END 2 */
 
   /* Initialize leds */
