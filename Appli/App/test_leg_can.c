@@ -47,8 +47,33 @@ static const char *const s_joint_name[JOINT_COUNT] = {
  */
 #define LEGTEST_USE_CAN_FD           1
 
+/*
+ * How often each joint gets a Set_Input_Pos, as a divider on the 1 kHz tick.
+ *   1 = 1 kHz per joint  (4 TX frames every tick)
+ *   4 = 250 Hz per joint (one joint per tick, round-robin)
+ *
+ * At 1 kHz with encoder+torque telemetry also at 1 kHz, this bus carries
+ * 3 frames per node per ms = 12 frames/ms for four nodes. At the current
+ * 1 Mbit nominal / 5 Mbit data that is ~50 us per frame, so ~60% bus load -
+ * workable for a four-node leg, but see the note in README about raising the
+ * NOMINAL bitrate before all five nodes per bus go live.
+ */
+#define LEGTEST_TX_DIV               1u
+
 /* Consider a node dead if nothing has been heard from it for this long. */
 #define NODE_SILENT_TICKS            500u    /* ms */
+
+/*
+ * Approximate time one 8-byte frame occupies the bus, used only to report an
+ * estimated load figure. Small 8-byte frames are dominated by the arbitration
+ * phase, which runs at the NOMINAL rate - which is why raising the nominal
+ * bitrate helps far more than raising the data bitrate.
+ */
+#if LEGTEST_USE_CAN_FD
+#define FRAME_US                     50u     /* 1 Mbit arb + 5 Mbit data */
+#else
+#define FRAME_US                     121u    /* classic 1 Mbit           */
+#endif
 
 /* ===================================================================== */
 
@@ -121,6 +146,57 @@ static uint32_t le_u32(const uint8_t *p)
 /*  Transmit                                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Software transmit queue.
+ *
+ * The hardware TX FIFO on this part is fixed at three entries, but a 1 kHz
+ * tick wants to hand over four Set_Input_Pos frames at once. Pushing all four
+ * straight at the hardware silently loses one - so frames go into this ring
+ * and tx_pump() feeds the FIFO as space frees up.
+ *
+ * Producer (the tick) and consumer (tx_pump) both run in main-loop context,
+ * never in an ISR, so no locking is needed.
+ */
+#define TXQ_LEN   32u                  /* power of two */
+#define TXQ_MASK  (TXQ_LEN - 1u)
+
+typedef struct
+{
+    uint32_t identifier;
+    uint8_t  data[8];
+    uint8_t  len;
+} txq_entry_t;
+
+static txq_entry_t s_txq[TXQ_LEN];
+static uint8_t     s_txq_head;
+static uint8_t     s_txq_tail;
+static uint32_t    s_tx_ok;
+static uint32_t    s_txq_drop;
+
+static void tx_enqueue(uint32_t node, uint32_t cmd, const uint8_t *data, uint32_t len)
+{
+    uint8_t next = (uint8_t)((s_txq_head + 1u) & TXQ_MASK);
+
+    if (next == s_txq_tail)
+    {
+        /*
+         * Queue full - the bus is not draining. Discard the OLDEST entry, not
+         * this one: these are position setpoints, and a stale setpoint is
+         * worthless while the newest is exactly what the actuator should get.
+         * Dropping the newest instead would leave the queue full of commands
+         * from seconds ago and effectively freeze the leg once the bus
+         * recovered.
+         */
+        s_txq_tail = (uint8_t)((s_txq_tail + 1u) & TXQ_MASK);
+        s_txq_drop++;
+    }
+
+    s_txq[s_txq_head].identifier = (node << 5) | cmd;
+    s_txq[s_txq_head].len        = (uint8_t)len;
+    memcpy(s_txq[s_txq_head].data, data, len);
+    s_txq_head = next;
+}
+
 static uint8_t can_send(uint32_t node, uint32_t cmd, const uint8_t *data, uint32_t len)
 {
     FDCAN_TxHeaderTypeDef hdr;
@@ -145,7 +221,29 @@ static uint8_t can_send(uint32_t node, uint32_t cmd, const uint8_t *data, uint32
         s_tx_fail++;
         return 0;
     }
+    s_tx_ok++;
     return 1;
+}
+
+/* Move queued frames into the hardware FIFO. Call often from the main loop. */
+static void tx_pump(void)
+{
+    while (s_txq_tail != s_txq_head)
+    {
+        if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0u)
+        {
+            break;                      /* hardware full, retry next pass */
+        }
+
+        const txq_entry_t *e = &s_txq[s_txq_tail];
+
+        if (!can_send(e->identifier >> 5, e->identifier & 0x1Fu, e->data, e->len))
+        {
+            break;                      /* leave it queued rather than lose it */
+        }
+
+        s_txq_tail = (uint8_t)((s_txq_tail + 1u) & TXQ_MASK);
+    }
 }
 
 static void send_input_pos(int j, float pos)
@@ -164,7 +262,7 @@ static void send_input_pos(int j, float pos)
     data[7] = 0;
 
     s_joint[j].cmd = pos;
-    (void)can_send(s_node_id[j], ODRV_CMD_SET_INPUT_POS, data, 8u);
+    tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_POS, data, 8u);
 }
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
@@ -177,7 +275,7 @@ static void send_axis_state(int j, uint32_t state)
     data[2] = (uint8_t)((state >> 16) & 0xFFu);
     data[3] = (uint8_t)((state >> 24) & 0xFFu);
 
-    (void)can_send(s_node_id[j], ODRV_CMD_SET_AXIS_STATE, data, 4u);
+    tx_enqueue(s_node_id[j], ODRV_CMD_SET_AXIS_STATE, data, 4u);
 }
 #endif
 
@@ -272,6 +370,10 @@ void legtest_init(void)
     s_tick_pending = 0;
     s_tick         = 0;
     s_tx_fail      = 0;
+    s_tx_ok        = 0;
+    s_txq_drop     = 0;
+    s_txq_head     = 0;
+    s_txq_tail     = 0;
 
     BSP_LED_Init(LED_GREEN);
     BSP_LED_Init(LED_YELLOW);
@@ -317,9 +419,28 @@ static void report(void)
     uint32_t now = s_tick;
     int      silent = 0;
 
-    printf("--- t=%lus  rx=%lu (unknown=%lu)  txfail=%lu ---\r\n",
-           (unsigned long)(now / 1000u), (unsigned long)s_rx_total,
-           (unsigned long)s_rx_unknown, (unsigned long)s_tx_fail);
+    /*
+     * Estimated bus load over the last second. Frames on the wire are what
+     * matter, so count what we successfully sent plus everything received.
+     * This is the number to watch when raising rates: past roughly 50% the
+     * latency of lower-priority frames starts to degrade badly, and past 70%
+     * it becomes effectively unbounded.
+     */
+    static uint32_t prev_tx_ok, prev_rx;
+
+    uint32_t d_tx = s_tx_ok - prev_tx_ok;
+    uint32_t d_rx = s_rx_total - prev_rx;
+    prev_tx_ok = s_tx_ok;
+    prev_rx    = s_rx_total;
+
+    uint32_t load_pct = ((d_tx + d_rx) * FRAME_US) / 10000u;   /* per second */
+
+    printf("--- t=%lus  tx=%lu rx=%lu (unknown=%lu)  txfail=%lu qdrop=%lu  "
+           "bus~%lu%% ---\r\n",
+           (unsigned long)(now / 1000u), (unsigned long)d_tx,
+           (unsigned long)d_rx, (unsigned long)s_rx_unknown,
+           (unsigned long)s_tx_fail, (unsigned long)s_txq_drop,
+           (unsigned long)load_pct);
 
     for (int j = 0; j < JOINT_COUNT; j++)
     {
@@ -370,6 +491,11 @@ void legtest_run(void)
 
     for (;;)
     {
+        /* Keep feeding the 3-deep hardware FIFO from the software queue. This
+           runs far more often than once per tick, so a tick's worth of frames
+           reaches the wire well inside that tick. */
+        tx_pump();
+
         if (s_tick_pending == 0u)
         {
             continue;
@@ -392,8 +518,20 @@ void legtest_run(void)
                       ((float)s_tick * 0.001f);
         float target = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
 
-        send_input_pos(tx_slot, target);
-        tx_slot = (tx_slot + 1) % JOINT_COUNT;
+        if ((s_tick % LEGTEST_TX_DIV) == 0u)
+        {
+#if (LEGTEST_TX_DIV == 1u)
+            /* Full rate: command every joint on every tick. */
+            for (int j = 0; j < JOINT_COUNT; j++)
+            {
+                send_input_pos(j, target);
+            }
+#else
+            /* Reduced rate: one joint per tick, round-robin. */
+            send_input_pos(tx_slot, target);
+            tx_slot = (tx_slot + 1) % JOINT_COUNT;
+#endif
+        }
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
         /* Re-assert closed loop every 2 s: an ODrive that trips into IDLE on a

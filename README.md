@@ -180,16 +180,43 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 | `LEGTEST_AMPLITUDE_TURNS` | 0.05 | Only matters with closed loop on |
 | `LEGTEST_FREQ_HZ` | 0.25 | Slow enough to watch |
 | `LEGTEST_USE_CAN_FD` | 1 | Set to 0 for classic CAN 2.0 @ 1 Mbit if your ODrive firmware does not do FD |
+| `LEGTEST_TX_DIV` | 1 | 1 = 1 kHz per joint, 4 = 250 Hz per joint |
 
-Commands are sent **one node per tick, round-robin**, so each joint is driven
-at 250 Hz. That deliberately avoids the 3-deep hardware TX FIFO overflowing
-with four nodes, and keeps the bus evenly loaded instead of bursting.
+Commands go out at **1 kHz to every joint** (`LEGTEST_TX_DIV 1`). Because the
+hardware TX FIFO is fixed at three entries and a tick hands over four frames,
+they pass through a software queue that `tx_pump()` drains as space frees.
+Set `LEGTEST_TX_DIV` to 4 for one joint per tick (250 Hz each) if you want to
+halve bus load during early bring-up.
+
+When the queue is full it discards the **oldest** entry. These are position
+setpoints: a stale setpoint is worthless, the newest is exactly what the
+actuator should receive, and dropping the newest instead would leave the queue
+full of seconds-old commands that would replay when the bus recovered.
+
+### Bus load
+
+With `set_input_pos`, `encoder` and `torque` all at 1 kHz, each node needs
+3 frames/ms. Small 8-byte frames are dominated by the **arbitration phase**,
+which runs at the *nominal* bitrate — so raising the nominal rate helps far
+more than raising the data rate.
+
+| | frames/ms | 1M nominal | 2M nominal |
+|---|---|---|---|
+| 4 nodes (this leg test) | 12 | 60% — tight | 42% — ok |
+| 5 nodes (full robot, per bus) | 15 | **76% — too high** | 52% — tight |
+
+Past roughly 50% the latency of lower-priority frames degrades badly; past 70%
+it is effectively unbounded. **Four nodes at full rate works today. Five will
+not**, so before the second leg goes on, either raise the nominal bitrate
+(both here and in ODrive) or drop torque telemetry to ~250 Hz.
+
+The test prints a live `bus~NN%` estimate so you can watch this directly.
 
 On the ODrive side, telemetry must be published cyclically:
 
 ```
-axis0.config.can.encoder_msg_rate_ms   = 10
-axis0.config.can.torque_msg_rate_ms    = 10
+axis0.config.can.encoder_msg_rate_ms   = 1
+axis0.config.can.torque_msg_rate_ms    = 1
 axis0.config.can.heartbeat_msg_rate_ms = 100
 ```
 
@@ -203,15 +230,32 @@ Output, once per second:
 
 Reading it:
 
-- **`txfail` climbing at ~1000/s means nobody is on the bus.** CAN needs
-  another node to acknowledge every frame; with no transceiver or no powered
-  ODrive, nothing ACKs, retransmission fills the FIFO, and all sends fail.
-  This is your *first* proof of working wiring — it drops to ~0 before any
-  telemetry appears.
+- **`qdrop` climbing fast means nobody is on the bus.** CAN needs another node
+  to acknowledge every frame; with no transceiver or no powered ODrive nothing
+  ACKs, the three hardware slots never free, and the software queue backs up.
+  Watching `tx` go from ~3 to the full rate — and `qdrop` stop climbing — is
+  your *first* proof of working wiring, before any telemetry appears.
+- `bus~NN%` is the estimated bus load. Keep it under ~50%.
 - `rx` climbing and `hb`/`enc`/`trq` rising per node = that node is healthy.
 - `unknown` counts frames from node IDs you did not configure — a
   misconfigured ODrive shows up here rather than vanishing.
 - `SILENT` = nothing heard from that node for 500 ms.
+
+### Enabling closed loop
+
+`Set_Input_Pos` only sets the **target**. Whether the motor acts on it depends
+on the axis *state*, which is separate — an axis in `IDLE` (state 1) accepts
+the position and does nothing, motor unpowered. To reach
+`CLOSED_LOOP_CONTROL` (state 8):
+
+| Method | How |
+|---|---|
+| odrivetool — best for first bring-up | `odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL` |
+| Over CAN | `Set_Axis_State` (0x007), payload uint32 `8` — what `LEGTEST_ENABLE_CLOSED_LOOP` sends |
+| ODrive auto-start | `axis0.config.startup_closed_loop_control = True` |
+
+The `state=` field in the test output shows this live, so you can confirm
+before anything moves.
 
 **Bench safety before enabling closed loop:** leg in a fixture and off the
 ground, physical e-stop within reach, low current and velocity limits set in
