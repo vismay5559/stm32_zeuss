@@ -135,9 +135,20 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
     inekf_real_t *Phi = f->Phi;
     lg_matn_identity(Phi, NDIM);
 
-    inekf_real_t G0T[9], Sg[9], I3[9], blk[9];
-    lg_mat3_transpose(G0T, G0);
-    lg_matn_set_block3(Phi, INEKF_IDX_PHI, INEKF_IDX_PHI, G0T);
+    inekf_real_t Sg[9], I3[9], blk[9];
+
+    /*
+     * Phi(phi,phi) stays IDENTITY - see equation 58.
+     *
+     * This is the whole point of the right-invariant formulation: the rotation
+     * error does not rotate, so the linearised error dynamics do not depend on
+     * the state estimate. Gamma0^T belongs in the LEFT-invariant Phi^l
+     * (equation 55), where the error is expressed in the body frame.
+     *
+     * The Python puts Gamma0^T here, which quietly turns this back into the
+     * state-dependent linearisation the InEKF exists to avoid - exactly the
+     * QEKF behaviour the paper compares against and beats.
+     */
 
     lg_skew(Sg, g);
     lg_matn_set_block3_scaled(Phi, INEKF_IDX_V, INEKF_IDX_PHI, Sg, dt);
@@ -214,25 +225,77 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
     inekf_real_t *Qb = f->tmpA;
     lg_matn_zero(Qb, NDIM);
 
-    inekf_real_t RRt[9];
-    lg_mat3_mul_bt(RRt, f->R, f->R);   /* = I for an exact rotation, but this
-                                          tracks any drift in R rather than
-                                          assuming it away */
     const inekf_params_t *q = &f->params;
-    for (int i = 0; i < 3; i++)
-    {
-        Qb[IDX(INEKF_IDX_PHI + i, INEKF_IDX_PHI + i)] = q->noise_gyro * q->noise_gyro;
-        Qb[IDX(INEKF_IDX_BG  + i, INEKF_IDX_BG  + i)] = q->noise_gyro_bias * q->noise_gyro_bias;
-        Qb[IDX(INEKF_IDX_BA  + i, INEKF_IDX_BA  + i)] = q->noise_accel_bias * q->noise_accel_bias;
-    }
-    lg_matn_set_block3_scaled(Qb, INEKF_IDX_V, INEKF_IDX_V, RRt,
-                              q->noise_accel * q->noise_accel);
+
+    /*
+     * Q_bar = Ad_X * Cov(w) * Ad_X^T   (equation 28)
+     *
+     * Ad (equation 63) is NOT block diagonal: its first block-column is
+     *     [ R ; (v)_x R ; (p)_x R ; (d_k)_x R ]
+     * so GYRO noise leaks into velocity, position and every contact, with
+     * cross-covariances between them. Both the Python and the first version of
+     * this port dropped all of that and used a diagonal Q_bar. The omitted
+     * terms scale with |v|, |p| and |d| - negligible near the origin, but they
+     * grow as the robot walks away from where it started, which is precisely
+     * when the covariance most needs to be honest.
+     *
+     * Forming the full 21x21 adjoint and doing two more products would cost
+     * ~18k multiply-accumulates. It is not needed: for isotropic noise
+     * R*Sigma*R^T = sigma^2*I, so every block collapses to
+     *
+     *     Q[a][b] = sigma_g^2 * Pa * Pb^T  (+ the direct noise on the diagonal)
+     *
+     * where Pa is I for phi, (v)_x for v, (p)_x for p and (d_k)_x for contacts.
+     * That is a handful of 3x3 products.
+     */
+    inekf_real_t pre[2 + INEKF_MAX_CONTACTS][9];   /* prefix per block row */
+    int          row[2 + INEKF_MAX_CONTACTS];
+    int          nrow = 0;
+
+    lg_mat3_identity(pre[nrow]); row[nrow] = INEKF_IDX_PHI; nrow++;
+    lg_skew(pre[nrow], f->v);    row[nrow] = INEKF_IDX_V;   nrow++;
+    lg_skew(pre[nrow], f->p);    row[nrow] = INEKF_IDX_P;   nrow++;
     for (int k = 0; k < INEKF_MAX_CONTACTS; k++)
     {
         if (f->active[k])
         {
-            lg_matn_set_block3_scaled(Qb, INEKF_IDX_D(k), INEKF_IDX_D(k), RRt,
-                                      q->noise_contact_vel * q->noise_contact_vel);
+            lg_skew(pre[nrow], f->d[k]);
+            row[nrow] = INEKF_IDX_D(k);
+            nrow++;
+        }
+    }
+
+    const inekf_real_t sg2 = q->noise_gyro * q->noise_gyro;
+
+    for (int a = 0; a < nrow; a++)
+    {
+        for (int b = 0; b < nrow; b++)
+        {
+            inekf_real_t blk3[9];
+            lg_mat3_mul_bt(blk3, pre[a], pre[b]);      /* Pa * Pb^T */
+            lg_matn_set_block3_scaled(Qb, row[a], row[b], blk3, sg2);
+        }
+    }
+
+    /* Direct noise that does not come through the adjoint's first column:
+       accelerometer on velocity, foot slip on each contact, bias random walk.
+       R*Sigma*R^T = sigma^2*I for isotropic Sigma, so these are plain adds. */
+    for (int i = 0; i < 3; i++)
+    {
+        Qb[IDX(INEKF_IDX_V + i, INEKF_IDX_V + i)] += q->noise_accel * q->noise_accel;
+        Qb[IDX(INEKF_IDX_BG + i, INEKF_IDX_BG + i)] = q->noise_gyro_bias * q->noise_gyro_bias;
+        Qb[IDX(INEKF_IDX_BA + i, INEKF_IDX_BA + i)] = q->noise_accel_bias * q->noise_accel_bias;
+    }
+    for (int k = 0; k < INEKF_MAX_CONTACTS; k++)
+    {
+        if (!f->active[k])
+        {
+            continue;
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            Qb[IDX(INEKF_IDX_D(k) + i, INEKF_IDX_D(k) + i)] +=
+                q->noise_contact_vel * q->noise_contact_vel;
         }
     }
 
