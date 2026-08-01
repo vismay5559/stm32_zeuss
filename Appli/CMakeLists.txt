@@ -62,6 +62,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/contact.c
     App/health.c
     App/lie_group.c
+    App/kinematics.c
     App/test_leg_can.c
     App/test_imu.c
     App/enc_as5048a.c
