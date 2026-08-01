@@ -66,7 +66,6 @@ DMA_NodeTypeDef Node_GPDMA1_Channel2 __attribute__((section("noncacheable_buffer
 DMA_QListTypeDef List_GPDMA1_Channel2;
 DMA_HandleTypeDef handle_GPDMA1_Channel2;
 
-XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
 
@@ -81,7 +80,6 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM6_Init(void);
-static void MX_XSPI2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -148,21 +146,20 @@ int main(void)
   printf("  TIM2...\r\n");    MX_TIM2_Init();
   printf("  TIM6...\r\n");    MX_TIM6_Init();
   printf("  USB...\r\n");     MX_USB_DEVICE_Init();
-  printf("  (XSPI2 skipped - we are executing from it)\r\n");
   /*
-   * MX_XSPI2_Init() DELIBERATELY DISABLED.
+   * XSPI2 is deliberately NOT initialised here.
    *
    * This application executes in place from the external flash behind XSPI2.
-   * Boot already configured that peripheral and put it into memory-mapped mode
-   * before jumping here. Re-initialising it from code that is itself being
-   * fetched through it tears down the mapping, and the very next instruction
-   * fetch hangs the bus forever - no crash, no fault, just a frozen CPU.
+   * Boot configures that peripheral and puts it into memory-mapped mode before
+   * jumping here; re-initialising it from code being fetched through it tears
+   * down the mapping and the next instruction fetch hangs the bus forever -
+   * no crash, no fault, just a frozen CPU the debugger cannot even attach to.
    *
-   * CubeMX generates this call because XSPI2 is enabled in the Appli context.
-   * If you regenerate, comment it out again (or drop XSPI2 from the Appli
-   * context in the .ioc).
+   * XSPI2 has now been removed from the Appli context in the .ioc, so CubeMX
+   * no longer generates the call at all. Previously it regenerated every time
+   * and had to be commented out by hand.
    */
-  /* MX_XSPI2_Init(); */
+
   /* USER CODE BEGIN 2 */
 #if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   printf("APPLI: mode = LEG_CAN (CAN-FD single leg test)\r\n");
@@ -512,56 +509,6 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
-  * @brief XSPI2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_XSPI2_Init(void)
-{
-
-  /* USER CODE BEGIN XSPI2_Init 0 */
-
-  /* USER CODE END XSPI2_Init 0 */
-
-  XSPIM_CfgTypeDef sXspiManagerCfg = {0};
-
-  /* USER CODE BEGIN XSPI2_Init 1 */
-
-  /* USER CODE END XSPI2_Init 1 */
-  /* XSPI2 parameter configuration*/
-  hxspi2.Instance = XSPI2;
-  hxspi2.Init.FifoThresholdByte = 4;
-  hxspi2.Init.MemoryMode = HAL_XSPI_SINGLE_MEM;
-  hxspi2.Init.MemoryType = HAL_XSPI_MEMTYPE_MACRONIX;
-  hxspi2.Init.MemorySize = HAL_XSPI_SIZE_256MB;
-  hxspi2.Init.ChipSelectHighTimeCycle = 2;
-  hxspi2.Init.FreeRunningClock = HAL_XSPI_FREERUNCLK_DISABLE;
-  hxspi2.Init.ClockMode = HAL_XSPI_CLOCK_MODE_0;
-  hxspi2.Init.WrapSize = HAL_XSPI_WRAP_NOT_SUPPORTED;
-  hxspi2.Init.ClockPrescaler = 3;
-  hxspi2.Init.SampleShifting = HAL_XSPI_SAMPLE_SHIFT_NONE;
-  hxspi2.Init.ChipSelectBoundary = HAL_XSPI_BONDARYOF_NONE;
-  hxspi2.Init.MaxTran = 0;
-  hxspi2.Init.Refresh = 0;
-  hxspi2.Init.MemorySelect = HAL_XSPI_CSSEL_NCS1;
-  if (HAL_XSPI_Init(&hxspi2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sXspiManagerCfg.nCSOverride = HAL_XSPI_CSSEL_OVR_NCS1;
-  sXspiManagerCfg.IOPort = HAL_XSPIM_IOPORT_2;
-  sXspiManagerCfg.Req2AckTime = 1;
-  if (HAL_XSPIM_Config(&hxspi2, &sXspiManagerCfg, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN XSPI2_Init 2 */
-
-  /* USER CODE END XSPI2_Init 2 */
 
 }
 
