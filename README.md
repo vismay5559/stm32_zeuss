@@ -160,7 +160,7 @@ build time in `Appli/App/nexus_mode.h`:
 |---|---|
 | `NEXUS_MODE_ROBOT` | Everything — the real 1 kHz loop |
 | `NEXUS_MODE_LEG_CAN` | **CAN-FD only.** One leg, 4 ODrives |
-| `NEXUS_MODE_IMU` | *(planned)* IMU only |
+| `NEXUS_MODE_IMU` | **IMU only.** BNO085 over UART |
 
 Change it, rebuild, reflash the Appli. `main()` dispatches on it; unused code
 is simply never entered.
@@ -262,6 +262,41 @@ ground, physical e-stop within reach, low current and velocity limits set in
 odrivetool, and bring up one node at a time before running all four. Also
 enable ODrive's own watchdog (`axis0.config.enable_watchdog`) — that is the
 layer that protects the hardware if this firmware stops.
+
+### `NEXUS_MODE_IMU` - BNO085 over UART
+
+Exercises **USART1 only** (PA9 tx / PA10 rx, 3 Mbaud) - no CAN, no encoders,
+no USB. Asks the BNO085 for rotation vector, linear acceleration and gyro at
+400 Hz over SHTP, then prints them.
+
+```
+q[w,x,y,z]=+0.9998 +0.0121 -0.0043 +0.0155 |q|=1.000  a[m/s2]= +0.021 -0.014 +0.008  w[rad/s]= +0.001 -0.002 +0.000
+  >> 400 samples/s (want 400), 400 frames/s, 17600 bytes/s   OK
+```
+
+Data lines are throttled to 5/s because a 115200 console cannot carry 400 -
+but the **rate is measured over every sample**, so throttling never hides a
+rate problem.
+
+Two things worth understanding in that output:
+
+- **`|q|` is a free correctness check.** A unit quaternion always has norm 1.
+  If it is not ~1.000 the bytes are being misinterpreted - wrong Q-point,
+  misaligned report, wrong report id - even when the numbers look plausible.
+- **`bytes/s` and `frames/s` separate wiring faults from protocol faults**,
+  which otherwise look identical:
+
+| Symptom | Meaning |
+|---|---|
+| `bytes/s = 0` | Nothing on the wire — TX/RX swapped, no power, no common ground |
+| bytes but `frames/s = 0` | Wrong baud, or the IMU is in **UART-RVC** mode instead of **UART-SHTP** |
+| frames but `samples/s = 0` | Framing fine, but `SET_FEATURE` did not take |
+| `samples/s` well under 400 | Running, but not at the requested rate |
+
+Wiring: STM32 **PA9 → IMU RX**, STM32 **PA10 → IMU TX**, common ground, and the
+BNO085 must be strapped for **UART-SHTP** mode (PS0/PS1 select the interface —
+not I2C, not SPI, and not UART-RVC, which is a different fixed-100 Hz protocol
+this driver does not speak).
 
 ## Diagnostics
 

@@ -17,4 +17,9 @@ void imu_get(imu_sample_t *out);
 void imu_on_rx_event(uint16_t size);
 uint32_t imu_rx_events(void);
 
+/* Diagnostics: raw bytes off the UART, and valid SHTP frames parsed out of
+   them. Together they separate a wiring fault from a protocol fault. */
+uint32_t imu_rx_bytes(void);
+uint32_t imu_frames(void);
+
 #endif /* IMU_BNO085_H */

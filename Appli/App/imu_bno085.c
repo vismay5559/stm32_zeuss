@@ -33,6 +33,19 @@ static uint8_t s_dma[IMU_RX_BUF] __attribute__((section("noncacheable_buffer"), 
 static uint16_t s_rd;
 static volatile uint32_t s_rx_events;
 
+/*
+ * Diagnostic counters. These separate three very different failures that all
+ * look identical from the outside ("no IMU data"):
+ *   bytes  == 0  -> nothing on the wire at all: TX/RX swapped, no power, no ground
+ *   bytes  >  0 but frames == 0 -> bytes arriving but no valid SHTP framing:
+ *                                  wrong baud rate, or the IMU is in UART-RVC
+ *                                  mode rather than SHTP
+ *   frames >  0 but samples == 0 -> framing fine, but no report we asked for:
+ *                                  the SET_FEATURE commands did not take
+ */
+static volatile uint32_t s_bytes;
+static volatile uint32_t s_frames;
+
 static uint8_t  s_frame[IMU_FRAME_MAX];
 static uint16_t s_flen;
 static uint8_t  s_esc;
@@ -156,6 +169,8 @@ static void parse_shtp(const uint8_t *f, uint16_t n)
         return;
     }
 
+    s_frames++;
+
     if (f[2] != SHTP_CH_INPUT_REPORT)
     {
         return;
@@ -240,6 +255,8 @@ void imu_init(void)
 
     s_rd    = 0;
     s_rx_events = 0;
+    s_bytes     = 0;
+    s_frames    = 0;
     s_flen  = 0;
     s_esc   = 0;
     s_state = ST_WAIT_START;
@@ -303,6 +320,7 @@ void imu_service(void)
 
     while (s_rd != wr)
     {
+        s_bytes++;
         feed(s_dma[s_rd]);
         s_rd = (uint16_t)((s_rd + 1u) % IMU_RX_BUF);
     }
@@ -311,6 +329,16 @@ void imu_service(void)
 uint32_t imu_rx_events(void)
 {
     return s_rx_events;
+}
+
+uint32_t imu_rx_bytes(void)
+{
+    return s_bytes;
+}
+
+uint32_t imu_frames(void)
+{
+    return s_frames;
 }
 
 void imu_get(imu_sample_t *out)

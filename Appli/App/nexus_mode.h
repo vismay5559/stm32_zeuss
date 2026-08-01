@@ -18,7 +18,7 @@
 #define NEXUS_MODE_IMU       2   /* IMU only: print quaternion/accel/gyro     */
 
 #ifndef NEXUS_MODE
-#define NEXUS_MODE  NEXUS_MODE_LEG_CAN
+#define NEXUS_MODE  NEXUS_MODE_IMU
 #endif
 
 #endif /* NEXUS_MODE_H */

@@ -25,6 +25,7 @@
 #include "app.h"
 #include "nexus_mode.h"
 #include "test_leg_can.h"
+#include "test_imu.h"
 #include "imu_bno085.h"
 #include "enc_as5048a.h"
 #include "act_odrive.h"
@@ -166,6 +167,9 @@ int main(void)
 #if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   printf("APPLI: mode = LEG_CAN (CAN-FD single leg test)\r\n");
   legtest_init();
+#elif (NEXUS_MODE == NEXUS_MODE_IMU)
+  printf("APPLI: mode = IMU (BNO085 test)\r\n");
+  imutest_init();
 #else
   printf("APPLI: peripheral init done, entering app_init()\r\n");
   app_init();
@@ -196,6 +200,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 #if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   legtest_run();
+#elif (NEXUS_MODE == NEXUS_MODE_IMU)
+  imutest_run();
 #else
   app_run();
 #endif
@@ -608,6 +614,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
 #if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
     legtest_on_tick();
+#elif (NEXUS_MODE == NEXUS_MODE_IMU)
+    imutest_on_tick();
 #else
     app_on_tick();
 #endif
