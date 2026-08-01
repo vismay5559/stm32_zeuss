@@ -211,14 +211,20 @@ static void build_and_send_state(void)
     memcpy(s_state.imu_gyro,  imu.gyro,  sizeof(s_state.imu_gyro));
     s_state.imu_seq = imu.seq;
 
-    uint16_t enc_angle[NEXUS_NUM_ENCODERS];
+    /* AS5048A is 14-bit over a full turn; the wire format carries radians so
+       the Pi never has to know the sensor exists. */
+    uint16_t enc_raw[NEXUS_NUM_ENCODERS];
     uint8_t  enc_valid;
 
-    enc_get(enc_angle, &enc_valid);
-    memcpy(s_state.enc_angle, enc_angle, sizeof(s_state.enc_angle));
+    enc_get(enc_raw, &enc_valid);
+    for (int e = 0; e < NEXUS_NUM_ENCODERS; e++)
+    {
+        s_state.enc_angle[e] = (float)enc_raw[e] * (6.28318531f / 16384.0f);
+    }
     s_state.enc_valid = enc_valid;
 
     s_state.contacts         = (uint8_t)(contact_switches() | contact_feet());
+    s_state.health           = (uint8_t)health_faults();
     s_state.contact_ticks[0] = contact_stable_ticks(0);
     s_state.contact_ticks[1] = contact_stable_ticks(1);
 

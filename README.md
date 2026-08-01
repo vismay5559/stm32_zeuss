@@ -302,6 +302,58 @@ BNO085 must be strapped for **UART-SHTP** mode (PS0/PS1 select the interface —
 not I2C, not SPI, and not UART-RVC, which is a different fixed-100 Hz protocol
 this driver does not speak).
 
+## What the Pi receives
+
+One 326-byte packet every millisecond (326 KB/s, well under 1% of USB HS).
+`Appli/App/link_proto.h` and `pi/nexus_proto.py` describe the same bytes;
+`tools/check_proto.py` compares every field offset and both struct sizes, so a
+mismatch is caught rather than debugged.
+
+| What | Field | Units |
+|---|---|---|
+| Actuator position / velocity | `act_pos[10]`, `act_vel[10]` | turns, turns/s |
+| Actuator torque | `act_torque[10]` | Nm |
+| After-spring joint angles | `enc_angle[4]` | **radians** |
+| IMU orientation / accel / rate | `imu_quat[4]`, `imu_accel[3]`, `imu_gyro[3]` | quaternion, m/s^2, rad/s |
+| **Torso height** | `fused_pos[2]` | m |
+| **Torso velocity** | `fused_vel[3]` | m/s, world |
+
+Also carried, because the Pi needs them to know whether to trust the rest:
+`fused_quat`, the estimated IMU biases, `fused_valid` (the estimator refuses to
+claim `OK` until it has converged), `contacts` / `contact_ticks`, per-actuator
+`act_error` / `act_state` / `act_flags`, and `health` - the same bitmask the red
+LED blinks.
+
+Using it from zeus_26:
+
+```python
+from nexus_proto import NexusState, FUSION_OK
+
+pkt, buf = NexusState.find_and_parse(buf)
+if pkt and pkt.fusion_usable:
+    height = pkt.height          # fused_pos[2]
+    vel    = pkt.velocity        # fused_vel
+    if pkt.faults():
+        print("STM32 reports:", pkt.faults())
+```
+
+**Check `fusion_usable` before using height or velocity.** The filter starts
+with 30 degrees of orientation uncertainty and 1 m/s of velocity uncertainty;
+until it converges those numbers are meaningless.
+
+Three deliberate choices:
+
+- **Encoder angles are sent in radians, not raw counts.** The STM32 needs them
+  in radians for forward kinematics anyway, so converting on the Pi would
+  duplicate the scale and any zero offsets in two places that can drift apart.
+- **Every 4-byte field sits on a 4-byte boundary.** The struct is packed, so
+  otherwise the M7 emits byte-wise access for every misaligned float and numpy
+  cannot view the buffer in place on the Pi. Fields are grouped by size rather
+  than by topic for this reason.
+- **Protocol version is 2.** v1 sent raw encoder counts, had no health byte and
+  was misaligned. A v1 Pi and a v2 STM32 reject each other on the version check
+  rather than silently misparsing.
+
 ## State estimation
 
 A contact-aided right-invariant EKF, ported from the Python in
