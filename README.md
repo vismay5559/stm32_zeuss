@@ -340,6 +340,37 @@ order 0.5 m, so a 1e-6 rad step moves it ~1e-7 m - right at float resolution.
 Central differences with `eps=1e-3` are O(h^2), so a step clear of the noise
 floor is still more accurate.
 
+### Checked against the paper
+
+Verified equation by equation against Hartley et al. 2019
+(arXiv:1904.09251). Two defects were found and fixed that the Python has:
+
+**`Phi(phi,phi)` must be IDENTITY** (eq 58), not `Gamma0^T`. `Gamma0^T` belongs
+to the *left*-invariant `Phi^l` (eq 55), where the error lives in the body
+frame. This is not cosmetic - the identity block is exactly why the
+right-invariant error dynamics are independent of the state estimate, which is
+the property the whole method rests on. With `Gamma0^T` there, the filter
+degrades into the state-dependent linearisation the paper compares against and
+beats.
+
+**`Q_bar` must use the full adjoint** (eq 28: `Ad*Cov(w)*Ad^T`). `Ad` (eq 63)
+carries `(v)_x R`, `(p)_x R` and `(d_k)_x R` in its first block column, so gyro
+noise reaches velocity, position and every contact with cross-covariances
+between them. A diagonal `Q_bar` drops all of it. Those terms scale with `|v|`,
+`|p|`, `|d|` - negligible at the origin, growing as the robot walks away, which
+is when the covariance most needs to be right.
+
+`H` is written as `[0 0 -I I 0 0]` exactly as eq 20, with the correction `+K z`
+per eq 29, so the code reads directly against the paper.
+
+Known approximations, both as the paper allows:
+
+- `Psi1`/`Psi2` (eq 56/57) use only the leading `(a)_x Gamma2/3(-w dt)` term
+  and drop the higher-order corrections. Those vanish as `w*dt -> 0`, and at
+  400 Hz `w*dt` is small.
+- `Q_d ~ Phi Q_bar Phi^T dt` (eq 61) - the same approximation the paper used
+  for all of its own results.
+
 ### Two bugs found in the Python during the port
 
 **The measurement is not used in the update.** `update_contact` computes
@@ -368,9 +399,17 @@ Checked on the host against independent references, not against the Python:
   this is what validates the innovation and `H` sign convention; with either
   flipped the error would diverge instead
 - Covariance stays symmetric and positive on the diagonal through 200 cycles
+- **The observability structure of section 5.4 is reproduced**: over 4000 steps
+  roll and pitch covariance shrink ~50x while yaw, being unobservable, does not
+  converge at all. This only emerges with the identity `Phi` block, so the test
+  fails against the pre-correction code
+- The `phi`-position cross-covariance is non-zero once the body has moved off
+  the origin, which a diagonal `Q_bar` could never produce
 
-Not yet verified: anything involving real sensors. The update needs joint
-angles from the encoders and ODrives, neither of which has moved real data yet.
+**The filter is not yet wired into the control loop.** `inekf.c` builds and is
+tested, but nothing calls it, so the `fused_*` fields of `nexus_state_t` are
+still transmitted as zeros. Wiring it up needs joint angles from the encoders
+and ODrives, neither of which has produced real data yet.
 
 ## Diagnostics
 
