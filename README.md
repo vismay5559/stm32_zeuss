@@ -80,6 +80,10 @@ Appli/App/            ← the actual robot code
    link_proto.h         wire format — keep byte-identical with the Pi
    critical.h           ISR-safe copy helper
 
+   lie_group.c/.h       SE_K(3) Lie group maths (fixed size)
+   kinematics.c/.h      leg forward kinematics + Jacobian
+   inekf.c/.h           contact-aided right-invariant EKF
+
 Appli/Core/, Appli/USB_DEVICE/   CubeMX-generated (edit only in USER CODE blocks)
 Boot/                            bootloader project, also CubeMX-generated
 Drivers/, Middlewares/           ST HAL + USB + external-memory manager (vendored)
@@ -297,6 +301,76 @@ Wiring: STM32 **PA9 → IMU RX**, STM32 **PA10 → IMU TX**, common ground, and 
 BNO085 must be strapped for **UART-SHTP** mode (PS0/PS1 select the interface —
 not I2C, not SPI, and not UART-RVC, which is a different fixed-100 Hz protocol
 this driver does not speak).
+
+## State estimation
+
+A contact-aided right-invariant EKF, ported from the Python in
+`vismay5559/zeus_26` (`zeus_sensor_fusion`) and following Hartley et al. 2019.
+It fuses the IMU with leg forward kinematics while feet are on the ground to
+estimate body orientation, velocity, height and IMU biases.
+
+All fusion runs **on the STM32**. The Pi receives the fused state and runs only
+the RL policy.
+
+| File | Contents |
+|---|---|
+| `lie_group.c` | SO(3) exponential, Gamma0-3, fixed-stride matrix helpers |
+| `kinematics.c` | Leg FK (0.30 m thigh/shank, 0.05 m foot) + 3x4 Jacobian |
+| `inekf.c` | Predict, contact update, contact add/remove |
+
+State is `X` in SE_{N+2}(3) with `R, v, p` and one world position per contact,
+IMU bias `theta` in R^6, and a 21x21 right-invariant error covariance.
+
+### Deliberate differences from the Python
+
+**Fixed-size, no allocator.** The Python reshapes `X` and `P` with numpy every
+time a foot lands or lifts. Everything here is declared at its two-contact
+maximum with an active flag per slot; error-state matrices keep a constant
+stride so indices never move, and inactive contact blocks are zeroed so they
+are inert in every product.
+
+**`float`, not `double`.** Singles are ~2x faster on this FPU and halve memory
+traffic, and covariance propagation is the hot path. Joseph-form updates plus
+explicit symmetrisation every step keep it stable. `inekf_real_t` is the one
+switch if that ever stops holding.
+
+**Central differences for the Jacobian.** The Python uses forward differences
+with `eps=1e-6`, which is fine at float64 but broken at float32: FK output is
+order 0.5 m, so a 1e-6 rad step moves it ~1e-7 m - right at float resolution.
+Central differences with `eps=1e-3` are O(h^2), so a step clear of the noise
+floor is still more accurate.
+
+### Two bugs found in the Python during the port
+
+**The measurement is not used in the update.** `update_contact` computes
+`Xinv @ b` and never touches `B_p_BC`, so the innovation is
+`R^T(d_k - p)` - the prediction alone, with the encoder measurement missing
+entirely. The C version uses the right-invariant innovation
+`z = R*B_p_BC + p - d_k`, which is zero exactly when the state agrees with
+forward kinematics.
+
+**`Phi` is built from the already-propagated state.** `R`, `v`, `p` are numpy
+*views* into `self._X`; writing the propagated values back silently updates
+them, so `state_transition_right` receives the new state and then propagates it
+again internally. `Phi` linearises about the state at t_k, so the C version
+keeps the pre-propagation values.
+
+Both are worth fixing in the Python too if it stays in use.
+
+### Verification
+
+Checked on the host against independent references, not against the Python:
+
+- `Gamma1` against a numerically integrated `exp(phi*s) ds` (1e-4)
+- FK against hand-computable poses; Jacobian against analytic cross products
+- Free fall for 1 s gives exactly -9.81 m/s and -4.905 m
+- **An injected 20 cm position error decays to 1.1 mm under contact updates** -
+  this is what validates the innovation and `H` sign convention; with either
+  flipped the error would diverge instead
+- Covariance stays symmetric and positive on the diagonal through 200 cycles
+
+Not yet verified: anything involving real sensors. The update needs joint
+angles from the encoders and ODrives, neither of which has moved real data yet.
 
 ## Diagnostics
 
