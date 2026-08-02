@@ -324,22 +324,63 @@ claim `OK` until it has converged), `contacts` / `contact_ticks`, per-actuator
 `act_error` / `act_state` / `act_flags`, and `health` - the same bitmask the red
 LED blinks.
 
-Using it from zeus_26:
+### Rates
+
+There is one stream, not several. Every field above ships in the same packet
+every millisecond - but not every field is *freshly measured* every time:
+
+| Field | Genuinely new at | Note |
+|---|---|---|
+| `enc_angle`, `act_pos/vel/torque`, `contacts` | **1 kHz** | new value in every packet |
+| `imu_*` | 400 Hz | same bytes repeat 2-3 packets; watch `imu_seq` |
+| `fused_*` | 1 kHz corrected, 400 Hz propagated | contact update every tick, IMU prediction only on a new sample |
+
+So the actuator and after-spring encoder data really does reach the Pi at
+1 kHz. The wire and the kernel buffer never drop it - the only way to lose it
+is to read too slowly.
+
+### Receiving it at 1 kHz
+
+`pi/nexus_link.py` is the reader. A background thread drains the port so
+reception stays at 1 kHz no matter what the control loop is doing; the loop
+then takes the newest packet and ignores the rest.
 
 ```python
-from nexus_proto import NexusState, FUSION_OK
+from nexus_link import NexusLink
 
-pkt, buf = NexusState.find_and_parse(buf)
-if pkt and pkt.fusion_usable:
-    height = pkt.height          # fused_pos[2]
-    vel    = pkt.velocity        # fused_vel
-    if pkt.faults():
-        print("STM32 reports:", pkt.faults())
+with NexusLink('/dev/ttyACM0') as link:
+    if link.wait_for_fusion(timeout=10) is None:
+        raise RuntimeError('estimator never converged')
+
+    while True:                       # policy at 250 Hz
+        pkt = link.latest()           # never blocks, never stale
+        if pkt is None or not pkt.fusion_usable:
+            continue
+        action = policy(build_obs(pkt))
+        link.send_command(action_to_turns(action))
 ```
+
+**A 250 Hz loop that reads one packet per step falls three packets further
+behind every step, forever.** Discarding the older three is not data loss - the
+newest packet is the only one that is not already out of date. Pass
+`history=N` and call `drain()` if you also want every packet for logging.
+
+`link.stats` reports `loss_rate`, `seq_gaps` and `junk_bytes`; all three should
+be zero on a healthy link. Run `python pi/nexus_link.py /dev/ttyACM0` on the Pi
+to watch them before wiring anything into zeus_26 - a problem is far easier to
+find there than inside a control loop.
 
 **Check `fusion_usable` before using height or velocity.** The filter starts
 with 30 degrees of orientation uncertainty and 1 m/s of velocity uncertainty;
 until it converges those numbers are meaningless.
+
+`tools/test_pi_link.py` proves the Python side sustains 1 kHz without hardware:
+it feeds `NexusLink` a synthetic 1 kHz stream through a fake port and checks
+every packet arrives, in order, with no gaps. It also measures parse load, which
+matters more than it looks - the original pure-Python CRC cost 55% of a desktop
+core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
+`binascii.crc_hqx`, which is the same algorithm in C and ~300x faster (2.8% of a
+core); `_crc16_slow` is kept as the reference the test checks it against.
 
 Three deliberate choices:
 

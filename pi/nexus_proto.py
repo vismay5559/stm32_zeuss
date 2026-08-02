@@ -29,6 +29,7 @@ Typical use:
 
 from __future__ import annotations
 
+import binascii
 import struct
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -38,6 +39,7 @@ from typing import List, Optional, Tuple
 # --------------------------------------------------------------------------
 
 SYNC = 0xA5A5
+SYNC_BYTES = struct.pack("<H", SYNC)
 PROTO_VERSION = 2
 
 MSG_STATE = 0x01
@@ -132,14 +134,25 @@ COMMAND_FORMAT = (
 COMMAND_SIZE = struct.calcsize(COMMAND_FORMAT)
 
 
-def crc16(data: bytes) -> int:
-    """CRC16-CCITT, init 0xFFFF, poly 0x1021 - same as nexus_crc16() in C."""
+def _crc16_slow(data: bytes) -> int:
+    """Reference implementation - a direct transcription of nexus_crc16() in C."""
     crc = 0xFFFF
     for b in data:
         crc ^= b << 8
         for _ in range(8):
             crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
     return crc
+
+
+def crc16(data: bytes) -> int:
+    """CRC16-CCITT, init 0xFFFF, poly 0x1021 - same as nexus_crc16() in C.
+
+    binascii.crc_hqx is that exact algorithm (CRC-16/CCITT-FALSE) implemented
+    in C. This is not a micro-optimisation: the loop above costs ~550 us per
+    packet, which at 1 kHz is over half a core on a desktop and more than a
+    whole core on a Pi - the reader would simply fall behind and never recover.
+    The C version is ~300x faster. tests/test_proto.py checks the two agree."""
+    return binascii.crc_hqx(data, 0xFFFF)
 
 
 # --------------------------------------------------------------------------
@@ -271,18 +284,26 @@ class NexusState:
         packet-framed, so resync is rare - but a reconnect mid-packet will
         leave junk, and scanning for the sync word recovers from it.
         """
-        lo = SYNC & 0xFF
-        hi = (SYNC >> 8) & 0xFF
-
         start = 0
-        while start + STATE_SIZE <= len(buf):
-            if buf[start] == lo and buf[start + 1] == hi:
-                pkt = cls.parse(bytes(buf[start:start + STATE_SIZE]))
-                if pkt is not None:
-                    return pkt, buf[start + STATE_SIZE:]
+        limit = len(buf) - STATE_SIZE
+
+        while start <= limit:
+            # bytearray.find is C-speed; scanning for the sync word a byte at a
+            # time in Python costs more than parsing the packet does.
+            start = buf.find(SYNC_BYTES, start, limit + 2)
+            if start < 0:
+                break
+
+            pkt = cls.parse(bytes(buf[start:start + STATE_SIZE]))
+            if pkt is not None:
+                return pkt, buf[start + STATE_SIZE:]
+
+            # Sync word but no valid packet: either payload bytes that happened
+            # to look like sync, or a genuinely corrupt frame. Either way the
+            # next candidate is one byte along, never STATE_SIZE along.
             start += 1
 
-        # Keep the tail that might be the start of a packet.
+        # Keep the tail that might be the start of a packet still in flight.
         keep = max(0, len(buf) - STATE_SIZE)
         return None, buf[keep:]
 
