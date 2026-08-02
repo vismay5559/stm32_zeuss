@@ -8,3 +8,6 @@ mx.scratch
 mx.scratch/
 *.map
 *.su
+
+__pycache__/
+*.pyc
