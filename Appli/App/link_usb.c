@@ -26,6 +26,10 @@ static volatile uint8_t s_cmd_ready;
 /* Commands accepted from the Pi. Used to detect a dead link. */
 static volatile uint32_t s_cmd_count;
 
+/* State packets skipped because the previous one had not finished going out.
+   Non-zero means the host is not draining the endpoint at 1 kHz. */
+static uint32_t s_tx_dropped;
+
 uint16_t nexus_crc16(const uint8_t *data, uint32_t len)
 {
     uint16_t crc = 0xFFFFu;
@@ -52,8 +56,42 @@ void link_usb_init(void)
     USBD_CDC_SetRxBuffer(&hUsbDeviceHS, s_rx_dma);
 }
 
+/*
+ * True while the USB core still owns s_tx_dma, or while there is no host to
+ * send to at all.
+ *
+ * TxState only goes 0 -> 1 inside CDC_Transmit_HS, which nothing but
+ * link_usb_send_state calls, and 1 -> 0 in the transfer-complete ISR. So a
+ * zero read here cannot become non-zero behind our back, and the buffer is
+ * genuinely safe to overwrite.
+ */
+static uint8_t tx_busy(void)
+{
+    USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceHS.pClassData;
+
+    if ((hcdc == NULL) || (hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED))
+    {
+        return 1;   /* nothing enumerated - the usual case with only ST-LINK */
+    }
+
+    return (hcdc->TxState != 0u) ? 1u : 0u;
+}
+
 uint8_t link_usb_send_state(nexus_state_t *st)
 {
+    /*
+     * Ask BEFORE copying. CDC_Transmit_HS also returns BUSY, but by the time
+     * it does the memcpy below has already overwritten the buffer the USB DMA
+     * is still reading out - the Pi then receives a packet that is half this
+     * tick and half the last one. Its CRC fails so nothing wrong reaches the
+     * policy, but the packet is lost and, without this counter, invisibly.
+     */
+    if (tx_busy())
+    {
+        s_tx_dropped++;
+        return USBD_BUSY;
+    }
+
     st->sync    = NEXUS_SYNC;
     st->msg_id  = NEXUS_MSG_STATE;
     st->version = NEXUS_PROTO_VERSION;
@@ -62,6 +100,11 @@ uint8_t link_usb_send_state(nexus_state_t *st)
     memcpy(s_tx_dma, st, sizeof(nexus_state_t));
 
     return CDC_Transmit_HS(s_tx_dma, (uint16_t)sizeof(nexus_state_t));
+}
+
+uint32_t link_usb_tx_dropped(void)
+{
+    return s_tx_dropped;
 }
 
 static void feed(uint8_t b)

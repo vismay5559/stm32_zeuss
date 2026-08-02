@@ -323,10 +323,11 @@ void app_run(void)
             uint32_t mx  = s_loop_us_max;
 
             printf("loop max %lu us | overruns %lu | can drop %lu/%lu | "
-                   "health 0x%02lX watching 0x%02lX blink %u\r\n",
+                   "usb drop %lu | health 0x%02lX watching 0x%02lX blink %u\r\n",
                    (unsigned long)mx, (unsigned long)ovr,
                    (unsigned long)act_tx_dropped(0),
                    (unsigned long)act_tx_dropped(1),
+                   (unsigned long)link_usb_tx_dropped(),
                    (unsigned long)health_faults(),
                    (unsigned long)health_expected(),
                    (unsigned)health_blink_code());

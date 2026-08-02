@@ -560,33 +560,40 @@ of them has moved a single byte of real data.
 
 ### Known issues
 
+Only genuinely open items live here. Bugs that were found and fixed but that
+CubeMX can silently undo are listed under
+[Working with CubeMX](#working-with-cubemx) instead — they are hazards, not
+outstanding work.
+
 **External flash runs in 1-line mode, not octal.** SFDP init fails at step 11
 (re-reading the SFDP header through the freshly configured octal mode) with
 `EXTMEM_DRIVER_NOR_SFDP_MEMTYPE_CHECK`. 1-line works and is the current
 setting (`NEXUS_EXTMEM_LINES` in `Boot/Core/Src/extmem_manager.c`), at roughly
-1/8th the instruction-fetch bandwidth. Fine today; worth fixing before the
-state estimator lands, or move the hot path into ITCM (64 KB, unused).
-
-**`MX_XSPI2_Init()` is disabled in the Appli** (`Appli/Core/Src/main.c`). The
-Appli executes *from* XSPI2, so re-initialising it destroys the memory mapping
-and the next instruction fetch hangs the bus. CubeMX regenerates this call —
-comment it out again after any regeneration.
-
-**MPU region 2 must cover `0x24070000`, size 8 KB.** Every DMA buffer lives in
-the `noncacheable_buffer` section there. If the MPU and linker disagree, the
-CPU reads stale cache while DMA writes real RAM — intermittent corruption that
-looks exactly like bad wiring. `app_init()` checks this at boot and halts with
-red on if it is wrong. The setting lives in the **Boot** context of the .ioc
-(CORTEX_M7_BOOT → MPU Region 2).
+1/8th the instruction-fetch bandwidth. The loop currently runs in ~230 µs of
+its 1000 µs budget *with* the estimator, so this costs nothing measurable
+today. If that margin shrinks, move the hot path into ITCM (64 KB, 0% used)
+before spending time on octal mode.
 
 **CAN bandwidth needs attention before all 10 actuators run.** At 5 nodes per
 bus with commands plus two telemetry messages each at 1 kHz, the bus sits near
 75% load. Raising the *nominal* bitrate helps far more than the data bitrate,
 because 8-byte frames are dominated by the arbitration phase. Also verify
-whether your ODrive firmware supports CAN FD at all.
+whether your ODrive firmware supports CAN FD at all. Deferred deliberately —
+4 nodes at 45% is fine, so this only blocks the second leg.
 
-**No watchdog on the STM32 yet.** Enable ODrive's own watchdog as the
-hardware-protecting layer.
+**No watchdog on the STM32.** A deliberate choice: ODrive's own watchdog is the
+hardware-protecting layer, so a stalled STM32 stops the motors without needing
+one here. Revisit only if something has to fail safe that the ODrives cannot
+see.
+
+### Resolved
+
+For reference, since these were live problems during bring-up: the MPU/DMA
+cache-coherency fault, the `MX_XSPI2_Init()` bus hang, the USB voltage detector
+killing Boot, the 3-deep FDCAN TX FIFO silently dropping frames to nodes 4 and
+5, the `imu_service()` infinite loop, the `Q̄` stack overflow in the estimator,
+and the USB TX buffer being overwritten mid-transfer. Each has a guard, a
+counter, or a test so it cannot come back unnoticed.
 
 ---
 
@@ -603,3 +610,26 @@ git diff --stat -- . ':!Drivers' ':!Middlewares'   # review before building
 The script never touches `Appli/App/`, and warns if MPU region 2 came back
 wrong. **Always review the diff before building** — a stale CubeMX folder can
 silently revert fixes.
+
+### Two fixes CubeMX will undo
+
+Both of these are *fixed*. Both are also things CubeMX regenerates back to a
+broken state, so check them after every generation.
+
+**MPU region 2 must cover `0x24070000`, size 8 KB.** Every DMA buffer lives in
+the `noncacheable_buffer` section there. If the MPU and the linker disagree,
+the CPU reads stale cache while DMA writes real RAM — intermittent corruption
+that looks exactly like bad wiring. The setting lives in the **Boot** context
+of the .ioc (CORTEX_M7_BOOT → MPU Region 2).
+
+*Guard:* `check_noncacheable_region()` in `app_init()` compares the linker
+symbols against the MPU base at boot and halts with the red LED on if they
+disagree, so this fails loudly instead of corrupting data.
+
+**`MX_XSPI2_Init()` must stay commented out in the Appli**
+(`Appli/Core/Src/main.c`). The Appli executes *from* XSPI2, so re-initialising
+it destroys the memory mapping and the next instruction fetch hangs the bus —
+no LED, no serial output, nothing.
+
+*Guard:* none possible; the hang happens before any code could report it. This
+one is on you to check in the diff.
