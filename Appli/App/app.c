@@ -8,6 +8,7 @@
 #include "contact.h"
 #include "critical.h"
 #include "health.h"
+#include "fusion.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -179,6 +180,7 @@ void app_init(void)
        flag here (or call health_set_expected) as you connect that hardware -
        the red LED then tells you the moment it starts talking. */
     health_init(HEALTH_EXPECTED_NOW);
+    fusion_init();
 
     contact_init();
     enc_init();
@@ -227,6 +229,12 @@ static void build_and_send_state(void)
     s_state.health           = (uint8_t)health_faults();
     s_state.contact_ticks[0] = contact_stable_ticks(0);
     s_state.contact_ticks[1] = contact_stable_ticks(1);
+
+    /* Estimate before packing, so the packet carries this tick's fused state
+       rather than the previous one. */
+    fusion_tick(&imu, s_state.enc_angle, enc_valid, &act,
+                s_state.contacts, s_state.timestamp_us);
+    fusion_fill_state(&s_state);
 
     memcpy(s_state.act_pos,    act.pos,        sizeof(s_state.act_pos));
     memcpy(s_state.act_vel,    act.vel,        sizeof(s_state.act_vel));

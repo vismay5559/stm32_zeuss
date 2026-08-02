@@ -248,8 +248,10 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
      * where Pa is I for phi, (v)_x for v, (p)_x for p and (d_k)_x for contacts.
      * That is a handful of 3x3 products.
      */
-    inekf_real_t pre[2 + INEKF_MAX_CONTACTS][9];   /* prefix per block row */
-    int          row[2 + INEKF_MAX_CONTACTS];
+    /* Block rows: phi, v, p, then one per active contact - hence 3 + MAX,
+       not 2 + MAX. Getting this wrong overflows the stack silently. */
+    inekf_real_t pre[3 + INEKF_MAX_CONTACTS][9];   /* prefix per block row */
+    int          row[3 + INEKF_MAX_CONTACTS];
     int          nrow = 0;
 
     lg_mat3_identity(pre[nrow]); row[nrow] = INEKF_IDX_PHI; nrow++;
