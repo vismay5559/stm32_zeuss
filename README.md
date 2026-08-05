@@ -11,8 +11,12 @@ Linux, ROS, planning,      ←→     exact 1 kHz control loop
 vision, logging                   IMU, encoders, CAN-FD, contacts
 (soft real-time)                  (hard real-time)
 
-           one fixed struct over USB — see Appli/App/link_proto.h
+      one 422-byte struct every 1 ms — see Appli/App/link_proto.h
 ```
+
+**Start here:** [What the Pi receives](#what-the-pi-receives) is the contract
+between this board and the policy. [Test modes](#test-modes) is how to bring one
+subsystem up at a time.
 
 ---
 
@@ -83,6 +87,20 @@ Appli/App/            ← the actual robot code
    lie_group.c/.h       SE_K(3) Lie group maths (fixed size)
    kinematics.c/.h      leg forward kinematics + Jacobian
    inekf.c/.h           contact-aided right-invariant EKF
+   fusion.c/.h          bridges sensors <-> filter; fills the policy block
+   gait_ref.c/.h        reference trajectory (GENERATED - see tools/gen_gait.py)
+
+   test_leg_can.c       NEXUS_MODE_LEG_CAN
+   test_imu.c           NEXUS_MODE_IMU
+
+pi/                              the Raspberry Pi side, drop into zeus_26
+   nexus_proto.py         wire format - must match link_proto.h byte for byte
+   nexus_link.py          threaded 1 kHz reader
+
+tools/
+   check_proto.py         proves the C and Python layouts agree
+   test_pi_link.py        proves the Pi side sustains 1 kHz, no hardware needed
+   gen_gait.py            spreadsheet -> gait_ref.c
 
 Appli/Core/, Appli/USB_DEVICE/   CubeMX-generated (edit only in USER CODE blocks)
 Boot/                            bootloader project, also CubeMX-generated
@@ -160,11 +178,11 @@ build time in `Appli/App/nexus_mode.h`:
 #define NEXUS_MODE  NEXUS_MODE_LEG_CAN
 ```
 
-| Mode | Exercises |
-|---|---|
-| `NEXUS_MODE_ROBOT` | Everything — the real 1 kHz loop |
-| `NEXUS_MODE_LEG_CAN` | **CAN-FD only.** One leg, 4 ODrives |
-| `NEXUS_MODE_IMU` | **IMU only.** BNO085 over UART |
+| Mode | Exercises | State |
+|---|---|---|
+| `NEXUS_MODE_ROBOT` | Everything — the real 1 kHz loop | builds, untested on hardware |
+| `NEXUS_MODE_LEG_CAN` | **CAN-FD only.** One leg, 4 ODrives, reference gait | builds, no ODrives attached yet |
+| `NEXUS_MODE_IMU` | **IMU only.** BNO085 over UART | ✅ **working on hardware** |
 
 Change it, rebuild, reflash the Appli. `main()` dispatches on it; unused code
 is simply never entered.
@@ -181,10 +199,57 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 |---|---|---|
 | `s_node_id[]` | `{1,2,3,4}` | hip_roll, hip_pitch, knee, ankle. Must match `axis0.config.can.node_id` |
 | `LEGTEST_ENABLE_CLOSED_LOOP` | **0** | **Safety.** At 0 the axes are never commanded into closed loop, so motors stay unpowered and cannot move — positions are still transmitted, so TX is fully testable |
-| `LEGTEST_AMPLITUDE_TURNS` | 0.05 | Only matters with closed loop on |
-| `LEGTEST_FREQ_HZ` | 0.25 | Slow enough to watch |
+| `LEGTEST_MOTION_GAIT` | 1 | 1 = play the reference gait, 0 = single-joint sine |
+| `LEGTEST_GAIT_SPEED` | **0.25** | Fraction of real time. Start low |
+| `LEGTEST_GAIT_ENTRY_MS` | 2000 | Ramp from the measured pose into the trajectory |
 | `LEGTEST_USE_CAN_FD` | 1 | Set to 0 for classic CAN 2.0 @ 1 Mbit if your ODrive firmware does not do FD |
 | `LEGTEST_TX_DIV` | 1 | 1 = 1 kHz per joint, 4 = 250 Hz per joint |
+
+### The reference gait
+
+`Appli/App/gait_ref.c` is **generated, not hand-written**:
+
+```bash
+python tools/gen_gait.py reference_gait_rleg_40ms_250hz.xlsx
+```
+
+200 samples, 0.8 s cycle, from a Pinocchio + CasADi trajectory optimisation at
+0.40 m/s. Re-run the generator when the trajectory changes — hand-editing 200
+rows of floats is how a sign error gets in and stays in.
+
+Two conversions happen in the generator, and both are worth knowing:
+
+- **Degrees → turns is just `/360`.** The spreadsheet is joint angles on the
+  output shaft; each ODrive is already configured with its own gear ratio, so no
+  reduction factor belongs in the firmware.
+- **Columns are reordered into node order.** The spreadsheet runs hipPitch,
+  hipRoll, knee, ankle; the CAN nodes run hip_roll(1), hip_pitch(2), knee(3),
+  ankle(4). The generator prints the resulting turn ranges so a mix-up is visible
+  before anything moves:
+
+```
+  slot        column           degrees            turns
+  hip_roll    hipRoll_r_deg    -1.67..  +6.86   -0.0047..+0.0191
+  hip_pitch   hipP_r_deg      -20.53..  -6.71   -0.0570..-0.0186
+  knee        knee_r_deg      +25.53.. +30.23   +0.0709..+0.0840
+  ankle       ankle_r_deg      +6.03.. +21.41   +0.0167..+0.0595
+```
+
+`gait_sample(phase, out)` interpolates linearly between the 250 Hz samples and
+wraps at 1.0, so the 1 kHz loop gets a smooth ramp rather than a staircase.
+
+**Two safety behaviours that are not optional:**
+
+- The leg **ramps from its measured position** into gait sample 0 over
+  `LEGTEST_GAIT_ENTRY_MS`, because the first command after arming would
+  otherwise be a jump from wherever the leg is resting to phase 0.
+- If **any** joint has not reported an encoder estimate over CAN, the gait does
+  **not start** — the leg holds station and says so on the console. Ramping from
+  an assumed zero would command a jump exactly as large as the assumption is
+  wrong.
+
+Start at `LEGTEST_GAIT_SPEED 0.25`. A wrong sign or node mapping then shows as
+a slow drift you can watch and kill, rather than a snap you only hear.
 
 Commands go out at **1 kHz to every joint** (`LEGTEST_TX_DIV 1`). Because the
 hardware TX FIFO is fixed at three entries and a tick hands over four frames,
@@ -267,77 +332,187 @@ odrivetool, and bring up one node at a time before running all four. Also
 enable ODrive's own watchdog (`axis0.config.enable_watchdog`) — that is the
 layer that protects the hardware if this firmware stops.
 
-### `NEXUS_MODE_IMU` - BNO085 over UART
+### `NEXUS_MODE_IMU` — BNO085 over UART
 
-Exercises **USART1 only** (PA9 tx / PA10 rx, 3 Mbaud) - no CAN, no encoders,
-no USB. Asks the BNO085 for rotation vector, linear acceleration and gyro at
-400 Hz over SHTP, then prints them.
+Exercises **USART1 only** (PA9 tx / PA10 rx, 3 Mbaud) — no CAN, no encoders, no
+USB. Working, on hardware:
 
 ```
-q[w,x,y,z]=+0.9998 +0.0121 -0.0043 +0.0155 |q|=1.000  a[m/s2]= +0.021 -0.014 +0.008  w[rad/s]= +0.001 -0.002 +0.000
-  >> 400 samples/s (want 400), 400 frames/s, 17600 bytes/s   OK
+q[w,x,y,z]=+0.4625 +0.2537 -0.1549 +0.8353 |q|=1.000  a[m/s2]= +6.438 -2.910 +7.086  w[rad/s]= -0.014 +0.031 +0.023
+  >> 0 err/s   per-report Hz: rotation=105 accel=158 gyro=421
+     handshake: advertisement=SEEN reset-notice=seen
 ```
 
-Data lines are throttled to 5/s because a 115200 console cannot carry 400 -
-but the **rate is measured over every sample**, so throttling never hides a
-rate problem.
+Data lines are throttled to 5/s because a 115200 console cannot carry 400 — but
+the **rate is measured over every sample**, so throttling never hides a rate
+problem.
 
-Two things worth understanding in that output:
+#### Wiring
 
-- **`|q|` is a free correctness check.** A unit quaternion always has norm 1.
-  If it is not ~1.000 the bytes are being misinterpreted - wrong Q-point,
-  misaligned report, wrong report id - even when the numbers look plausible.
-- **`bytes/s` and `frames/s` separate wiring faults from protocol faults**,
-  which otherwise look identical:
+Per the CEVA datasheet §1.2.3 and the Adafruit pinout:
+
+| STM32 | Breakout | Note |
+|---|---|---|
+| PA9 (TX) | **SCL** | "UART data IN to sensor" |
+| PA10 (RX) | **SDA** | "UART data OUT from sensor" |
+| 3V3 | Vin | |
+| GND | GND | |
+| — | **PS1 → 3V3, PS0 left alone** | selects UART-SHTP |
+
+No reset pin needed for UART. The straps are sampled **at the sensor's reset**,
+so after changing them you must fully power-cycle — `-rst` and the black button
+restart the STM32 but do not drop the sensor's 3.3 V.
+
+#### Three bugs this bring-up found
+
+All three were in our code, not the wiring, and all three came from the CEVA
+datasheet:
+
+**1. Bytes must be 100 µs apart.** §1.2.3.1: *"Bytes sent from the host to the
+BNO08X must be separated by at least 100us. Bytes sent from the BNO to the host
+have no extra spacing."* We sent frames back-to-back at 3 Mbaud — 3.3 µs per
+byte, **thirty times too fast** — so everything after the first byte of every
+frame arrived mangled. The rule being one-directional is exactly why the
+sensor's own transmissions parsed perfectly while every frame we sent came back
+as an SHTP error. This one cost the most time; nothing about the symptoms
+pointed at timing.
+
+**2. Wrong acceleration report.** We asked for `0x04` Linear Acceleration, which
+has **gravity removed**. The estimator propagates `v += (R·a + g)·dt` and needs
+*specific force* — what an accelerometer physically reads. A stationary robot
+reported `(0,0,0)` against gravity's `−9.81`, so the filter would have concluded
+**free fall** and ramped velocity downward forever. Now `0x01` Calibrated
+Acceleration, which includes gravity. The host tests never caught it because
+they fed the filter synthetic specific force.
+
+**3. Per-channel sequence numbers.** SHTP counts them per channel; we kept one
+global counter, so the control channel opened mid-sequence.
+
+#### Reading the output
+
+- **`|q|` is a free correctness check.** A unit quaternion always has norm 1. If
+  it is not ~1.000 the bytes are being misinterpreted — wrong Q-point,
+  misaligned report, wrong report id — even when the numbers look plausible.
+- **The accelerometer must show gravity.** Held flat and still it reads ~9.81 on
+  one axis. Zeros mean bug 2 is back.
+- **The counters separate wiring faults from protocol faults**, which otherwise
+  look identical:
 
 | Symptom | Meaning |
 |---|---|
-| `bytes/s = 0` | Nothing on the wire — TX/RX swapped, no power, no common ground |
-| bytes but `frames/s = 0` | Wrong baud, or the IMU is in **UART-RVC** mode instead of **UART-SHTP** |
-| frames but `samples/s = 0` | Framing fine, but `SET_FEATURE` did not take |
-| `samples/s` well under 400 | Running, but not at the requested rate |
+| `bytes/s = 0`, `ndtr` frozen | Nothing on the wire — TX/RX swapped, no power, no ground |
+| bytes but `frames/s = 0` | Wrong baud, or the IMU is in **UART-RVC** instead of **UART-SHTP** |
+| frames but only channel 0 | The sensor is *rejecting* what we send — it answers with an SHTP error list |
+| `advertisement=not seen` | The sensor never finished booting. Power-cycle. |
 
-Wiring: STM32 **PA9 → IMU RX**, STM32 **PA10 → IMU TX**, common ground, and the
-BNO085 must be strapped for **UART-SHTP** mode (PS0/PS1 select the interface —
-not I2C, not SPI, and not UART-RVC, which is a different fixed-100 Hz protocol
-this driver does not speak).
+The startup **listens for one second before transmitting anything**. Datasheet
+§5.2.1 says the sensor announces itself unprompted after reset, so silence in
+that window means the part is not running — a question no test that transmits
+first can answer.
+
+#### Report rates
+
+Measured, with all three reports requested at 400 Hz:
+
+| Report | Rate | |
+|---|---|---|
+| Gyro `0x02` | **421 Hz** | drives the filter's orientation |
+| Accelerometer `0x01` | **158 Hz** | drives velocity — the binding constraint |
+| Rotation vector `0x05` | 105 Hz | deliberately slowed to 100 Hz |
+
+Datasheet §6.9 warns that *"all sensors cannot operate at their maximum rate
+simultaneously"*, and the accelerometer is what the sensor starves. **This is
+not yet resolved** — see *Known issues*. `IMU_ENABLE_QUAT 0` drops the sensor's
+quaternion entirely to test whether the fusion engine is what costs the
+accelerometer its budget; the Pi still gets `quat` from our own estimator, which
+is fused with leg kinematics and is the better estimate anyway.
 
 ## What the Pi receives
 
-One 326-byte packet every millisecond (326 KB/s, well under 1% of USB HS).
+One **422-byte packet every millisecond** (422 KB/s, well under 1% of USB HS).
 `Appli/App/link_proto.h` and `pi/nexus_proto.py` describe the same bytes;
 `tools/check_proto.py` compares every field offset and both struct sizes, so a
 mismatch is caught rather than debugged.
 
-| What | Field | Units |
-|---|---|---|
-| Actuator position / velocity | `act_pos[10]`, `act_vel[10]` | turns, turns/s |
-| Actuator torque | `act_torque[10]` | Nm |
-| After-spring joint angles | `enc_angle[4]` | **radians** |
-| IMU orientation / accel / rate | `imu_quat[4]`, `imu_accel[3]`, `imu_gyro[3]` | quaternion, m/s^2, rad/s |
-| **Torso height** | `fused_pos[2]` | m |
-| **Torso velocity** | `fused_vel[3]` | m/s, world |
+### The policy block
 
-Also carried, because the Pi needs them to know whether to trust the rest:
-`fused_quat`, the estimated IMU biases, `fused_valid` (the estimator refuses to
-claim `OK` until it has converged), `contacts` / `contact_ticks`, per-actuator
-`act_error` / `act_state` / `act_flags`, and `health` - the same bitmask the red
+Bytes 12 to 219 are **52 contiguous float32** holding exactly what the RL
+observation needs, in the order it expects. The Pi slices it in place and copies
+nothing:
+
+```python
+obs = np.frombuffer(raw, "<f4", count=52, offset=12)
+```
+
+| # | Field | Count | Units | Comes from |
+|---|---|---|---|---|
+| 0 | `pelvis_z` | 1 | m | estimator — height above stance ground |
+| 1 | `quat` | 4 | w,x,y,z | estimator (observation uses x,y = indices 1,2) |
+| 2 | `gyro` | 3 | rad/s, **body** | BNO085 |
+| 3 | `vel_hdg` | 3 | m/s, **heading** | estimator — lateral, forward, vertical |
+| 4 | `joint_pos` | 10 | rad, output side | ODrive |
+| 5 | `joint_vel` | 10 | rad/s, output side | ODrive |
+| 6 | `spring_angle` | 4 | rad | after-spring encoders — **deflection** |
+| 7 | `ref_angle` | 10 | rad | gait library — **reserved, reads 0** |
+| 8 | `contact` | 4 | 0.0 / 1.0 | foot switches: L toe, L heel, R toe, R heel |
+| 9 | `foot_z` | 2 | m, world | forward kinematics — **[0] right, [1] left** |
+| 10 | `phase` | 1 | 0..1 | gait clock — **reserved, reads 0** |
+
+**Everything is a raw SI quantity.** The STM32 applies no policy scaling — no
+target-height subtraction, no `/10`, no clipping, no sin/cos, no normalisation.
+All of that belongs on the Pi, so the observation transform can change without
+reflashing the robot.
+
+Four things worth understanding:
+
+- **`spring_angle` is deflection, not a joint angle.** The encoder sits *after*
+  the series spring, so it reads how far the spring has wound up. Torque is
+  deflection × spring constant, computed on the Pi where the constant is tunable.
+- **`vel_hdg` is in the heading frame, not the world.** Forward means where the
+  robot faces. Yaw is the one part of the pose the filter cannot observe, so it
+  drifts — but the same drifting yaw defines both the velocity and the frame, so
+  the error cancels.
+- **`foot_z` is computed every tick, including during swing.** A gait policy
+  cares most about the foot that is off the ground.
+- **`ref_angle` and `phase` read zero** until the gait library runs on the
+  STM32. The Pi can tell because `phase` never advances.
+
+### The rest of the packet
+
+Diagnostics and raw values the policy does not need but a human debugging it
+does: `imu_quat` (the sensor's own 9-axis fusion, independent of ours),
+`imu_accel` / `imu_gyro`, `act_torque`, `act_error` / `act_state` / `act_flags`,
+`fused_pos` and `fused_vel` (world frame, before the heading rotation), the
+estimated IMU biases, `contact_ticks`, and `health` — the same bitmask the red
 LED blinks.
+
+And **`fused_valid`**, which matters more than the rest:
+
+| Value | Meaning |
+|---|---|
+| `INVALID` | no contact, IMU stale, or the filter diverged |
+| `CONVERGING` | running, uncertainty still large |
+| `OK` | velocity uncertainty low for 500 consecutive ticks |
+
+**Check `fusion_usable` before using height or velocity.** The filter starts
+with 30° of orientation uncertainty and 1 m/s of velocity uncertainty; for the
+first ~2 seconds those numbers are meaningless.
 
 ### Rates
 
-There is one stream, not several. Every field above ships in the same packet
-every millisecond - but not every field is *freshly measured* every time:
+There is one stream, not several. Every field ships in the same packet every
+millisecond — but not every field is *freshly measured* every time:
 
 | Field | Genuinely new at | Note |
 |---|---|---|
-| `enc_angle`, `act_pos/vel/torque`, `contacts` | **1 kHz** | new value in every packet |
-| `imu_*` | 400 Hz | same bytes repeat 2-3 packets; watch `imu_seq` |
-| `fused_*` | 1 kHz corrected, 400 Hz propagated | contact update every tick, IMU prediction only on a new sample |
+| `joint_pos/vel`, `spring_angle`, `contact` | **1 kHz** | new value in every packet |
+| `gyro`, `imu_accel` | ~400 Hz gyro, ~160-220 Hz accel | bytes repeat between updates; watch `imu_seq` |
+| `quat` (ours), `pelvis_z`, `vel_hdg`, `foot_z` | 1 kHz corrected, IMU-rate propagated | contact update every tick, prediction only on a new IMU sample |
+| `imu_quat` (sensor's) | 100 Hz | deliberately slowed, see the IMU section |
 
-So the actuator and after-spring encoder data really does reach the Pi at
-1 kHz. The wire and the kernel buffer never drop it - the only way to lose it
-is to read too slowly.
+So actuator and spring-encoder data really does reach the Pi at 1 kHz. The wire
+and the kernel buffer never drop it — **the only way to lose it is to read too
+slowly.**
 
 ### Receiving it at 1 kHz
 
@@ -361,39 +536,35 @@ with NexusLink('/dev/ttyACM0') as link:
 ```
 
 **A 250 Hz loop that reads one packet per step falls three packets further
-behind every step, forever.** Discarding the older three is not data loss - the
+behind every step, forever.** Discarding the older three is not data loss — the
 newest packet is the only one that is not already out of date. Pass
 `history=N` and call `drain()` if you also want every packet for logging.
 
 `link.stats` reports `loss_rate`, `seq_gaps` and `junk_bytes`; all three should
 be zero on a healthy link. Run `python pi/nexus_link.py /dev/ttyACM0` on the Pi
-to watch them before wiring anything into zeus_26 - a problem is far easier to
-find there than inside a control loop.
-
-**Check `fusion_usable` before using height or velocity.** The filter starts
-with 30 degrees of orientation uncertainty and 1 m/s of velocity uncertainty;
-until it converges those numbers are meaningless.
+before wiring anything into zeus_26 — a problem is far easier to find there than
+inside a control loop.
 
 `tools/test_pi_link.py` proves the Python side sustains 1 kHz without hardware:
 it feeds `NexusLink` a synthetic 1 kHz stream through a fake port and checks
 every packet arrives, in order, with no gaps. It also measures parse load, which
-matters more than it looks - the original pure-Python CRC cost 55% of a desktop
+matters more than it looks — the original pure-Python CRC cost 55% of a desktop
 core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
-`binascii.crc_hqx`, which is the same algorithm in C and ~300x faster (2.8% of a
-core); `_crc16_slow` is kept as the reference the test checks it against.
+`binascii.crc_hqx`, the same algorithm in C and ~300× faster (2.8% of a core);
+`_crc16_slow` is kept as the reference the test checks it against.
 
-Three deliberate choices:
+### Layout rules
 
-- **Encoder angles are sent in radians, not raw counts.** The STM32 needs them
-  in radians for forward kinematics anyway, so converting on the Pi would
-  duplicate the scale and any zero offsets in two places that can drift apart.
 - **Every 4-byte field sits on a 4-byte boundary.** The struct is packed, so
   otherwise the M7 emits byte-wise access for every misaligned float and numpy
   cannot view the buffer in place on the Pi. Fields are grouped by size rather
   than by topic for this reason.
-- **Protocol version is 2.** v1 sent raw encoder counts, had no health byte and
-  was misaligned. A v1 Pi and a v2 STM32 reject each other on the version check
-  rather than silently misparsing.
+- **The policy block is contiguous and its offset is checked.**
+  `tools/check_proto.py` fails if the block moves or gains a gap, because the
+  zero-copy slice above would then read the wrong bytes silently.
+- **Protocol version is 3.** v1 sent raw encoder counts; v2 added the health
+  byte and alignment; v3 added the policy block and split the contacts. Mismatched
+  versions reject each other rather than silently misparsing.
 
 ## State estimation
 
@@ -551,12 +722,19 @@ wire that hardware, and red going dark is your proof it works.
 
 ## Current state
 
-**Working:** boot chain, XIP execution, 1 kHz loop at ~230 µs of a 1000 µs
-budget (77% headroom), zero overruns, health/LED diagnostics, serial console.
+| Subsystem | State |
+|---|---|
+| Boot chain, XIP execution | ✅ working |
+| 1 kHz loop | ✅ ~230 µs of a 1000 µs budget, zero overruns |
+| Health LEDs, serial console | ✅ working |
+| **IMU (BNO085)** | ✅ **working on hardware** — quaternions, gravity, gyro |
+| Pi link, protocol v3 | ✅ C/Python verified, 1 kHz proven in test |
+| State estimator | ✅ wired in, ⚠️ never run on real sensor data |
+| Encoders (SPI) | ⚠️ initialises, no hardware attached |
+| CAN / ODrive | ⚠️ initialises, no hardware attached |
 
-**Not yet verified:** every external interface. The IMU, encoders, CAN buses
-and USB link all *initialise* cleanly, but no hardware is attached yet, so none
-of them has moved a single byte of real data.
+The IMU is the first external interface actually proven end to end. Encoders and
+CAN still have never moved a byte of real data.
 
 ### Known issues
 
@@ -565,14 +743,33 @@ CubeMX can silently undo are listed under
 [Working with CubeMX](#working-with-cubemx) instead — they are hazards, not
 outstanding work.
 
+**Accelerometer runs at ~158 Hz, not 400.** The gyro reaches 421 Hz but the
+accelerometer — which drives the estimator's velocity and height — is starved by
+the sensor's own scheduling (datasheet §6.9: sensors cannot all run at maximum
+simultaneously). Dropping the quaternion from 400 Hz to 100 Hz made it *worse*
+(216 → 158) and cut total throughput from 972 to 684 reports/s, which rules out
+simple bandwidth saturation. Untested next steps, in order: `IMU_ENABLE_QUAT 0`,
+requesting 800 Hz to exploit the `≤ 2.1 × requested` rule, and the Game Rotation
+Vector (`0x08`, 6-axis, much cheaper — and better on a robot full of motor
+magnets). 158 Hz is usable but below where it should be.
+
+**Estimator calibration constants are placeholders.** The `sign` and `offset`
+per joint in `fusion.c` are `+1` and `0`. Until they are measured on the real
+leg, forward kinematics is offset by however wrong they are — **and the filter
+will trust it completely.** This is the main thing hardware unblocks.
+
+**`ref_angle` and `phase` read zero.** The gait library does not run on the
+STM32 yet; only the leg test plays the trajectory. Space is reserved in the
+packet so the Pi side can be written against the final layout now.
+
 **External flash runs in 1-line mode, not octal.** SFDP init fails at step 11
 (re-reading the SFDP header through the freshly configured octal mode) with
-`EXTMEM_DRIVER_NOR_SFDP_MEMTYPE_CHECK`. 1-line works and is the current
-setting (`NEXUS_EXTMEM_LINES` in `Boot/Core/Src/extmem_manager.c`), at roughly
-1/8th the instruction-fetch bandwidth. The loop currently runs in ~230 µs of
-its 1000 µs budget *with* the estimator, so this costs nothing measurable
-today. If that margin shrinks, move the hot path into ITCM (64 KB, 0% used)
-before spending time on octal mode.
+`EXTMEM_DRIVER_NOR_SFDP_MEMTYPE_CHECK`. 1-line works and is the current setting
+(`NEXUS_EXTMEM_LINES` in `Boot/Core/Src/extmem_manager.c`), at roughly 1/8th the
+instruction-fetch bandwidth. The loop runs in ~230 µs of its 1000 µs budget
+*with* the estimator, so this costs nothing measurable today. If that margin
+shrinks, move the hot path into ITCM (64 KB, 0% used) before spending time on
+octal mode.
 
 **CAN bandwidth needs attention before all 10 actuators run.** At 5 nodes per
 bus with commands plus two telemetry messages each at 1 kHz, the bus sits near
@@ -592,8 +789,9 @@ For reference, since these were live problems during bring-up: the MPU/DMA
 cache-coherency fault, the `MX_XSPI2_Init()` bus hang, the USB voltage detector
 killing Boot, the 3-deep FDCAN TX FIFO silently dropping frames to nodes 4 and
 5, the `imu_service()` infinite loop, the `Q̄` stack overflow in the estimator,
-and the USB TX buffer being overwritten mid-transfer. Each has a guard, a
-counter, or a test so it cannot come back unnoticed.
+the USB TX buffer being overwritten mid-transfer, the pure-Python CRC that
+could not sustain 1 kHz on a Pi, and the three BNO085 protocol bugs above. Each
+has a guard, a counter, or a test so it cannot come back unnoticed.
 
 ---
 
