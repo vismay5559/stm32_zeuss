@@ -167,7 +167,7 @@ class NexusState:
 
     # IMU, raw
     imu_quat: List[float]        # w, x, y, z
-    imu_accel: List[float]       # m/s^2, gravity removed
+    imu_accel: List[float]       # m/s^2, specific force, includes gravity
     imu_gyro: List[float]        # rad/s
     imu_seq: int
 

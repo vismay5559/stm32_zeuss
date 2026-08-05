@@ -61,7 +61,7 @@ typedef struct __attribute__((packed))
 
     /* ---- IMU, raw from the BNO085 ------------------------------ 12 */
     float    imu_quat[4];                    /*  12 w, x, y, z                  */
-    float    imu_accel[3];                   /*  28 m/s^2, gravity removed      */
+    float    imu_accel[3];                   /*  28 m/s^2, specific force, includes gravity      */
     float    imu_gyro[3];                    /*  40 rad/s                       */
     uint32_t imu_seq;                        /*  52 lets the Pi spot staleness  */
 
