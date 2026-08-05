@@ -197,6 +197,12 @@ void app_on_tick(void)
     s_tick_pending++;
 }
 
+/* ODrive reports turns; the policy block is radians on the output side. */
+#define TURNS_TO_RAD   6.28318531f
+
+/* AS5048A is 14-bit over a full turn. */
+#define ENC_TO_RAD     (6.28318531f / 16384.0f)
+
 static void build_and_send_state(void)
 {
     imu_sample_t    imu;
@@ -208,36 +214,72 @@ static void build_and_send_state(void)
     s_state.seq          = s_seq++;
     s_state.timestamp_us = __HAL_TIM_GET_COUNTER(&htim2);
 
+    /* ---- raw IMU, passed through for logging and cross-checks -------- */
     memcpy(s_state.imu_quat,  imu.quat,  sizeof(s_state.imu_quat));
     memcpy(s_state.imu_accel, imu.accel, sizeof(s_state.imu_accel));
     memcpy(s_state.imu_gyro,  imu.gyro,  sizeof(s_state.imu_gyro));
     s_state.imu_seq = imu.seq;
 
-    /* AS5048A is 14-bit over a full turn; the wire format carries radians so
-       the Pi never has to know the sensor exists. */
+    /* Policy block wants body-frame angular velocity, which is exactly what
+       the gyro reports - no rotation, no bias removal. The estimator's bias
+       estimate is sent separately if the Pi ever wants to apply it. */
+    memcpy(s_state.gyro, imu.gyro, sizeof(s_state.gyro));
+
+    /* ---- after-spring encoders -------------------------------------- */
     uint16_t enc_raw[NEXUS_NUM_ENCODERS];
     uint8_t  enc_valid;
+    float    enc_rad[NEXUS_NUM_ENCODERS];
 
     enc_get(enc_raw, &enc_valid);
     for (int e = 0; e < NEXUS_NUM_ENCODERS; e++)
     {
-        s_state.enc_angle[e] = (float)enc_raw[e] * (6.28318531f / 16384.0f);
+        /*
+         * These measure SPRING DEFLECTION, not an absolute joint angle - the
+         * encoder sits after the series spring, so it reads how far the spring
+         * has wound up. Torque is deflection times the spring constant, done
+         * on the Pi where the constant can be tuned without reflashing.
+         */
+        enc_rad[e]              = (float)enc_raw[e] * ENC_TO_RAD;
+        s_state.spring_angle[e] = enc_rad[e];
     }
     s_state.enc_valid = enc_valid;
 
-    s_state.contacts         = (uint8_t)(contact_switches() | contact_feet());
+    /* ---- actuators, turns -> radians on the output side -------------- */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_state.joint_pos[j] = act.pos[j] * TURNS_TO_RAD;
+        s_state.joint_vel[j] = act.vel[j] * TURNS_TO_RAD;
+    }
+
+    /* ---- contacts: four switches, as floats for the observation ------ */
+    uint8_t sw = contact_switches();
+
+    s_state.contacts = (uint8_t)(sw | contact_feet());
+    for (int c = 0; c < NEXUS_NUM_CONTACTS; c++)
+    {
+        s_state.contact[c] = (sw & (1u << c)) ? 1.0f : 0.0f;
+    }
+
     s_state.health           = (uint8_t)health_faults();
     s_state.contact_ticks[0] = contact_stable_ticks(0);
     s_state.contact_ticks[1] = contact_stable_ticks(1);
 
+    /*
+     * Reference angles and gait phase come from the gait library, which does
+     * not run on the STM32 yet. Space is reserved in the packet so the Pi side
+     * can be written against the final layout now; both stay zero until the
+     * library lands, and the Pi can tell because phase never advances.
+     */
+    memset(s_state.ref_angle, 0, sizeof(s_state.ref_angle));
+    s_state.phase = 0.0f;
+
     /* Estimate before packing, so the packet carries this tick's fused state
        rather than the previous one. */
-    fusion_tick(&imu, s_state.enc_angle, enc_valid, &act,
+    fusion_tick(&imu, enc_rad, enc_valid, &act,
                 s_state.contacts, s_state.timestamp_us);
     fusion_fill_state(&s_state);
 
-    memcpy(s_state.act_pos,    act.pos,        sizeof(s_state.act_pos));
-    memcpy(s_state.act_vel,    act.vel,        sizeof(s_state.act_vel));
+    /* ---- actuator diagnostics --------------------------------------- */
     memcpy(s_state.act_torque, act.torque,     sizeof(s_state.act_torque));
     memcpy(s_state.act_error,  act.axis_error, sizeof(s_state.act_error));
     memcpy(s_state.act_state,  act.axis_state, sizeof(s_state.act_state));

@@ -40,24 +40,35 @@ def check(name, cond, detail=""):
 # Synthetic packets
 # --------------------------------------------------------------------------
 
-def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x30):
+def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x33):
     """Build one wire-format state packet, exactly as the STM32 would."""
     body = struct.pack(
         P.STATE_FORMAT[:-1],          # everything but the trailing crc
         P.SYNC, P.MSG_STATE, P.PROTO_VERSION,
         seq, seq * 1000,              # seq, timestamp_us
+        # ---- policy block ----
+        height,                       # pelvis_z
+        1.0, 0.0, 0.0, 0.0,           # quat
+        0.0, 0.0, 0.0,                # gyro
+        0.1, 0.4, 0.0,                # vel_hdg: lat, fwd, up
+        *([0.25] * P.NUM_JOINTS),     # joint_pos
+        *([0.0] * P.NUM_JOINTS),      # joint_vel
+        *([0.05] * P.NUM_ENCODERS),   # spring_angle
+        *([0.3] * P.NUM_JOINTS),      # ref_angle
+        1.0, 1.0, 0.0, 0.0,           # contact: L toe, L heel, R toe, R heel
+        0.12, 0.0,                    # foot_z: right, left
+        0.75,                         # phase
+        # ---- raw IMU ----
         1.0, 0.0, 0.0, 0.0,           # imu_quat
-        0.0, 0.0, 0.0,                # imu_accel
+        0.0, 0.0, 9.81,               # imu_accel, includes gravity
         0.0, 0.0, 0.0,                # imu_gyro
-        seq // 3,                     # imu_seq - 400 Hz against a 1 kHz tick
-        *([0.5] * P.NUM_ENCODERS),    # enc_angle
-        *([0.0] * P.NUM_JOINTS),      # act_pos
-        *([0.0] * P.NUM_JOINTS),      # act_vel
+        seq // 3,                     # imu_seq
+        # ---- actuator diagnostics ----
         *([1.5] * P.NUM_JOINTS),      # act_torque
         *([0] * P.NUM_JOINTS),        # act_error
-        1.0, 0.0, 0.0, 0.0,           # fused_quat
+        # ---- estimator internals ----
         0.0, 0.0, height,             # fused_pos
-        0.0, 0.0, 0.0,                # fused_vel
+        0.4, 0.1, 0.0,                # fused_vel, world
         0.0, 0.0, 0.0,                # fused_gyro_bias
         0.0, 0.0, 0.0,                # fused_accel_bias
         100, 100,                     # contact_ticks
@@ -69,6 +80,7 @@ def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x30):
         0x00,                         # health
     )
     return body + struct.pack("<H", crc16(body))
+
 
 
 class FakePort:
@@ -135,11 +147,17 @@ def test_parse():
     check("round-trips", st is not None)
     check("seq preserved", st.seq == 42, f"got {st.seq}")
     check("height preserved", abs(st.height - 0.65) < 1e-6, f"got {st.height:.4f}")
+    check("vel_fwd preserved", abs(st.vel_fwd - 0.4) < 1e-6, f"got {st.vel_fwd:.4f}")
+    check("phase preserved", abs(st.phase - 0.75) < 1e-6, f"got {st.phase:.4f}")
+    check("foot_z right", abs(st.foot_z[0] - 0.12) < 1e-6)
+    check("ref_angle reserved space", len(st.ref_angle) == P.NUM_JOINTS)
     check("fusion_usable", st.fusion_usable is True)
-    check("both feet down", st.left_foot_down and st.right_foot_down)
+    check("left foot down, right up",
+          st.left_foot_down and not st.right_foot_down)
     check("no faults", st.faults() == [])
     check("torque preserved", abs(st.act_torque[3] - 1.5) < 1e-6)
-    check("encoders preserved", abs(st.enc_angle[2] - 0.5) < 1e-6)
+    check("joint_pos preserved", abs(st.joint_pos[9] - 0.25) < 1e-6)
+    check("spring angle preserved", abs(st.spring_angle[2] - 0.05) < 1e-6)
 
     bad = bytearray(pkt)
     bad[60] ^= 0xFF

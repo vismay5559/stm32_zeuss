@@ -30,16 +30,27 @@ FIELDS = [
     ("version",          "B", 1),
     ("seq",              "I", 1),
     ("timestamp_us",     "I", 1),
+    # ---- policy block ----
+    ("pelvis_z",         "f", 1),
+    ("quat",             "f", 4),
+    ("gyro",             "f", 3),
+    ("vel_hdg",          "f", 3),
+    ("joint_pos",        "f", P.NUM_JOINTS),
+    ("joint_vel",        "f", P.NUM_JOINTS),
+    ("spring_angle",     "f", P.NUM_ENCODERS),
+    ("ref_angle",        "f", P.NUM_JOINTS),
+    ("contact",          "f", P.NUM_CONTACTS),
+    ("foot_z",           "f", 2),
+    ("phase",            "f", 1),
+    # ---- raw IMU ----
     ("imu_quat",         "f", 4),
     ("imu_accel",        "f", 3),
     ("imu_gyro",         "f", 3),
     ("imu_seq",          "I", 1),
-    ("enc_angle",        "f", P.NUM_ENCODERS),
-    ("act_pos",          "f", P.NUM_JOINTS),
-    ("act_vel",          "f", P.NUM_JOINTS),
+    # ---- actuator diagnostics ----
     ("act_torque",       "f", P.NUM_JOINTS),
     ("act_error",        "I", P.NUM_JOINTS),
-    ("fused_quat",       "f", 4),
+    # ---- estimator internals ----
     ("fused_pos",        "f", 3),
     ("fused_vel",        "f", 3),
     ("fused_gyro_bias",  "f", 3),
@@ -119,6 +130,19 @@ def main():
         print("MISALIGNED 4-byte fields:", ", ".join(mis))
     else:
         print("all 4-byte fields are 4-byte aligned")
+
+    # The policy block must be one contiguous run of float32 at a known
+    # offset, or the zero-copy numpy slice on the Pi reads the wrong bytes.
+    if c["pelvis_z"] != P.POLICY_OFFSET:
+        bad += 1
+        print("POLICY BLOCK starts at", c["pelvis_z"], "expected", P.POLICY_OFFSET)
+    elif (c["imu_quat"] - c["pelvis_z"]) != P.POLICY_COUNT * 4:
+        bad += 1
+        print("POLICY BLOCK not contiguous:",
+              c["imu_quat"] - c["pelvis_z"], "vs", P.POLICY_COUNT * 4)
+    else:
+        print(f"policy block: {P.POLICY_COUNT} float32 at offset "
+              f"{P.POLICY_OFFSET}, contiguous")
 
     print("\n" + ("PROTOCOL MISMATCH" if bad else "C and Python agree"))
     return 1 if bad else 0

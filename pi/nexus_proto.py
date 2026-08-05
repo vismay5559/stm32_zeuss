@@ -40,20 +40,61 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 2
+PROTO_VERSION = 3
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
 
 NUM_JOINTS = 10
 NUM_ENCODERS = 4
+NUM_CONTACTS = 4
 
-CONTACT_L_TOE = 1 << 0
-CONTACT_L_HEEL = 1 << 1
-CONTACT_R_TOE = 1 << 2
-CONTACT_R_HEEL = 1 << 3
+# Foot switch order in contact[] and in the `contacts` bitmask.
+CONTACT_L_TOE = 0
+CONTACT_L_HEEL = 1
+CONTACT_R_TOE = 2
+CONTACT_R_HEEL = 3
+
+# Derived per-foot bits, in `contacts` only.
 CONTACT_L_FOOT = 1 << 4
 CONTACT_R_FOOT = 1 << 5
+
+# --------------------------------------------------------------------------
+# The policy block: 52 contiguous float32 starting at byte 12, holding exactly
+# what the RL observation needs. Slice it out with numpy and skip parsing:
+#
+#     obs = np.frombuffer(raw, dtype="<f4", count=POLICY_COUNT,
+#                         offset=POLICY_OFFSET)
+#
+# Every value is a RAW SI QUANTITY. The STM32 does no policy scaling - no
+# target-height subtraction, no clipping, no sin/cos, no normalisation. Those
+# belong here, so the observation transform can change without reflashing.
+# --------------------------------------------------------------------------
+
+POLICY_OFFSET = 12
+POLICY_COUNT = 52
+
+# (name, count) in order, for indexing the block by field.
+POLICY_FIELDS = [
+    ("pelvis_z", 1),        # m, height above stance ground
+    ("quat", 4),            # w,x,y,z; observation uses x,y = indices 1,2
+    ("gyro", 3),            # rad/s, body frame
+    ("vel_hdg", 3),         # m/s, heading frame: lateral, forward, vertical
+    ("joint_pos", 10),      # rad, output side
+    ("joint_vel", 10),      # rad/s, output side
+    ("spring_angle", 4),    # rad, SPRING DEFLECTION, not absolute joint angle
+    ("ref_angle", 10),      # rad, gait library; zero until it runs on the STM32
+    ("contact", 4),         # 0.0/1.0, debounced foot switches
+    ("foot_z", 2),          # m, world; [0] right, [1] left
+    ("phase", 1),           # 0..1 gait clock
+]
+
+POLICY_INDEX = {}
+_off = 0
+for _name, _n in POLICY_FIELDS:
+    POLICY_INDEX[_name] = (_off, _n)
+    _off += _n
+assert _off == POLICY_COUNT, _off
 
 FUSION_INVALID = 0
 FUSION_CONVERGING = 1
@@ -96,18 +137,29 @@ STATE_FORMAT = (
     "B"      # version
     "I"      # seq
     "I"      # timestamp_us
-    "4f"     # imu_quat        w, x, y, z
-    "3f"     # imu_accel       m/s^2
+    # ---------------- policy block, 52 float32 ----------------
+    "f"      # pelvis_z
+    "4f"     # quat            w,x,y,z fused
+    "3f"     # gyro            rad/s body
+    "3f"     # vel_hdg         m/s heading: lat, fwd, up
+    "10f"    # joint_pos       rad output side
+    "10f"    # joint_vel       rad/s output side
+    "4f"     # spring_angle    rad deflection
+    "10f"    # ref_angle       rad, reserved
+    "4f"     # contact         0.0 / 1.0
+    "2f"     # foot_z          m world: right, left
+    "f"      # phase           0..1
+    # ---------------- raw IMU ----------------
+    "4f"     # imu_quat        sensor's own fusion
+    "3f"     # imu_accel       m/s^2 specific force, includes gravity
     "3f"     # imu_gyro        rad/s
     "I"      # imu_seq
-    "4f"     # enc_angle       rad, after-spring
-    "10f"    # act_pos         turns
-    "10f"    # act_vel         turns/s
+    # ---------------- actuator diagnostics ----------------
     "10f"    # act_torque      Nm
     "10I"    # act_error
-    "4f"     # fused_quat
-    "3f"     # fused_pos       [2] is height
-    "3f"     # fused_vel
+    # ---------------- estimator internals ----------------
+    "3f"     # fused_pos       m world
+    "3f"     # fused_vel       m/s world, before heading rotation
     "3f"     # fused_gyro_bias
     "3f"     # fused_accel_bias
     "2H"     # contact_ticks
@@ -165,55 +217,70 @@ class NexusState:
     seq: int
     timestamp_us: int
 
-    # IMU, raw
-    imu_quat: List[float]        # w, x, y, z
+    # ---- policy block, in observation order -----------------------------
+    pelvis_z: float              # m, height above stance ground
+    quat: List[float]            # w,x,y,z body->world, fused estimate
+    gyro: List[float]            # rad/s, body frame
+    vel_hdg: List[float]         # m/s, heading frame: lateral, forward, up
+    joint_pos: List[float]       # rad, output side
+    joint_vel: List[float]       # rad/s, output side
+    spring_angle: List[float]    # rad, SPRING DEFLECTION (not joint angle)
+    ref_angle: List[float]       # rad, gait library; zero until it runs
+    contact: List[float]         # 0.0/1.0, four foot switches
+    foot_z: List[float]          # m, world; [0] right, [1] left
+    phase: float                 # 0..1 gait clock
+
+    # ---- raw IMU --------------------------------------------------------
+    imu_quat: List[float]        # sensor's own 9-axis fusion
     imu_accel: List[float]       # m/s^2, specific force, includes gravity
     imu_gyro: List[float]        # rad/s
     imu_seq: int
 
-    # After-spring joint angles
-    enc_angle: List[float]       # rad
-    enc_valid: int               # bit per encoder
-
-    # Actuators
-    act_pos: List[float]         # turns
-    act_vel: List[float]         # turns/s
+    # ---- actuator diagnostics -------------------------------------------
     act_torque: List[float]      # Nm
     act_error: List[int]
-    act_state: List[int]
-    act_flags: List[int]
 
-    # Fused state of the lower torso - what the policy actually wants
-    fused_quat: List[float]      # w, x, y, z, body -> world
-    fused_pos: List[float]       # m, world; [2] is height above ground
-    fused_vel: List[float]       # m/s, world
+    # ---- estimator internals --------------------------------------------
+    fused_pos: List[float]       # m, world; [0],[1] drift, logging only
+    fused_vel: List[float]       # m/s, world, before heading rotation
     fused_gyro_bias: List[float]
     fused_accel_bias: List[float]
-    fused_valid: int
 
-    contacts: int
     contact_ticks: List[int]
+    act_state: List[int]
+    act_flags: List[int]
+    enc_valid: int
+    contacts: int
+    fused_valid: int
     health: int
 
     # ---- convenience ----------------------------------------------------
 
     @property
     def height(self) -> float:
-        """Height of the lower torso above the ground, metres."""
-        return self.fused_pos[2]
+        """Height of the pelvis above the stance ground, metres."""
+        return self.pelvis_z
 
     @property
-    def velocity(self) -> List[float]:
-        """World-frame velocity of the lower torso, m/s."""
-        return self.fused_vel
+    def vel_lat(self) -> float:
+        return self.vel_hdg[0]
+
+    @property
+    def vel_fwd(self) -> float:
+        return self.vel_hdg[1]
+
+    @property
+    def vel_up(self) -> float:
+        return self.vel_hdg[2]
 
     @property
     def left_foot_down(self) -> bool:
-        return bool(self.contacts & CONTACT_L_FOOT)
+        """Either left switch closed."""
+        return bool(self.contact[CONTACT_L_TOE] or self.contact[CONTACT_L_HEEL])
 
     @property
     def right_foot_down(self) -> bool:
-        return bool(self.contacts & CONTACT_R_FOOT)
+        return bool(self.contact[CONTACT_R_TOE] or self.contact[CONTACT_R_HEEL])
 
     @property
     def fusion_usable(self) -> bool:
@@ -228,6 +295,29 @@ class NexusState:
 
     # ---- parsing --------------------------------------------------------
 
+    @staticmethod
+    def policy_block(raw: bytes):
+        """
+        The 52 observation floats, straight out of the buffer.
+
+        Prefer this to parse() in the control loop: it copies nothing and skips
+        building a dataclass, which at 1 kHz is the difference between a few
+        percent of a Pi core and a noticeable one. Use POLICY_INDEX to pick out
+        a field:
+
+            blk = NexusState.policy_block(raw)
+            off, n = POLICY_INDEX["joint_pos"]
+            q = blk[off:off + n]
+
+        Returns a numpy view if numpy is present, otherwise a tuple.
+        """
+        try:
+            import numpy as np
+            return np.frombuffer(raw, dtype="<f4",
+                                 count=POLICY_COUNT, offset=POLICY_OFFSET)
+        except ImportError:
+            return struct.unpack_from("<52f", raw, POLICY_OFFSET)
+
     @classmethod
     def parse(cls, raw: bytes) -> Optional["NexusState"]:
         """Parse exactly one packet. Returns None if it fails any check."""
@@ -240,35 +330,40 @@ class NexusState:
         if f[-1] != crc16(raw[:-2]):
             return None
 
-        i = 3
+        i = 5
         def take(n):
             nonlocal i
             out = f[i:i + n]
             i += n
             return list(out)
 
-        seq, ts = f[3], f[4]
-        i = 5
         return cls(
-            seq=seq,
-            timestamp_us=ts,
+            seq=f[3],
+            timestamp_us=f[4],
+            pelvis_z=take(1)[0],
+            quat=take(4),
+            gyro=take(3),
+            vel_hdg=take(3),
+            joint_pos=take(NUM_JOINTS),
+            joint_vel=take(NUM_JOINTS),
+            spring_angle=take(NUM_ENCODERS),
+            ref_angle=take(NUM_JOINTS),
+            contact=take(NUM_CONTACTS),
+            foot_z=take(2),
+            phase=take(1)[0],
             imu_quat=take(4),
             imu_accel=take(3),
             imu_gyro=take(3),
             imu_seq=take(1)[0],
-            enc_angle=take(4),
-            act_pos=take(10),
-            act_vel=take(10),
-            act_torque=take(10),
-            act_error=take(10),
-            fused_quat=take(4),
+            act_torque=take(NUM_JOINTS),
+            act_error=take(NUM_JOINTS),
             fused_pos=take(3),
             fused_vel=take(3),
             fused_gyro_bias=take(3),
             fused_accel_bias=take(3),
             contact_ticks=take(2),
-            act_state=take(10),
-            act_flags=take(10),
+            act_state=take(NUM_JOINTS),
+            act_flags=take(NUM_JOINTS),
             enc_valid=take(1)[0],
             contacts=take(1)[0],
             fused_valid=take(1)[0],

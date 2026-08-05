@@ -192,6 +192,10 @@ static uint8_t leg_sources_ok(const joint_src_t *map, uint8_t enc_valid,
     return 1;
 }
 
+/* Foot position in the body frame, refreshed every tick for foot_z. */
+static inekf_real_t s_foot_body[2][3];
+static uint8_t      s_foot_ok[2];
+
 static void update_status(void)
 {
     /* Variance of the states the Pi consumes. */
@@ -302,11 +306,20 @@ void fusion_tick(const imu_sample_t *imu,
 
         float q[KIN_LEG_JOINTS], p_body[3], J[3 * KIN_LEG_JOINTS];
 
-        if (down)
-        {
-            leg_angles(maps[leg], enc_rad, act, q);
-            kin_foot(&s_kin, hips[leg], q, p_body, J);
-        }
+        /*
+         * Compute forward kinematics every tick, not only when the foot is
+         * planted. The contact update needs it when down, but foot_z is
+         * reported continuously - a foot height that goes stale the moment the
+         * leg leaves the ground would be worse than useless to a gait policy,
+         * which cares most about the swing foot.
+         */
+        leg_angles(maps[leg], enc_rad, act, q);
+        kin_foot(&s_kin, hips[leg], q, p_body, J);
+
+        s_foot_body[leg][0] = p_body[0];
+        s_foot_body[leg][1] = p_body[1];
+        s_foot_body[leg][2] = p_body[2];
+        s_foot_ok[leg]      = ok;
 
         if (down && !s_foot_down[leg])
         {
@@ -337,8 +350,7 @@ void fusion_tick(const imu_sample_t *imu,
 
 void fusion_fill_state(nexus_state_t *st)
 {
-    inekf_quaternion(&s_f, st->fused_quat);
-
+    /* ---- estimator internals, for logging ---------------------------- */
     st->fused_pos[0] = s_f.p[0];
     st->fused_pos[1] = s_f.p[1];
     st->fused_pos[2] = s_f.p[2];
@@ -349,6 +361,58 @@ void fusion_fill_state(nexus_state_t *st)
     memcpy(st->fused_accel_bias, s_f.ba, sizeof(st->fused_accel_bias));
 
     st->fused_valid = s_status;
+
+    /* ---- policy block ------------------------------------------------ */
+    inekf_quaternion(&s_f, st->quat);
+    st->pelvis_z = s_f.p[2];
+
+    /*
+     * World velocity rotated into the HEADING frame - world turned about z by
+     * the robot's own yaw, so "forward" means where the robot faces rather
+     * than where the world's x axis points.
+     *
+     * Yaw is the one part of the pose the filter cannot observe (paper 5.4),
+     * so it drifts. That does not matter here: the policy only ever sees
+     * velocity relative to the current heading, and the same drifting yaw is
+     * used to define that heading. The error cancels.
+     */
+    {
+        const float w = st->quat[0], x = st->quat[1];
+        const float y = st->quat[2], z = st->quat[3];
+
+        float yaw = atan2f(2.0f * (w * z + x * y),
+                           1.0f - 2.0f * (y * y + z * z));
+        float c = cosf(yaw), s = sinf(yaw);
+
+        float vx = st->fused_vel[0], vy = st->fused_vel[1];
+
+        st->vel_hdg[0] = -s * vx + c * vy;   /* lateral  */
+        st->vel_hdg[1] =  c * vx + s * vy;   /* forward  */
+        st->vel_hdg[2] =  st->fused_vel[2];  /* vertical */
+    }
+
+    /*
+     * Foot height in the world: body position plus the foot offset rotated out
+     * of the body frame. Since fused_pos[2] is anchored so the first contact
+     * sits at z = 0, this reads as height above the stance ground.
+     *
+     * Table order is right then left; leg 0 is left internally.
+     */
+    {
+        const inekf_real_t *R = s_f.R;
+        const int leg_of[2] = { 1, 0 };      /* foot_z[0]=right, [1]=left */
+
+        for (int i = 0; i < 2; i++)
+        {
+            int leg = leg_of[i];
+            const inekf_real_t *b = s_foot_body[leg];
+
+            /* Third row of R times the body-frame offset. */
+            st->foot_z[i] = s_foot_ok[leg]
+                ? (float)(s_f.p[2] + R[6] * b[0] + R[7] * b[1] + R[8] * b[2])
+                : 0.0f;
+        }
+    }
 }
 
 uint8_t fusion_status(void)

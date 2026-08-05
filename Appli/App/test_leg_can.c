@@ -1,4 +1,5 @@
 #include "test_leg_can.h"
+#include "gait_ref.h"
 #include "critical.h"
 #include "main.h"
 #include <math.h>
@@ -18,6 +19,8 @@ extern TIM_HandleTypeDef   htim6;
  * odrivetool (axis0.config.can.node_id). They must be unique on the bus.
  */
 #define JOINT_COUNT      4
+
+static float             s_gait_phase;
 
 static const uint8_t     s_node_id[JOINT_COUNT] = { 1, 2, 3, 4 };
 static const char *const s_joint_name[JOINT_COUNT] = {
@@ -51,9 +54,38 @@ static const char *const s_joint_name[JOINT_COUNT] = {
  */
 #define LEGTEST_ARM_DELAY_MS         3000u
 
-/* Motion profile. Only has any effect when closed loop is enabled above. */
+/*
+ * Motion profile. Only has any effect when closed loop is enabled above.
+ *
+ *   1 = play the reference gait from gait_ref.c (generated from the
+ *       spreadsheet by tools/gen_gait.py)
+ *   0 = the old single-joint sine, useful for a first spin of one axis
+ */
+#define LEGTEST_MOTION_GAIT          1
+
+/* Sine fallback, used only when LEGTEST_MOTION_GAIT is 0. */
 #define LEGTEST_AMPLITUDE_TURNS      0.05f   /* +/- turns, after gearbox      */
 #define LEGTEST_FREQ_HZ              0.25f   /* slow enough to watch          */
+
+/*
+ * Playback speed, 1.0 = the 0.8 s cycle the trajectory was optimised for.
+ * START BELOW 1. At quarter speed every joint moves a quarter as fast, so a
+ * wrong sign or a bad node mapping shows up as a slow drift you can watch and
+ * kill rather than a snap you can only hear.
+ */
+#define LEGTEST_GAIT_SPEED           0.25f
+
+/*
+ * Time to travel from wherever the leg is when the axes arm to the first pose
+ * of the trajectory, in ticks (ms).
+ *
+ * Without this the first command after arming would be gait phase 0, and the
+ * leg would jump there from its resting position as fast as the drives allow.
+ * The ramp starts from the MEASURED position, so it is only as good as the CAN
+ * telemetry - if no encoder estimates have arrived the entry is skipped and
+ * nothing moves.
+ */
+#define LEGTEST_GAIT_ENTRY_MS        2000u
 
 /*
  * ODrive S1 may or may not support CAN FD depending on firmware version - it
@@ -413,8 +445,17 @@ void legtest_init(void)
     }
     printf("\r\n");
 #if LEGTEST_ENABLE_CLOSED_LOOP
-    printf("closed loop: ENABLED - MOTORS WILL MOVE. amplitude %.3f turns @ %.2f Hz\r\n",
+#if LEGTEST_MOTION_GAIT
+    printf("motion   : REFERENCE GAIT, %d samples, %.3f s cycle at %.2fx"
+           " speed\r\n", GAIT_SAMPLES, (double)GAIT_CYCLE_S,
+           (double)LEGTEST_GAIT_SPEED);
+    printf("closed loop: ENABLED - MOTORS WILL MOVE. %u ms ramp from the"
+           " measured pose\r\n             into the trajectory before the phase clock starts.\r\n",
+           (unsigned)LEGTEST_GAIT_ENTRY_MS);
+#else
+    printf("closed loop: ENABLED - MOTORS WILL MOVE. sine %.3f turns @ %.2f Hz\r\n",
            (double)LEGTEST_AMPLITUDE_TURNS, (double)LEGTEST_FREQ_HZ);
+#endif
 #else
     printf("closed loop: disabled (safe) - axes stay IDLE, motors cannot move.\r\n");
     printf("             positions are still transmitted so TX can be verified.\r\n");
@@ -528,16 +569,85 @@ void legtest_run(void)
          * still gets commanded at 250 Hz, far more than enough to watch a leg
          * move.
          */
-        float target = 0.0f;
+        float target[JOINT_COUNT] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
         /* Stay at zero through the arming delay so the leg does not lurch the
            instant the axes come live. */
         if (s_tick > LEGTEST_ARM_DELAY_MS)
         {
-            float t     = (float)(s_tick - LEGTEST_ARM_DELAY_MS) * 0.001f;
+            uint32_t since_arm = s_tick - LEGTEST_ARM_DELAY_MS;
+
+#if LEGTEST_MOTION_GAIT
+            static float   s_entry_from[JOINT_COUNT];
+            static uint8_t s_entry_ok;
+
+            float first[JOINT_COUNT];
+            gait_sample(0.0f, first);
+
+            if (since_arm == 1u)
+            {
+                /*
+                 * Capture where the leg actually is, once, at the moment of
+                 * arming. Every joint must have reported an encoder estimate;
+                 * ramping from an assumed zero towards the trajectory would
+                 * command a jump exactly as large as the assumption is wrong.
+                 */
+                s_entry_ok = 1;
+                for (int j = 0; j < JOINT_COUNT; j++)
+                {
+                    if (s_joint[j].n_encoder == 0u)
+                    {
+                        s_entry_ok = 0;
+                    }
+                    s_entry_from[j] = s_joint[j].pos;
+                }
+
+                if (!s_entry_ok)
+                {
+                    printf("\r\n!! no encoder estimate from every"
+                           " joint - gait NOT started, holding position\r\n");
+                }
+            }
+
+            if (!s_entry_ok)
+            {
+                /* Hold station at the last measured position. */
+                for (int j = 0; j < JOINT_COUNT; j++)
+                {
+                    target[j] = s_joint[j].pos;
+                }
+            }
+            else if (since_arm < LEGTEST_GAIT_ENTRY_MS)
+            {
+                /* Straight-line move into the start of the trajectory. */
+                float a = (float)since_arm / (float)LEGTEST_GAIT_ENTRY_MS;
+
+                for (int j = 0; j < JOINT_COUNT; j++)
+                {
+                    target[j] = s_entry_from[j] +
+                                (first[j] - s_entry_from[j]) * a;
+                }
+            }
+            else
+            {
+                /* Free-running phase clock. gait_sample wraps it, so this can
+                   count up forever without special-casing the seam. */
+                float t = (float)(since_arm - LEGTEST_GAIT_ENTRY_MS) * 0.001f;
+
+                s_gait_phase = (t * LEGTEST_GAIT_SPEED) / GAIT_CYCLE_S;
+                gait_sample(s_gait_phase, target);
+            }
+#else
+            float t     = (float)since_arm * 0.001f;
             float phase = 2.0f * 3.14159265f * LEGTEST_FREQ_HZ * t;
-            target = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
+            float v     = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
+
+            for (int j = 0; j < JOINT_COUNT; j++)
+            {
+                target[j] = v;
+            }
+#endif
         }
 #endif
 
@@ -547,11 +657,11 @@ void legtest_run(void)
             /* Full rate: command every joint on every tick. */
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                send_input_pos(j, target);
+                send_input_pos(j, target[j]);
             }
 #else
             /* Reduced rate: one joint per tick, round-robin. */
-            send_input_pos(tx_slot, target);
+            send_input_pos(tx_slot, target[tx_slot]);
             tx_slot = (tx_slot + 1) % JOINT_COUNT;
 #endif
         }
