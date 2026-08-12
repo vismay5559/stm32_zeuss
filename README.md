@@ -293,20 +293,42 @@ when you need to prove reception works for longer than the error counter allows.
 
 ### Bus load
 
-With `set_input_pos`, `encoder` and `torque` all at 1 kHz, each node needs
-3 frames/ms. Small 8-byte frames are dominated by the **arbitration phase**,
-which runs at the *nominal* bitrate — so raising the nominal rate helps far
-more than raising the data rate.
+**Measured on hardware, one node:**
 
-| | frames/ms | 1M nominal | 2M nominal |
-|---|---|---|---|
-| 4 nodes (this leg test) | 12 | 60% — tight | 42% — ok |
-| 5 nodes (full robot, per bus) | 15 | **76% — too high** | 52% — tight |
+```
+--- t=5s  tx=1000 rx=2247 (unknown=0)  txfail=0 qdrop=0  bus~39% ---
+```
+
+That is 1000 commands out plus ~2250 telemetry frames back — **39% of a 1 Mbit
+bus for a single actuator.** A classic 8-byte frame is ~108 bits, so ~3250
+frames/s fills roughly a third of the wire on its own.
+
+The consequence is worth being blunt about: **five nodes at these rates does not
+fit.** Not "tight" — arithmetically impossible, several times over.
+
+| Nodes, unchanged rates | Bus |
+|---|---|
+| 1 (measured) | 39% |
+| 2 | 78% — already past usable |
+| 5 (full robot, per bus) | ~195% — impossible |
 
 Past roughly 50% the latency of lower-priority frames degrades badly; past 70%
-it is effectively unbounded. **Four nodes at full rate works today. Five will
-not**, so before the second leg goes on, either raise the nominal bitrate
-(both here and in ODrive) or drop torque telemetry to ~250 Hz.
+it is effectively unbounded.
+
+The drive was streaming encoder estimates at ~1120 Hz and torques at the same
+rate, which is what dominates. Both are configured on the ODrive, not here:
+
+```
+axis0.config.can.encoder_msg_rate_ms   = 1     # 1 kHz - the estimator needs this
+axis0.config.can.torque_msg_rate_ms    = 10    # 100 Hz is plenty for logging
+axis0.config.can.heartbeat_msg_rate_ms = 100
+```
+
+Dropping torque telemetry to 100 Hz takes one node from 39% to roughly 23%, and
+five nodes from impossible to about 115% — still over. Getting a full bus to fit
+needs **either** a 2 Mbit nominal rate **or** encoder estimates below 1 kHz, and
+the estimator wants them at 1 kHz. This is the real constraint on the second
+leg, and it is now a measurement rather than an estimate.
 
 The test prints a live `bus~NN%` estimate so you can watch this directly.
 
