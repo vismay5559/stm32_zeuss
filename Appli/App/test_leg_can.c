@@ -152,6 +152,26 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
 #define LEGTEST_GAIT_CYCLES          1u
 
 /*
+ * VELOCITY POKE - a deliberately dumb test for when position control does
+ * nothing.
+ *
+ * Set to 1 and the drive is put in VELOCITY control and commanded a slow
+ * constant spin. No trajectory, no position error, no gains involved beyond
+ * the velocity loop.
+ *
+ *   it spins   -> the motor, encoder, current limit and calibration are all
+ *                 fine, and the fault is in the POSITION control config
+ *                 (pos_gain, vel_limit, input_mode)
+ *   it does not -> the drive cannot produce torque at all, which is current
+ *                 limit, calibration, or motor wiring - not our CAN at all
+ *
+ * This is the CAN equivalent of the IMU loopback: it removes everything the
+ * failure could be blamed on, one layer at a time.
+ */
+#define LEGTEST_VEL_POKE             0
+#define LEGTEST_VEL_POKE_TURNS_S     0.5f
+
+/*
  * Classic CAN 2.0, not FD.
  *
  * MEASURED, not assumed: every frame this drive sends decodes as CLASSIC. So
@@ -205,8 +225,10 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
 #define ODRV_CMD_GET_ENCODER    0x009u
 #define ODRV_CMD_SET_CTRL_MODE  0x00Bu
 #define ODRV_CMD_SET_INPUT_POS  0x00Cu
+#define ODRV_CMD_SET_INPUT_VEL  0x00Du
 
 /* Set_Controller_Mode payload values. */
+#define ODRV_CTRL_MODE_VELOCITY 2u
 #define ODRV_CTRL_MODE_POSITION 3u
 #define ODRV_INPUT_MODE_PASSTHR 1u
 #define ODRV_CMD_GET_TORQUES    0x01Cu
@@ -432,11 +454,31 @@ static void send_input_pos(int j, float pos)
  * whatever odrivetool was last used to set. Sending it explicitly at arm time
  * removes the ambiguity.
  */
+static void send_input_vel(int j, float vel)
+{
+    uint8_t  data[8];
+    uint32_t bits;
+
+    memcpy(&bits, &vel, sizeof(bits));
+    data[0] = (uint8_t)(bits & 0xFFu);
+    data[1] = (uint8_t)((bits >> 8) & 0xFFu);
+    data[2] = (uint8_t)((bits >> 16) & 0xFFu);
+    data[3] = (uint8_t)((bits >> 24) & 0xFFu);
+    data[4] = 0; data[5] = 0; data[6] = 0; data[7] = 0;   /* torque_ff */
+
+    s_joint[j].cmd = vel;
+    tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_VEL, data, 8u);
+}
+
 static void send_controller_mode(int j)
 {
     uint8_t data[8];
 
+#if LEGTEST_VEL_POKE
+    data[0] = (uint8_t)ODRV_CTRL_MODE_VELOCITY;
+#else
     data[0] = (uint8_t)ODRV_CTRL_MODE_POSITION;
+#endif
     data[1] = 0; data[2] = 0; data[3] = 0;
     data[4] = (uint8_t)ODRV_INPUT_MODE_PASSTHR;
     data[5] = 0; data[6] = 0; data[7] = 0;
@@ -1085,11 +1127,21 @@ void legtest_run(void)
             /* Full rate: command every joint on every tick. */
             for (int j = 0; j < JOINT_COUNT; j++)
             {
+#if LEGTEST_VEL_POKE
+                send_input_vel(j, (s_tick > LEGTEST_ARM_DELAY_MS)
+                                      ? LEGTEST_VEL_POKE_TURNS_S : 0.0f);
+#else
                 send_input_pos(j, target[j]);
+#endif
             }
 #else
             /* Reduced rate: one joint per tick, round-robin. */
+#if LEGTEST_VEL_POKE
+            send_input_vel(tx_slot, (s_tick > LEGTEST_ARM_DELAY_MS)
+                                        ? LEGTEST_VEL_POKE_TURNS_S : 0.0f);
+#else
             send_input_pos(tx_slot, target[tx_slot]);
+#endif
             tx_slot = (tx_slot + 1) % JOINT_COUNT;
 #endif
         }
