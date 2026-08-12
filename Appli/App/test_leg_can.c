@@ -142,12 +142,22 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
 #define LEGTEST_GAIT_ENTRY_MS        2000u
 
 /*
- * ODrive S1 may or may not support CAN FD depending on firmware version - it
- * is worth confirming before trusting FD framing. Set this to 0 to fall back
- * to classic CAN 2.0 (still 1 Mbit, since classic uses only the nominal bit
- * timing) if the nodes do not respond in FD.
+ * Classic CAN 2.0, not FD.
+ *
+ * MEASURED, not assumed: every frame this drive sends decodes as CLASSIC. So
+ * whatever the 5 Mbit data rate in its config means, it is not transmitting FD
+ * on the wire - and it will not acknowledge FD frames from us either.
+ *
+ * That one mismatch produced a failure that looked nothing like its cause:
+ * reception was perfect (8731 frames, REC=0) while our own transmit error
+ * counter climbed to 248 and took the controller BUS-OFF, which then killed
+ * reception too. A receive path that works fine, appearing completely dead.
+ *
+ * Classic frames still run at the 1 Mbit nominal rate, which this bus is
+ * already proven to carry. Set back to 1 only after confirming the drive
+ * actually sends FD - the trace prints the format of every frame.
  */
-#define LEGTEST_USE_CAN_FD           1
+#define LEGTEST_USE_CAN_FD           0
 
 /*
  * How often each joint gets a Set_Input_Pos, as a divider on the 1 kHz tick.

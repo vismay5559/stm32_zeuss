@@ -19,9 +19,14 @@ extern FDCAN_HandleTypeDef hfdcan2;
 /* Commands arrive at 250 Hz and are interpolated across the 1 kHz ticks between them. */
 #define CMD_SEGMENT_TICKS         4u
 
-/* ODrive expects CAN-FD frames; flip to FDCAN_CLASSIC_CAN if an axis is not in FD mode. */
-#define ODRV_TX_FORMAT            FDCAN_FD_CAN
-#define ODRV_TX_BRS               FDCAN_BRS_ON
+/*
+ * Classic CAN 2.0. Measured on hardware: the S1 sends CLASSIC frames and will
+ * not acknowledge FD ones, which drives our transmit error counter to bus-off
+ * while reception still looks perfect. Flip both back to FD only after the leg
+ * test's frame trace shows the drive actually sending FD.
+ */
+#define ODRV_TX_FORMAT            FDCAN_CLASSIC_CAN
+#define ODRV_TX_BRS               FDCAN_BRS_OFF
 
 /*
  * The FDCAN hardware transmit FIFO on this part is fixed at three entries

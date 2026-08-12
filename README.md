@@ -202,7 +202,9 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 | `LEGTEST_MOTION_GAIT` | 1 | 1 = play the reference gait, 0 = single-joint sine |
 | `LEGTEST_GAIT_SPEED` | **0.25** | Fraction of real time. Start low |
 | `LEGTEST_GAIT_ENTRY_MS` | 2000 | Ramp from the measured pose into the trajectory |
-| `LEGTEST_USE_CAN_FD` | 1 | Set to 0 for classic CAN 2.0 @ 1 Mbit if your ODrive firmware does not do FD |
+| `LEGTEST_USE_CAN_FD` | **0** | Classic CAN 2.0 @ 1 Mbit. Measured: this S1 sends CLASSIC frames and will not acknowledge FD ones |
+| `LEGTEST_LISTEN_ONLY` | 0 | Never transmit. Use to verify reception without risking bus-off |
+| `LEGTEST_TRACE_RX` | 1 | Decode every received frame onto the console |
 | `LEGTEST_TX_DIV` | 1 | 1 = 1 kHz per joint, 4 = 250 Hz per joint |
 
 ### The reference gait
@@ -261,6 +263,33 @@ When the queue is full it discards the **oldest** entry. These are position
 setpoints: a stale setpoint is worthless, the newest is exactly what the
 actuator should receive, and dropping the newest instead would leave the queue
 full of seconds-old commands that would replay when the bus recovered.
+
+### If the bus goes quiet
+
+CAN is acknowledged: **every** transmitter needs at least one other node to pull
+the ACK slot low. A node whose frames are not acknowledged retries forever, its
+transmit error counter climbs, and at 255 the controller takes itself
+**bus-off** — which stops *reception* as well. A perfectly good receive path can
+therefore look completely dead a second after boot.
+
+The report prints the state that explains it:
+
+```
+can: TEC=248 REC=0 txfifo_free=0  [BUS-OFF]
+last error: ACK - we transmitted and NOBODY answered
+```
+
+**Read the two counters as a pair.** `REC=0` with a high `TEC` means their
+frames reach us and ours do not reach them — the fault is on our side of the
+wire, not the bus.
+
+This is how the FD mismatch was found. Reception was flawless — 8,731 frames —
+while `TEC` climbed to 248 and killed the link. The frame trace showed every
+incoming frame decoding as `CLASSIC`, so the drive was never going to
+acknowledge our FD frames. One `#define` fixed it.
+
+`LEGTEST_LISTEN_ONLY 1` never transmits, so it can never reach bus-off. Use it
+when you need to prove reception works for longer than the error counter allows.
 
 ### Bus load
 
