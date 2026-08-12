@@ -64,6 +64,21 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
  * milliseconds and would drop the very frames it is trying to show.
  */
 #define LEGTEST_TRACE_RX             1
+
+/*
+ * Never transmit. Receive only.
+ *
+ * CAN is acknowledged, so a transmitter whose frames do not reach the bus
+ * drives its own error counter to 255 and takes itself BUS-OFF - which kills
+ * RECEPTION too. That is why a working receive path can look completely dead
+ * a second after boot.
+ *
+ * With this set, the controller only ever listens, never reaches bus-off, and
+ * reception can be verified for as long as you like. It answers "is our
+ * receive path fine and only transmit broken?" - which the counters cannot,
+ * because bus-off destroys the evidence.
+ */
+#define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
 
 /*
@@ -198,6 +213,8 @@ typedef struct
 {
     uint32_t id;
     uint8_t  len;
+    uint8_t  fd;        /* FDCAN_FD_CAN or FDCAN_CLASSIC_CAN */
+    uint8_t  brs;       /* bit rate switch used by the sender */
     uint8_t  data[8];
 } trace_t;
 
@@ -307,6 +324,11 @@ static uint8_t can_send(uint32_t node, uint32_t cmd, const uint8_t *data, uint32
 {
     FDCAN_TxHeaderTypeDef hdr;
 
+#if LEGTEST_LISTEN_ONLY
+    (void)node; (void)cmd; (void)data; (void)len;
+    return 1;              /* pretend it went out; the queue must still drain */
+#else
+
     hdr.Identifier          = (node << 5) | cmd;
     hdr.IdType              = FDCAN_STANDARD_ID;
     hdr.TxFrameType         = FDCAN_DATA_FRAME;
@@ -329,6 +351,7 @@ static uint8_t can_send(uint32_t node, uint32_t cmd, const uint8_t *data, uint32
     }
     s_tx_ok++;
     return 1;
+#endif
 }
 
 /* Move queued frames into the hardware FIFO. Call often from the main loop. */
@@ -414,6 +437,10 @@ void legtest_on_rx(void)
             {
                 s_trace[s_trace_head].id  = hdr.Identifier;
                 s_trace[s_trace_head].len = 8u;
+                s_trace[s_trace_head].fd  =
+                    (hdr.FDFormat == FDCAN_FD_CAN) ? 1u : 0u;
+                s_trace[s_trace_head].brs =
+                    (hdr.BitRateSwitch == FDCAN_BRS_ON) ? 1u : 0u;
                 for (int b = 0; b < 8; b++)
                 {
                     s_trace[s_trace_head].data[b] = data[b];
@@ -553,9 +580,17 @@ static void trace_drain(int max_lines)
         uint32_t node = (t->id >> 5) & 0x3Fu;
         uint32_t cmd  = t->id & 0x1Fu;
 
-        printf("  id 0x%03lX  node %-2lu cmd 0x%02lX %-17s",
+        /*
+         * The format matters more than the bytes here. If the drive sends
+         * CLASSIC frames, it is not in FD mode - and our FD frames with BRS
+         * would be rejected by it, which is one of the two things that stops
+         * a transmit path while leaving receive perfect.
+         */
+        printf("  id 0x%03lX  node %-2lu cmd 0x%02lX %-17s %s%s ",
                (unsigned long)t->id, (unsigned long)node,
-               (unsigned long)cmd, cmd_name(cmd));
+               (unsigned long)cmd, cmd_name(cmd),
+               t->fd ? "FD " : "CLASSIC",
+               t->brs ? "+BRS" : "    ");
 
         for (int b = 0; b < 8; b++)
         {
