@@ -52,6 +52,21 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
 #define LEGTEST_SCAN_MS              2000u
 
 /*
+ * Print every frame received during the scan, decoded.
+ *
+ * This is the closest thing to a CAN analyser you have without buying one, and
+ * for bring-up it is usually enough - the question is almost never "what are
+ * the exact bytes" but "is anything arriving, from whom, and does it look
+ * like ODrive".
+ *
+ * Frames are captured into a ring buffer by the RX handler and printed from
+ * the main loop. printf() from an interrupt at 115200 baud blocks for
+ * milliseconds and would drop the very frames it is trying to show.
+ */
+#define LEGTEST_TRACE_RX             1
+#define TRACE_LEN                    96u
+
+/*
  * ======================= MOTORS LIVE WHEN THIS IS 1 =======================
  *
  * Commands each axis into CLOSED_LOOP_CONTROL over CAN (Set_Axis_State), which
@@ -178,6 +193,18 @@ typedef struct
 } joint_t;
 
 static volatile joint_t s_joint[JOINT_COUNT];
+/* Recent frames, captured cheaply in the RX handler and printed elsewhere. */
+typedef struct
+{
+    uint32_t id;
+    uint8_t  len;
+    uint8_t  data[8];
+} trace_t;
+
+static volatile trace_t  s_trace[TRACE_LEN];
+static volatile uint8_t  s_trace_head;
+static volatile uint8_t  s_trace_tail;
+
 /* Every node id heard from, whether or not we were expecting it. */
 static volatile uint16_t s_node_seen[64];
 static volatile uint8_t  s_node_state[64];
@@ -377,6 +404,25 @@ void legtest_on_rx(void)
         uint32_t node = (hdr.Identifier >> 5) & 0x3Fu;
         uint32_t cmd  = hdr.Identifier & 0x1Fu;
 
+#if LEGTEST_TRACE_RX
+        {
+            uint8_t next = (uint8_t)((s_trace_head + 1u) % TRACE_LEN);
+
+            /* Drop the newest when full rather than overwrite unread history:
+               the first frames after power-up are the interesting ones. */
+            if (next != s_trace_tail)
+            {
+                s_trace[s_trace_head].id  = hdr.Identifier;
+                s_trace[s_trace_head].len = 8u;
+                for (int b = 0; b < 8; b++)
+                {
+                    s_trace[s_trace_head].data[b] = data[b];
+                }
+                s_trace_head = next;
+            }
+        }
+#endif
+
         /* Log every node before filtering, so the scan can report drives we
            were not configured for - the usual case on a first bring-up. */
         if (node < 64u)
@@ -460,6 +506,58 @@ static void bus_setup(void)
     HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
 }
 
+#if LEGTEST_TRACE_RX
+/* ODrive CANSimple command names, for the ones we actually expect. */
+static const char *cmd_name(uint32_t cmd)
+{
+    switch (cmd)
+    {
+    case 0x001u: return "Heartbeat";
+    case 0x002u: return "Estop";
+    case 0x003u: return "GetError";
+    case 0x007u: return "SetAxisState";
+    case 0x009u: return "EncoderEstimates";
+    case 0x00Cu: return "SetInputPos";
+    case 0x014u: return "GetBusVoltage";
+    case 0x01Cu: return "GetTorques";
+    default:     return "";
+    }
+}
+
+/* Print whatever the RX handler captured. Main-loop context only. */
+static void trace_drain(int max_lines)
+{
+    while ((s_trace_tail != s_trace_head) && (max_lines-- > 0))
+    {
+        volatile trace_t *t = &s_trace[s_trace_tail];
+
+        uint32_t node = (t->id >> 5) & 0x3Fu;
+        uint32_t cmd  = t->id & 0x1Fu;
+
+        printf("  id 0x%03lX  node %-2lu cmd 0x%02lX %-17s",
+               (unsigned long)t->id, (unsigned long)node,
+               (unsigned long)cmd, cmd_name(cmd));
+
+        for (int b = 0; b < 8; b++)
+        {
+            printf("%02X ", (unsigned)t->data[b]);
+        }
+
+        /* Heartbeat is the one worth decoding inline - it is what tells you
+           the drive is alive and whether it is sitting in a fault. */
+        if (cmd == 0x001u)
+        {
+            uint32_t err = le_u32((const uint8_t *)t->data);
+            printf(" err=0x%08lX state=%u", (unsigned long)err,
+                   (unsigned)t->data[4]);
+        }
+
+        printf("\r\n");
+        s_trace_tail = (uint8_t)((s_trace_tail + 1u) % TRACE_LEN);
+    }
+}
+#endif
+
 /*
  * Listen for ODrive heartbeats before transmitting anything.
  *
@@ -478,6 +576,9 @@ static void bus_scan(void)
     {
         HAL_Delay(10);
         legtest_on_rx();          /* drain, in case the ISR is not wired yet */
+#if LEGTEST_TRACE_RX
+        trace_drain(2);           /* a couple per pass so printf never piles up */
+#endif
     }
 
     int found = 0;
@@ -678,6 +779,15 @@ void legtest_run(void)
         critical_exit(pm);
 
         s_tick++;
+
+#if LEGTEST_TRACE_RX
+        /* A few frames per tick after the scan. Enough to watch traffic without
+           the console becoming the thing that breaks the timing. */
+        if ((s_tick % 200u) == 0u)
+        {
+            trace_drain(3);
+        }
+#endif
 
         /*
          * One node per tick, round-robin. Two reasons: the hardware TX FIFO
