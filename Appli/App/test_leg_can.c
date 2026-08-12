@@ -35,7 +35,18 @@ static float         s_gait_phase;
 static uint8_t       s_gait_done;
 
 static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
-static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_KNEE };
+/*
+ * Which gait column drives this node. Independent of what the actuator is
+ * physically bolted to - on the bench the drive is a knee, but any column can
+ * be played through it to test a different range of motion.
+ *
+ * Ranges, from tools/gen_gait.py:
+ *   HIP_ROLL    -0.0047 .. +0.0191 turns   ( 8.5 deg)
+ *   HIP_PITCH   -0.0570 .. -0.0186 turns   (13.8 deg)  <- entirely NEGATIVE
+ *   KNEE        +0.0709 .. +0.0840 turns   ( 4.7 deg)
+ *   ANKLE       +0.0167 .. +0.0595 turns   (15.4 deg)
+ */
+static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_HIP_PITCH };
 
 /*
  * Where the gait's zero sits in the drive's own coordinates, in TURNS.
@@ -56,7 +67,7 @@ static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_KNEE };
  */
 static const float s_zero_offset[JOINT_COUNT] = { 0.0f };
 
-static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
+static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
 
 /*
  * Listen this long before transmitting anything, in ms.
@@ -1098,6 +1109,24 @@ void legtest_run(void)
                                " now, set s_zero_offset[%d] = %+.4f\r\n",
                                k, (double)(s_entry_from[k]
                                            - g0[s_gait_col[k]]));
+
+                        /* Sweep the whole cycle to find the travel. Knowing
+                           how far this joint will move BEFORE it moves is
+                           worth four hundred table lookups. */
+                        float lo = 1e9f, hi = -1e9f;
+
+                        for (int s = 0; s < GAIT_SAMPLES; s++)
+                        {
+                            float v = g_gait_turns[s][s_gait_col[k]];
+                            if (v < lo) { lo = v; }
+                            if (v > hi) { hi = v; }
+                        }
+
+                        printf("     travel %+.4f .. %+.4f turns"
+                               " = %.1f deg of output\r\n",
+                               (double)(lo + s_zero_offset[k]),
+                               (double)(hi + s_zero_offset[k]),
+                               (double)((hi - lo) * 360.0f));
                     }
                 }
             }
