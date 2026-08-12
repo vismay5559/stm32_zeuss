@@ -21,6 +21,12 @@
  *   slot 1 = hip_pitch (node 2)      slot 3 = ankle  (node 4)
  */
 
+/* Column index per joint, for picking one out when only some drives exist. */
+#define GAIT_COL_HIP_ROLL   0
+#define GAIT_COL_HIP_PITCH  1
+#define GAIT_COL_KNEE       2
+#define GAIT_COL_ANKLE      3
+
 #define GAIT_SAMPLES     200
 #define GAIT_JOINTS      4
 #define GAIT_DT_S        0.004000f

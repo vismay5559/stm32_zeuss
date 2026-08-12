@@ -18,14 +18,38 @@ extern TIM_HandleTypeDef   htim6;
  * ODrive node IDs, in joint order. Set these to match what you configured in
  * odrivetool (axis0.config.can.node_id). They must be unique on the bus.
  */
-#define JOINT_COUNT      4
+/*
+ * WHICH ACTUATORS ARE ON THE BUS
+ *
+ * Start with one drive and add entries as you connect more. Each entry needs
+ * the CAN node id you set in odrivetool (axis0.config.can.node_id) and which
+ * column of the reference gait feeds it.
+ *
+ * If you do not know the node id, leave this as it is and run once: the bus
+ * scan below listens before transmitting and prints every node that answers.
+ * ODrive ships with node_id 0.
+ */
+#define JOINT_COUNT      1
 
-static float             s_gait_phase;
+static float         s_gait_phase;
 
-static const uint8_t     s_node_id[JOINT_COUNT] = { 1, 2, 3, 4 };
-static const char *const s_joint_name[JOINT_COUNT] = {
-    "hip_roll", "hip_pitch", "knee     ", "ankle    "
-};
+static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
+static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_KNEE };
+
+static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
+
+/*
+ * Listen this long before transmitting anything, in ms.
+ *
+ * ODrive sends a heartbeat unprompted, roughly every 100 ms, without being
+ * asked. So a silent window at startup answers the question that everything
+ * else depends on: is the drive powered, on the right bitrate, and wired the
+ * right way round? Nothing we transmit can make that answer ambiguous.
+ *
+ * Heartbeats arriving means the bus works. Silence means it does not, and no
+ * amount of sending Set_Input_Pos will change that.
+ */
+#define LEGTEST_SCAN_MS              2000u
 
 /*
  * ======================= MOTORS LIVE WHEN THIS IS 1 =======================
@@ -46,7 +70,7 @@ static const char *const s_joint_name[JOINT_COUNT] = {
  * is still a complete test of the TX path.
  * ==========================================================================
  */
-#define LEGTEST_ENABLE_CLOSED_LOOP   1
+#define LEGTEST_ENABLE_CLOSED_LOOP   0
 
 /*
  * Delay before arming, in ticks (ms). A reset must never energise motors
@@ -154,6 +178,13 @@ typedef struct
 } joint_t;
 
 static volatile joint_t s_joint[JOINT_COUNT];
+/* Every node id heard from, whether or not we were expecting it. */
+static volatile uint16_t s_node_seen[64];
+static volatile uint8_t  s_node_state[64];
+static volatile uint32_t s_node_err[64];
+
+static uint8_t s_scan_ok;          /* the configured nodes all answered */
+
 static volatile uint32_t s_rx_total;
 static volatile uint32_t s_rx_unknown;   /* frames from unexpected node ids  */
 
@@ -346,6 +377,21 @@ void legtest_on_rx(void)
         uint32_t node = (hdr.Identifier >> 5) & 0x3Fu;
         uint32_t cmd  = hdr.Identifier & 0x1Fu;
 
+        /* Log every node before filtering, so the scan can report drives we
+           were not configured for - the usual case on a first bring-up. */
+        if (node < 64u)
+        {
+            if (s_node_seen[node] < 0xFFFFu)
+            {
+                s_node_seen[node]++;
+            }
+            if (cmd == ODRV_CMD_HEARTBEAT)
+            {
+                s_node_state[node] = data[4];
+                s_node_err[node]   = le_u32(&data[0]);
+            }
+        }
+
         int j = joint_from_node(node);
         if (j < 0)
         {
@@ -392,20 +438,89 @@ static void bus_setup(void)
 {
     FDCAN_FilterTypeDef f;
 
-    /* Accept the whole CANSimple id space for nodes 1..15 so that a node with
-       an unexpected id still shows up as "unknown" rather than vanishing. */
+    /*
+     * Accept the ENTIRE standard id space. CANSimple packs id = node<<5 | cmd,
+     * so 0x000..0x7FF covers every node from 0 to 63.
+     *
+     * The obvious filter starts at node 1 and would never see node 0 - which is
+     * exactly what an ODrive ships with. A drive nobody had configured yet would
+     * simply be invisible, and look identical to a dead bus.
+     */
     f.IdType       = FDCAN_STANDARD_ID;
     f.FilterIndex  = 0;
     f.FilterType   = FDCAN_FILTER_RANGE;
     f.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-    f.FilterID1    = 0x020u;   /* node 1,  cmd 0  */
-    f.FilterID2    = 0x1FFu;   /* node 15, cmd 31 */
+    f.FilterID1    = 0x000u;   /* node 0,  cmd 0  */
+    f.FilterID2    = 0x7FFu;   /* node 63, cmd 31 */
 
     HAL_FDCAN_ConfigFilter(&hfdcan1, &f);
     HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT,
                                  FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE);
     HAL_FDCAN_Start(&hfdcan1);
     HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+}
+
+/*
+ * Listen for ODrive heartbeats before transmitting anything.
+ *
+ * Every other failure mode looks the same from the outside: a drive on the
+ * wrong bitrate, CANH/CANL swapped, no termination, no power, or simply a
+ * different node id than we were told. Sending first makes all of those
+ * indistinguishable. Listening first separates "the bus works" from
+ * "the bus does not", which is the only question worth answering first.
+ */
+static void bus_scan(void)
+{
+    printf("\r\nscanning the bus for %u ms - not transmitting...\r\n",
+           (unsigned)LEGTEST_SCAN_MS);
+
+    for (uint32_t i = 0; i < LEGTEST_SCAN_MS; i += 10u)
+    {
+        HAL_Delay(10);
+        legtest_on_rx();          /* drain, in case the ISR is not wired yet */
+    }
+
+    int found = 0;
+
+    for (int n = 0; n < 64; n++)
+    {
+        if (s_node_seen[n] == 0u)
+        {
+            continue;
+        }
+
+        found++;
+        printf("  node %-2d  %5u frames  axis_state %u  axis_error 0x%08lX%s\r\n",
+               n, (unsigned)s_node_seen[n], (unsigned)s_node_state[n],
+               (unsigned long)s_node_err[n],
+               (joint_from_node((uint32_t)n) >= 0) ? "   <-- configured" : "");
+    }
+
+    if (found == 0)
+    {
+        printf("  NOTHING ON THE BUS.\r\n");
+        printf("  The drive sends heartbeats on its own, so silence here is\r\n");
+        printf("  physical, not protocol. In rough order of likelihood:\r\n");
+        printf("    - transceiver not powered, or CANH/CANL swapped\r\n");
+        printf("    - no 120 ohm termination (you need it at BOTH ends)\r\n");
+        printf("    - ODrive on a different CAN bitrate than 1 Mbit nominal\r\n");
+        printf("    - ODrive not powered, or its CAN not enabled\r\n");
+    }
+
+    /* Every configured node must have answered. Commanding a node that is not
+       there is harmless; assuming one IS there and arming is not. */
+    s_scan_ok = 1;
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (s_node_seen[s_node_id[j]] == 0u)
+        {
+            s_scan_ok = 0;
+            printf("  !! node %u (%s) never answered - closed loop DISABLED\r\n",
+                   (unsigned)s_node_id[j], s_joint_name[j]);
+        }
+    }
+
+    printf("\r\n");
 }
 
 void legtest_init(void)
@@ -427,6 +542,8 @@ void legtest_init(void)
     BSP_LED_Off(LED_YELLOW);
 
     bus_setup();
+
+    bus_scan();
 
     HAL_TIM_Base_Start(&htim2);
     HAL_TIM_Base_Start_IT(&htim6);
@@ -569,7 +686,7 @@ void legtest_run(void)
          * still gets commanded at 250 Hz, far more than enough to watch a leg
          * move.
          */
-        float target[JOINT_COUNT] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float target[JOINT_COUNT] = { 0.0f };
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
         /* Stay at zero through the arming delay so the leg does not lurch the
@@ -582,8 +699,13 @@ void legtest_run(void)
             static float   s_entry_from[JOINT_COUNT];
             static uint8_t s_entry_ok;
 
-            float first[JOINT_COUNT];
-            gait_sample(0.0f, first);
+            float all[GAIT_JOINTS], first[JOINT_COUNT];
+
+            gait_sample(0.0f, all);
+            for (int j = 0; j < JOINT_COUNT; j++)
+            {
+                first[j] = all[s_gait_col[j]];
+            }
 
             if (since_arm == 1u)
             {
@@ -636,7 +758,12 @@ void legtest_run(void)
                 float t = (float)(since_arm - LEGTEST_GAIT_ENTRY_MS) * 0.001f;
 
                 s_gait_phase = (t * LEGTEST_GAIT_SPEED) / GAIT_CYCLE_S;
-                gait_sample(s_gait_phase, target);
+
+                gait_sample(s_gait_phase, all);
+                for (int j = 0; j < JOINT_COUNT; j++)
+                {
+                    target[j] = all[s_gait_col[j]];
+                }
             }
 #else
             float t     = (float)since_arm * 0.001f;
@@ -683,7 +810,11 @@ void legtest_run(void)
          * axis back into closed loop fights whatever protection tripped it,
          * which is exactly the wrong response to a real fault.
          */
-        if ((s_tick > LEGTEST_ARM_DELAY_MS) && ((s_tick % 2000u) == 500u))
+        /* s_scan_ok gates this. If a configured node never answered during the
+           scan, the bus is not what we think it is, and arming a drive we
+           cannot hear back from is the one thing not worth risking. */
+        if (s_scan_ok && (s_tick > LEGTEST_ARM_DELAY_MS) &&
+            ((s_tick % 2000u) == 500u))
         {
             for (int j = 0; j < JOINT_COUNT; j++)
             {
