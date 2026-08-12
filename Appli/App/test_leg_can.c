@@ -37,6 +37,25 @@ static uint8_t       s_gait_done;
 static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
 static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_KNEE };
 
+/*
+ * Where the gait's zero sits in the drive's own coordinates, in TURNS.
+ *
+ * The trajectory is joint angles in the simulator's convention; the drive
+ * measures from wherever it was homed. Those two zeros have no reason to agree,
+ * and nothing in the data says how far apart they are.
+ *
+ * command = gait_turns + zero_offset
+ *
+ * To find it: put the leg in the pose the gait calls sample 0 - knee at
+ * +26.2 degrees - and read `pos` off the console. Whatever it says goes here.
+ * The arming log prints exactly this, so one run tells you the number.
+ *
+ * Leaving it at 0 is not wrong, it just means the gait plays around the drive's
+ * homing position rather than around the intended joint angle. The MOTION is
+ * identical either way; only where it happens changes.
+ */
+static const float s_zero_offset[JOINT_COUNT] = { 0.0f };
+
 static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
 
 /*
@@ -1027,7 +1046,7 @@ void legtest_run(void)
             gait_sample(0.0f, all);
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                first[j] = all[s_gait_col[j]];
+                first[j] = all[s_gait_col[j]] + s_zero_offset[j];
             }
 
             if (since_arm == 1u)
@@ -1052,6 +1071,34 @@ void legtest_run(void)
                 {
                     printf("\r\n!! no encoder estimate from every"
                            " joint - gait NOT started, holding position\r\n");
+                }
+
+                if (s_entry_ok)
+                {
+                    /*
+                     * Print the ramp explicitly. It is a move-to-start, not
+                     * part of the trajectory, and a large one means the
+                     * drive s zero and the gait s zero disagree - which is
+                     * the number s_zero_offset exists to absorb.
+                     */
+                    float g0[GAIT_JOINTS];
+                    gait_sample(0.0f, g0);
+
+                    for (int k = 0; k < JOINT_COUNT; k++)
+                    {
+                        float want = g0[s_gait_col[k]] + s_zero_offset[k];
+
+                        printf("  %s: at %+.4f, gait starts at %+.4f"
+                               " -> ramp %+.4f turns (%+.1f deg)\r\n",
+                               s_joint_name[k], (double)s_entry_from[k],
+                               (double)want, (double)(want - s_entry_from[k]),
+                               (double)((want - s_entry_from[k]) * 360.0f));
+
+                        printf("     to play the gait around where the leg is"
+                               " now, set s_zero_offset[%d] = %+.4f\r\n",
+                               k, (double)(s_entry_from[k]
+                                           - g0[s_gait_col[k]]));
+                    }
                 }
             }
 
@@ -1105,7 +1152,7 @@ void legtest_run(void)
                 gait_sample(s_gait_phase, all);
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
-                    target[j] = all[s_gait_col[j]];
+                    target[j] = all[s_gait_col[j]] + s_zero_offset[j];
                 }
             }
 #else
