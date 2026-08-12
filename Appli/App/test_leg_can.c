@@ -32,6 +32,7 @@ extern TIM_HandleTypeDef   htim6;
 #define JOINT_COUNT      1
 
 static float         s_gait_phase;
+static uint8_t       s_gait_done;
 
 static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
 static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_KNEE };
@@ -100,7 +101,7 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
  * is still a complete test of the TX path.
  * ==========================================================================
  */
-#define LEGTEST_ENABLE_CLOSED_LOOP   0
+#define LEGTEST_ENABLE_CLOSED_LOOP   1
 
 /*
  * Delay before arming, in ticks (ms). A reset must never energise motors
@@ -140,6 +141,15 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
  * nothing moves.
  */
 #define LEGTEST_GAIT_ENTRY_MS        2000u
+
+/*
+ * How many gait cycles to play, then hold the final pose. 0 = loop forever.
+ *
+ * One cycle is the right first move: a complete, bounded piece of motion you
+ * can watch start and finish, and if the direction or scaling is wrong it
+ * stops on its own instead of repeating the mistake indefinitely.
+ */
+#define LEGTEST_GAIT_CYCLES          1u
 
 /*
  * Classic CAN 2.0, not FD.
@@ -193,7 +203,12 @@ static const char *const s_joint_name[JOINT_COUNT] = { "knee" };
 #define ODRV_CMD_HEARTBEAT      0x001u
 #define ODRV_CMD_SET_AXIS_STATE 0x007u
 #define ODRV_CMD_GET_ENCODER    0x009u
+#define ODRV_CMD_SET_CTRL_MODE  0x00Bu
 #define ODRV_CMD_SET_INPUT_POS  0x00Cu
+
+/* Set_Controller_Mode payload values. */
+#define ODRV_CTRL_MODE_POSITION 3u
+#define ODRV_INPUT_MODE_PASSTHR 1u
 #define ODRV_CMD_GET_TORQUES    0x01Cu
 
 #define ODRV_AXIS_STATE_IDLE            1u
@@ -402,6 +417,31 @@ static void send_input_pos(int j, float pos)
 
     s_joint[j].cmd = pos;
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_POS, data, 8u);
+}
+
+/*
+ * Tell the drive to actually act on positions.
+ *
+ * Set_Input_Pos only means something in POSITION control with PASSTHROUGH
+ * input. In any other mode the drive accepts the frame, stores nothing useful,
+ * and produces no torque - it sits armed and still while every counter looks
+ * perfect, which is exactly what we saw: state=8, err=0, commands arriving,
+ * pos unchanged and torque at 0.001 Nm.
+ *
+ * The mode lives in the drive's saved config, so relying on it means relying on
+ * whatever odrivetool was last used to set. Sending it explicitly at arm time
+ * removes the ambiguity.
+ */
+static void send_controller_mode(int j)
+{
+    uint8_t data[8];
+
+    data[0] = (uint8_t)ODRV_CTRL_MODE_POSITION;
+    data[1] = 0; data[2] = 0; data[3] = 0;
+    data[4] = (uint8_t)ODRV_INPUT_MODE_PASSTHR;
+    data[5] = 0; data[6] = 0; data[7] = 0;
+
+    tx_enqueue(s_node_id[j], ODRV_CMD_SET_CTRL_MODE, data, 8u);
 }
 
 static void send_axis_state(int j, uint32_t state)
@@ -865,12 +905,16 @@ static void report(void)
         else
         {
             printf("  node %u %s : pos=%+8.4f vel=%+8.3f trq=%+7.3f "
-                   "state=%u err=0x%08lX  hb=%lu enc=%lu trq=%lu  cmd=%+.4f\r\n",
+                   "state=%u err=0x%08lX  hb=%lu enc=%lu trq=%lu  cmd=%+.4f err=%+.4f\r\n",
                    (unsigned)s_node_id[j], s_joint_name[j],
                    (double)v.pos, (double)v.vel, (double)v.torque,
                    (unsigned)v.axis_state, (unsigned long)v.axis_error,
                    (unsigned long)v.n_heartbeat, (unsigned long)v.n_encoder,
-                   (unsigned long)v.n_torque, (double)v.cmd);
+                   (unsigned long)v.n_torque, (double)v.cmd,
+                   /* Command minus measured. A drive that is armed but not
+                      acting on positions sits here at the full command while
+                      torque stays near zero - which is not otherwise obvious. */
+                   (double)(v.cmd - v.pos));
         }
     }
 
@@ -995,6 +1039,26 @@ void legtest_run(void)
                 float t = (float)(since_arm - LEGTEST_GAIT_ENTRY_MS) * 0.001f;
 
                 s_gait_phase = (t * LEGTEST_GAIT_SPEED) / GAIT_CYCLE_S;
+
+#if (LEGTEST_GAIT_CYCLES > 0u)
+                /*
+                 * Stop after the requested cycles and hold. Freezing the PHASE
+                 * rather than the output means the hold pose is a real point on
+                 * the trajectory, so resuming later would not step.
+                 */
+                if (s_gait_phase >= (float)LEGTEST_GAIT_CYCLES)
+                {
+                    s_gait_phase = (float)LEGTEST_GAIT_CYCLES;
+
+                    if (!s_gait_done)
+                    {
+                        s_gait_done = 1;
+                        printf("\r\ngait: %u cycle(s) complete -"
+                               " holding final pose\r\n",
+                               (unsigned)LEGTEST_GAIT_CYCLES);
+                    }
+                }
+#endif
 
                 gait_sample(s_gait_phase, all);
                 for (int j = 0; j < JOINT_COUNT; j++)
