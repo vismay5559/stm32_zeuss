@@ -499,11 +499,30 @@ static void bus_setup(void)
     f.FilterID1    = 0x000u;   /* node 0,  cmd 0  */
     f.FilterID2    = 0x7FFu;   /* node 63, cmd 31 */
 
-    HAL_FDCAN_ConfigFilter(&hfdcan1, &f);
-    HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT,
-                                 FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE);
-    HAL_FDCAN_Start(&hfdcan1);
-    HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+    /*
+     * Check every one of these. A silently failed Start() looks identical from
+     * the outside to a bus with nothing on it: no TX, no RX, and a software
+     * queue filling up because the hardware FIFO never drains.
+     */
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &f) != HAL_OK)
+    {
+        printf("!! HAL_FDCAN_ConfigFilter FAILED\r\n");
+    }
+    if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT,
+                                     FDCAN_FILTER_REMOTE,
+                                     FDCAN_FILTER_REMOTE) != HAL_OK)
+    {
+        printf("!! HAL_FDCAN_ConfigGlobalFilter FAILED\r\n");
+    }
+    if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+    {
+        printf("!! HAL_FDCAN_Start FAILED - the peripheral is not on the bus\r\n");
+    }
+    if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                       FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+    {
+        printf("!! HAL_FDCAN_ActivateNotification FAILED\r\n");
+    }
 }
 
 #if LEGTEST_TRACE_RX
@@ -567,6 +586,8 @@ static void trace_drain(int max_lines)
  * indistinguishable. Listening first separates "the bus works" from
  * "the bus does not", which is the only question worth answering first.
  */
+static void can_status(void);
+
 static void bus_scan(void)
 {
     printf("\r\nscanning the bus for %u ms - not transmitting...\r\n",
@@ -596,6 +617,8 @@ static void bus_scan(void)
                (unsigned long)s_node_err[n],
                (joint_from_node((uint32_t)n) >= 0) ? "   <-- configured" : "");
     }
+
+    can_status();
 
     if (found == 0)
     {
@@ -687,6 +710,63 @@ void legtest_init(void)
 
 /* ------------------------------------------------------------------ */
 
+/*
+ * The CAN controller state, which is what actually explains a silent bus.
+ *
+ * CAN is a acknowledged protocol: EVERY transmitter needs at least one other
+ * node to pull the ACK slot low. A lone node on the wire never gets that, so
+ * it retries the same frame forever, its transmit error counter climbs, and at
+ * 255 the controller takes itself BUS-OFF and stops entirely.
+ *
+ * From outside, bus-off looks exactly like a peripheral that was never started
+ * - no TX, no RX, and a software queue filling because the hardware FIFO never
+ * drains. The Last Error Code tells them apart, and Ack Error is the single
+ * most useful value in this whole file: it means we DID transmit and nobody
+ * answered.
+ */
+static const char *lec_name(uint32_t lec)
+{
+    switch (lec)
+    {
+    case 0: return "none";
+    case 1: return "STUFF - bitrate mismatch or noise";
+    case 2: return "FORM - frame format, often FD vs classic";
+    case 3: return "ACK - we transmitted and NOBODY answered";
+    case 4: return "BIT1 - drove recessive, read dominant";
+    case 5: return "BIT0 - drove dominant, read recessive (shorted? no xcvr?)";
+    case 6: return "CRC";
+    default: return "no change since last read";
+    }
+}
+
+static void can_status(void)
+{
+    FDCAN_ProtocolStatusTypeDef ps;
+    FDCAN_ErrorCountersTypeDef  ec;
+
+    HAL_FDCAN_GetProtocolStatus(&hfdcan1, &ps);
+    HAL_FDCAN_GetErrorCounters(&hfdcan1, &ec);
+
+    printf("    can: TEC=%lu REC=%lu txfifo_free=%lu%s%s%s\r\n",
+           (unsigned long)ec.TxErrorCnt, (unsigned long)ec.RxErrorCnt,
+           (unsigned long)HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1),
+           ps.BusOff       ? "  [BUS-OFF]"       : "",
+           ps.ErrorPassive ? "  [ERROR-PASSIVE]" : "",
+           ps.Warning      ? "  [WARNING]"       : "");
+    printf("    last error: %s\r\n", lec_name(ps.LastErrorCode));
+
+    if (ps.BusOff)
+    {
+        /*
+         * Recover, so a bus that comes up later is picked up instead of
+         * needing a reset. Clearing INIT restarts the 128x11 recessive-bit
+         * sequence the standard requires before rejoining.
+         */
+        printf("    -> BUS-OFF: nothing is acknowledging us. Recovering...\r\n");
+        HAL_FDCAN_Start(&hfdcan1);
+    }
+}
+
 static void report(void)
 {
     uint32_t now = s_tick;
@@ -714,6 +794,8 @@ static void report(void)
            (unsigned long)d_rx, (unsigned long)s_rx_unknown,
            (unsigned long)s_tx_fail, (unsigned long)s_txq_drop,
            (unsigned long)load_pct);
+
+    can_status();
 
     for (int j = 0; j < JOINT_COUNT; j++)
     {
