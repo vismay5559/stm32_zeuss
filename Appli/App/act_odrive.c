@@ -25,8 +25,15 @@ extern FDCAN_HandleTypeDef hfdcan2;
  * while reception still looks perfect. Flip both back to FD only after the leg
  * test's frame trace shows the drive actually sending FD.
  */
+#define ODRV_USE_FD               0     /* 1 = FD + BRS, 0 = classic 2.0 */
+
+#if ODRV_USE_FD
+#define ODRV_TX_FORMAT            FDCAN_FD_CAN
+#define ODRV_TX_BRS               FDCAN_BRS_ON
+#else
 #define ODRV_TX_FORMAT            FDCAN_CLASSIC_CAN
 #define ODRV_TX_BRS               FDCAN_BRS_OFF
+#endif
 
 /*
  * The FDCAN hardware transmit FIFO on this part is fixed at three entries
@@ -103,6 +110,14 @@ static void bus_setup(FDCAN_HandleTypeDef *h)
     HAL_FDCAN_ConfigFilter(h, &f);
     HAL_FDCAN_ConfigGlobalFilter(h, FDCAN_REJECT, FDCAN_REJECT,
                                  FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE);
+#if ODRV_USE_FD
+    /* See test_leg_can.c: an isolated transceiver's loop delay is most of a
+       data bit at 5 Mbit, so without TDC every FD frame fails its own bit
+       check. Classic CAN has no data phase and never needs this. */
+    HAL_FDCAN_ConfigTxDelayCompensation(h, 8u, 0u);
+    HAL_FDCAN_EnableTxDelayCompensation(h);
+#endif
+
     HAL_FDCAN_Start(h);
     HAL_FDCAN_ActivateNotification(h, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
 }
