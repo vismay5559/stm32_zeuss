@@ -2,24 +2,56 @@
 Live view of the robot in Rerun.
 
     pip install rerun-sdk pyserial
-    python pi/zeus_viz.py /dev/ttyACM0
 
-Rerun is a visualiser for time-series and 3D data. You log named streams as
-they happen; it builds the plots, the 3D scene and a shared timeline, and lets
-you scrub back through all of it. There is no UI to write - the layout comes
-from the names you log under.
+WHERE THINGS RUN
+----------------
 
-Two things make it worth using here rather than plotting by hand:
+Rerun splits into an SDK and a Viewer, and they do not have to be on the same
+machine. That split is the whole answer to "how do I see this on my laptop"
+when the Pi has no screen:
 
-  Everything shares one timeline. Height, joint angles, contacts and the 3D
-  pose are all indexed by the same robot clock, so "what were the springs doing
-  when that foot landed" is a question you answer by dragging, not by
-  correlating timestamps between two tools.
+    STM32 ──USB──► Raspberry Pi ──network──► your laptop
+    1 kHz          this script                Rerun Viewer
+    sensing        (the SDK)                  (the window)
+                   headless, no display       where you actually look
 
-  You can replay. Save a session to .rrd and the whole run is scrubbable later,
-  which matters when the interesting event lasted 40 ms and happened once.
+Three ways to run it, in the order you are likely to want them:
 
-The entity tree below is the layout. Rerun groups by path, so `joints/pos/3`
+  1. VIEWER ON YOUR LAPTOP, Pi streams to it. Live, lowest friction.
+
+         laptop$  pip install rerun-sdk && rerun          # opens, waits
+         pi$      python pi/zeus_viz.py /dev/ttyACM0 --connect 192.168.1.50
+
+  2. RECORD NOW, LOOK LATER. No network needed; best for a run you want to
+     keep, and for anything that happens too fast to watch live.
+
+         pi$      python pi/zeus_viz.py /dev/ttyACM0 --save run.rrd
+         laptop$  scp pi@raspberrypi:run.rrd .  &&  rerun run.rrd
+
+  3. EVERYTHING ON ONE MACHINE with a display - a laptop with the STM32
+     plugged straight in, which is how you will test before the Pi exists.
+
+         python pi/zeus_viz.py COM7 --spawn
+
+WHAT ABOUT MUJOCO
+-----------------
+
+MuJoCo is not part of the robot. It is the simulator the policy was trained in,
+and it runs on a desktop, not on the Pi and not on the STM32. It appears here
+only for an optional comparison: run the simulator playing the same gait, feed
+its joint angles to log_sim(), and the simulated and real angles land on one
+plot on one timeline. That divergence is where sim-to-real transfer problems
+show up first. Skip it entirely if you just want to watch the robot.
+
+WHY RERUN RATHER THAN PLOTTING BY HAND
+--------------------------------------
+
+Everything shares a timeline, so "what were the springs doing when that foot
+landed" is answered by dragging rather than by correlating timestamps between
+tools. And sessions replay, which matters when the interesting event lasted
+40 ms and happened once.
+
+The entity tree below is the layout - Rerun groups by path, so `joints/pos/3`
 and `joints/ref/3` land next to each other and can be dropped into one plot.
 """
 
@@ -161,12 +193,42 @@ def log_sim(joint_pos, height: Optional[float] = None,
 
 
 def main() -> int:
-    port = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyACM0"
+    import argparse
 
-    rr.init("zeus", spawn=True)
+    ap = argparse.ArgumentParser(
+        description="Live view of the robot in Rerun.")
+    ap.add_argument("port", nargs="?", default="/dev/ttyACM0",
+                    help="serial device the STM32 enumerates as")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--connect", metavar="HOST",
+                   help="stream to a Rerun viewer running on HOST "
+                        "(start it there with: rerun)")
+    g.add_argument("--save", metavar="FILE.rrd",
+                   help="record to a file to open later")
+    g.add_argument("--spawn", action="store_true",
+                   help="open a viewer on THIS machine (needs a display)")
+    a = ap.parse_args()
+
+    rr.init("zeus")
+
+    if a.connect:
+        url = f"rerun+http://{a.connect}:9876/proxy"
+        rr.connect_grpc(url)
+        print(f"streaming to {url}")
+        print("  if nothing appears, the viewer is not running there, or 9876 "
+              "is firewalled")
+    elif a.save:
+        rr.save(a.save)
+        print(f"recording to {a.save} - copy it over and open with: rerun {a.save}")
+    elif a.spawn:
+        rr.spawn()
+    else:
+        ap.error("choose one of --connect HOST, --save FILE.rrd, or --spawn")
+
     setup_styles()
 
-    print(f"reading {port} - close the Rerun window or ctrl-c to stop")
+    print(f"reading {a.port} - ctrl-c to stop")
+    port = a.port
 
     n = 0
     last_seq = None
