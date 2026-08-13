@@ -33,6 +33,7 @@ extern TIM_HandleTypeDef   htim6;
 
 static float         s_gait_phase;
 static uint8_t       s_gait_done;
+static uint8_t       s_stopped;      /* latched by the user button */
 
 static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
 /*
@@ -138,6 +139,21 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * instantly - this gives you time to see the countdown and pull power.
  */
 #define LEGTEST_ARM_DELAY_MS         3000u
+
+/*
+ * STOP BUTTON - the blue USER button (B1) on the Nucleo.
+ *
+ * Press it at any time and the axis is commanded to IDLE and stays there.
+ * There is no un-press: recovering means a reset, which is the correct
+ * behaviour for a stop. Something that can be un-stopped by fumbling the same
+ * button is not a stop button.
+ *
+ * This is NOT a substitute for an e-stop that cuts motor power. It travels
+ * over the same CAN bus that might be the thing that failed. It is the
+ * convenient stop for a bench test that is behaving oddly; the power switch is
+ * the one for a bench test that is behaving dangerously.
+ */
+#define LEGTEST_STOP_BUTTON          1
 
 /*
  * Motion profile. Only has any effect when closed loop is enabled above.
@@ -824,6 +840,13 @@ void legtest_init(void)
 
     bus_setup();
 
+#if LEGTEST_STOP_BUTTON
+    BSP_PB_Init(BUTTON_USER, BUTTON_MODE_GPIO);
+    printf("STOP: press the blue USER button at any time to command IDLE.\r\n"
+           "      It latches - reset the board to run again.\r\n"
+           "      This is not an e-stop; it goes over the same CAN bus.\r\n\r\n");
+#endif
+
     bus_scan();
 
     HAL_TIM_Base_Start(&htim2);
@@ -1023,6 +1046,26 @@ void legtest_run(void)
 
         s_tick++;
 
+#if LEGTEST_STOP_BUTTON
+        if (!s_stopped && (BSP_PB_GetState(BUTTON_USER) != 0))
+        {
+            s_stopped = 1;
+
+            /* Drop everything already queued first. Those are position
+               setpoints that would otherwise still go out AFTER the idle
+               command and could re-energise nothing but confusion. */
+            s_txq_tail = s_txq_head;
+
+            for (int j = 0; j < JOINT_COUNT; j++)
+            {
+                send_axis_state(j, ODRV_AXIS_STATE_IDLE);
+            }
+
+            printf("\r\n*** STOPPED by user button - axes commanded"
+                   " to IDLE.\r\n    Reset the board to run again. ***\r\n\r\n");
+        }
+#endif
+
 #if LEGTEST_TRACE_RX
         /* A few frames per tick after the scan. Enough to watch traffic without
            the console becoming the thing that breaks the timing. */
@@ -1197,7 +1240,10 @@ void legtest_run(void)
         }
 #endif
 
-        if ((s_tick % LEGTEST_TX_DIV) == 0u)
+        /* Once stopped, send nothing further. Commanding IDLE and then
+           continuing to stream positions would leave the drive one stray
+           re-arm away from moving again. */
+        if (!s_stopped && ((s_tick % LEGTEST_TX_DIV) == 0u))
         {
 #if (LEGTEST_TX_DIV == 1u)
             /* Full rate: command every joint on every tick. */
@@ -1242,7 +1288,7 @@ void legtest_run(void)
         /* s_scan_ok gates this. If a configured node never answered during the
            scan, the bus is not what we think it is, and arming a drive we
            cannot hear back from is the one thing not worth risking. */
-        if (s_scan_ok && (s_tick > LEGTEST_ARM_DELAY_MS) &&
+        if (!s_stopped && s_scan_ok && (s_tick > LEGTEST_ARM_DELAY_MS) &&
             ((s_tick % 2000u) == 500u))
         {
             for (int j = 0; j < JOINT_COUNT; j++)
