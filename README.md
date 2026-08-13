@@ -324,11 +324,43 @@ axis0.config.can.torque_msg_rate_ms    = 10    # 100 Hz is plenty for logging
 axis0.config.can.heartbeat_msg_rate_ms = 100
 ```
 
-Dropping torque telemetry to 100 Hz takes one node from 39% to roughly 23%, and
-five nodes from impossible to about 115% — still over. Getting a full bus to fit
-needs **either** a 2 Mbit nominal rate **or** encoder estimates below 1 kHz, and
-the estimator wants them at 1 kHz. This is the real constraint on the second
-leg, and it is now a measurement rather than an estimate.
+### Why a frame costs what it does
+
+A classic 8-byte frame is **121 bits**, and only 64 of them are payload:
+
+```
+SOF 1 · ID 11 · RTR/IDE/r0 3 · DLC 4 · DATA 64 · CRC 15
+      · delimiters 3 · EOF 7 · IFS 3 · ~10 stuff bits
+```
+
+At 1 Mbit that is **121 µs per frame**, and 3210 frames/s fills 39% of the
+second. The measurement and the arithmetic agree exactly.
+
+**CAN FD would help, by about 2.5x — not 5x.** Only the data field and CRC use
+the faster rate; the ID, acknowledgement and end-of-frame always run at the
+nominal rate:
+
+```
+CLASSIC   |------------ 121 bits at 1 Mbit ------------|   121 us
+FD+BRS    |-17 bits-||--- 92 bits at 5 Mbit ---||-12 b-|    47 us
+            1 Mbit           data + CRC          1 Mbit
+```
+
+| Config | 1 node | 5 nodes/bus |
+|---|---|---|
+| Classic, 1 ms telemetry (today) | 39% | ~195% |
+| Classic, torque at 100 Hz | 27% | ~134% |
+| FD, 1 ms telemetry | 15% | ~76% — tight |
+| **FD, torque at 100 Hz** | **11%** | **~52%** |
+
+So the full robot needs **both**: FD framing *and* torque telemetry slowed down.
+Neither alone is enough. Encoder estimates have to stay at 1 kHz because the
+estimator's prediction step runs on them.
+
+That makes getting this drive into genuine FD mode a real prerequisite for the
+second leg, not a nice-to-have. It currently sends CLASSIC frames despite being
+configured for a 5 Mbit data rate, which is worth resolving with ODrive before
+the bus has ten nodes on it.
 
 The test prints a live `bus~NN%` estimate so you can watch this directly.
 
