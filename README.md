@@ -96,6 +96,7 @@ Appli/App/            ← the actual robot code
 pi/                              the Raspberry Pi side, drop into zeus_26
    nexus_proto.py         wire format - must match link_proto.h byte for byte
    nexus_link.py          threaded 1 kHz reader
+   zeus_viz.py            live Rerun view - plots, 3D, sim comparison
 
 tools/
    check_proto.py         proves the C and Python layouts agree
@@ -204,6 +205,10 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 | `LEGTEST_GAIT_ENTRY_MS` | 2000 | Ramp from the measured pose into the trajectory |
 | `LEGTEST_USE_CAN_FD` | **0** | Classic CAN 2.0 @ 1 Mbit. Measured: this S1 sends CLASSIC frames and will not acknowledge FD ones |
 | `LEGTEST_LISTEN_ONLY` | 0 | Never transmit. Use to verify reception without risking bus-off |
+| `LEGTEST_STOP_BUTTON` | 1 | Blue USER button commands IDLE and latches. **Not an e-stop** — it rides the same CAN bus |
+| `LEGTEST_GAIT_CYCLES` | 1 | Play this many cycles then hold. 0 loops forever |
+| `LEGTEST_VEL_POKE` | 0 | Command a constant velocity instead of positions, to test whether the drive can produce torque at all |
+| `s_zero_offset[]` | 0 | Where the gait's zero sits in the drive's coordinates. The arming log computes it for you |
 | `LEGTEST_TRACE_RX` | 1 | Decode every received frame onto the console |
 | `LEGTEST_TX_DIV` | 1 | 1 = 1 kHz per joint, 4 = 250 Hz per joint |
 
@@ -648,6 +653,102 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **Protocol version is 3.** v1 sent raw encoder counts; v2 added the health
   byte and alignment; v3 added the policy block and split the contacts. Mismatched
   versions reject each other rather than silently misparsing.
+
+## Watching it live — Rerun
+
+`pi/zeus_viz.py` turns the 1 kHz packet stream into live plots and a 3D view.
+It is a consumer of the existing link, not new plumbing.
+
+### The one thing to understand
+
+Rerun splits into an **SDK** and a **Viewer**, and they do not have to be on the
+same machine. That split is the whole answer to "the Pi has no screen":
+
+```
+STM32 ──USB──► Raspberry Pi ──network──► your laptop
+1 kHz          zeus_viz.py               Rerun Viewer
+sensing        (the SDK)                 (the window)
+               headless                  where you look
+```
+
+The Pi logs. The laptop looks. Neither needs the other to exist for the robot
+to run — **the viewer is never in the control path.**
+
+### Wireless
+
+```bash
+# laptop — starts an empty viewer and waits
+pip install rerun-sdk
+rerun
+
+# pi — point it at the laptop's IP
+python pi/zeus_viz.py /dev/ttyACM0 --connect 192.168.1.50
+```
+
+Port **9876**, plain TCP. Wi-Fi is fine: decimated to 200 Hz the stream is a few
+hundred KB/s, which is nothing for 802.11n. Expect 5–50 ms of latency and some
+jitter — irrelevant for watching, and the reason this is *only* for watching.
+
+> **Never put anything that commands the robot on Wi-Fi.** The policy runs on
+> the Pi over USB for a reason. A dropped viewer connection must be a blank
+> screen, never a stalled leg.
+
+### Wired
+
+Same command — the Pi just reaches the laptop over Ethernet or a USB-Ethernet
+gadget instead. Lower latency and no dropouts, worth it if you are watching
+something fast. Nothing in the script changes.
+
+### Record now, look later
+
+```bash
+# pi
+python pi/zeus_viz.py /dev/ttyACM0 --save run.rrd
+
+# laptop
+scp pi@raspberrypi:run.rrd .  &&  rerun run.rrd
+```
+
+**Start here.** No network at all, and recorded sessions scrub — you can find
+the 40 ms where something went wrong and step through it, which live viewing
+cannot do. Most interesting failures are over before you look up.
+
+### Laptop only, no Pi
+
+```bash
+python pi/zeus_viz.py COM7 --spawn
+```
+
+STM32 plugged straight into the laptop. **This works today with one actuator** —
+you do not need the Pi to exist to develop against real data.
+
+### What it shows
+
+| Path | |
+|---|---|
+| `estimator/height`, `estimator/vel/*` | what the policy consumes |
+| `joints/pos/*` vs `joints/ref/*` | commanded against measured, same plot |
+| `springs/*`, `contact/*`, `feet/*_z` | leg state |
+| `gait/phase` | where in the cycle |
+| `imu/gyro/*`, `imu/accel/*` | raw, for cross-checking the estimator |
+| `world/pelvis` | 3D pose from the fused quaternion |
+
+Scalars are decimated to 200 Hz (`DECIMATE` in the file). Set it to 1 when
+chasing impact transients; the eye cannot use 1 kHz but a plot can.
+
+### Simulation beside reality
+
+`log_sim()` takes joint angles from MuJoCo and logs them under `sim/…` on the
+same timeline. Drop `sim/joints/3` and `joints/pos/3` into one plot and the
+sim-to-real gap is right there.
+
+**MuJoCo is not part of the robot** — it is the simulator the policy was trained
+in, running on a desktop. This comparison is optional. It is also the single
+most useful thing here, because a policy that works in simulation and not on
+hardware shows its divergence on that plot long before the robot shows it by
+falling over.
+
+---
 
 ## State estimation
 
