@@ -233,7 +233,7 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * already proven to carry. Set back to 1 only after confirming the drive
  * actually sends FD - the trace prints the format of every frame.
  */
-#define LEGTEST_USE_CAN_FD           0
+#define LEGTEST_USE_CAN_FD           1
 
 /*
  * How often each joint gets a Set_Input_Pos, as a divider on the 1 kHz tick.
@@ -500,6 +500,7 @@ static void send_input_pos(int j, float pos)
  * whatever odrivetool was last used to set. Sending it explicitly at arm time
  * removes the ambiguity.
  */
+#if LEGTEST_VEL_POKE
 static void send_input_vel(int j, float vel)
 {
     uint8_t  data[8];
@@ -515,6 +516,7 @@ static void send_input_vel(int j, float vel)
     s_joint[j].cmd = vel;
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_VEL, data, 8u);
 }
+#endif
 
 static void send_controller_mode(int j)
 {
@@ -1026,7 +1028,9 @@ void legtest_run(void)
 {
     uint32_t report_tick = 0;
     uint32_t beat        = 0;
+#if (LEGTEST_TX_DIV != 1u)
     int      tx_slot     = 0;
+#endif
 
     for (;;)
     {
@@ -1297,8 +1301,19 @@ void legtest_run(void)
                     (s_joint[j].axis_error == 0u) &&
                     (s_joint[j].n_heartbeat > 0u))
                 {
-                    printf("arming node %u (%s)\r\n",
+                    printf("arming node %u (%s): position control,"
+                           " passthrough, then closed loop\r\n",
                            (unsigned)s_node_id[j], s_joint_name[j]);
+
+                    /*
+                     * Mode BEFORE state. Set_Input_Pos only means anything
+                     * in POSITION control with PASSTHROUGH input; in any
+                     * other mode the drive accepts every frame, produces no
+                     * torque, and sits armed and still while all the
+                     * counters look perfect. Arming first would energise it
+                     * into whatever odrivetool last saved.
+                     */
+                    send_controller_mode(j);
                     send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                 }
             }
