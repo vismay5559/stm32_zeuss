@@ -33,6 +33,7 @@ extern TIM_HandleTypeDef   htim6;
 
 static float         s_gait_phase;
 static uint8_t       s_gait_done;
+static uint8_t       s_gait_running;
 static uint8_t       s_stopped;      /* latched by the user button */
 
 
@@ -97,7 +98,7 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * the main loop. printf() from an interrupt at 115200 baud blocks for
  * milliseconds and would drop the very frames it is trying to show.
  */
-#define LEGTEST_TRACE_RX             1
+#define LEGTEST_TRACE_RX             0
 
 /*
  * Never transmit. Receive only.
@@ -197,7 +198,7 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * can watch start and finish, and if the direction or scaling is wrong it
  * stops on its own instead of repeating the mistake indefinitely.
  */
-#define LEGTEST_GAIT_CYCLES          1u
+#define LEGTEST_GAIT_CYCLES          5u
 
 /*
  * TRAJECTORY CAPTURE
@@ -215,7 +216,7 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  */
 #define LEGTEST_CAPTURE              1
 #define CAPTURE_HZ                   100u
-#define CAPTURE_MAX                  512u
+#define CAPTURE_MAX                  2048u
 
 #if LEGTEST_CAPTURE
 /* One row per sample: what we asked for, and what came back. */
@@ -1350,6 +1351,7 @@ void legtest_run(void)
                    count up forever without special-casing the seam. */
                 float t = (float)(since_arm - LEGTEST_GAIT_ENTRY_MS) * 0.001f;
 
+                s_gait_running = 1;      /* entry ramp is over; capture now */
                 s_gait_phase = (t * LEGTEST_GAIT_SPEED) / GAIT_CYCLE_S;
 
 #if (LEGTEST_GAIT_CYCLES > 0u)
@@ -1426,7 +1428,13 @@ void legtest_run(void)
 #if LEGTEST_CAPTURE
         /* Sample joint 0 at CAPTURE_HZ. Only while the axis is live - before
            arming there is nothing to compare. */
-        if ((s_cap_n < CAPTURE_MAX) &&
+        /*
+         * Only while the GAIT is playing. Capturing the entry ramp too made
+         * the summary meaningless: it compared the measured travel of
+         * ramp+gait against the commanded range of the gait alone, and
+         * reported "249% tracking" for a leg that was following properly.
+         */
+        if ((s_cap_n < CAPTURE_MAX) && s_gait_running &&
             (s_joint[0].axis_state == ODRV_AXIS_STATE_CLOSED_LOOP) &&
             ((s_tick % (1000u / CAPTURE_HZ)) == 0u))
         {
