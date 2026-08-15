@@ -1093,7 +1093,11 @@ void legtest_run(void)
         s_tick++;
 
 #if LEGTEST_STOP_BUTTON
-        if (!s_stopped && (BSP_PB_GetState(BUTTON_USER) != 0))
+        /* ACTIVE LOW. BSP_PB_Init configures the pin with GPIO_PULLUP, so it
+           reads 1 released and 0 pressed. Testing for non-zero latched the
+           stop at boot on every run - transmitting nothing, never arming, and
+           looking exactly like a dead command path. */
+        if (!s_stopped && (BSP_PB_GetState(BUTTON_USER) == 0))
         {
             s_stopped = 1;
 
