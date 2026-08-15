@@ -236,6 +236,13 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
 #define LEGTEST_USE_CAN_FD           1
 
 /*
+ * Secondary sample point offset for CAN FD, in data time quanta of 12.5 ns.
+ * Raise it if TEC climbs with FD enabled: 8 is mid-bit, 11-12 sits later and
+ * tolerates a longer path.
+ */
+#define LEGTEST_TDC_OFFSET           8u
+
+/*
  * How often each joint gets a Set_Input_Pos, as a divider on the 1 kHz tick.
  *   1 = 1 kHz per joint  (4 TX frames every tick)
  *   4 = 250 Hz per joint (one joint per tick, round-robin)
@@ -681,6 +688,41 @@ static void bus_setup(void)
     {
         printf("!! HAL_FDCAN_ConfigGlobalFilter FAILED\r\n");
     }
+#if LEGTEST_USE_CAN_FD
+    /*
+     * Transmitter Delay Compensation. MUST be configured BEFORE Start() -
+     * the peripheral only accepts it while still in initialisation mode.
+     *
+     * In the data phase a transmitter checks its own bits by reading them
+     * back off the bus. At 5 Mbit a bit lasts 200 ns and the sample point is
+     * at 150 ns, but the ISO1042 is isolated and its loop delay is 152 ns -
+     * so when we look, our own bit has not returned yet. We read the
+     * previous one, see a mismatch, and declare a bit error. Every FD frame
+     * fails, TEC runs to 255, and the controller goes bus-off.
+     *
+     * Classic CAN has no data phase and never does this check, which is why
+     * the bus was flawless at 1 Mbit.
+     *
+     * TDC moves the check to a Secondary Sample Point after the measured
+     * delay. The offset is in time quanta of 12.5 ns; 8 puts the SSP at
+     * 152 + 100 = 252 ns, halfway into the echoed bit. If TEC still climbs,
+     * try 11 or 12 - the right value depends on the whole path, cable and
+     * connectors included, not just the transceiver.
+     */
+    if (HAL_FDCAN_ConfigTxDelayCompensation(&hfdcan1,
+                                            LEGTEST_TDC_OFFSET, 0u) != HAL_OK)
+    {
+        printf("!! HAL_FDCAN_ConfigTxDelayCompensation FAILED\r\n");
+    }
+    if (HAL_FDCAN_EnableTxDelayCompensation(&hfdcan1) != HAL_OK)
+    {
+        printf("!! HAL_FDCAN_EnableTxDelayCompensation FAILED\r\n");
+    }
+    printf("CAN FD: TDC on, SSP offset %u tq (%u ns past the measured"
+           " loop delay)\r\n",
+           (unsigned)LEGTEST_TDC_OFFSET, (unsigned)(LEGTEST_TDC_OFFSET * 25u / 2u));
+#endif
+
     if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
     {
         printf("!! HAL_FDCAN_Start FAILED - the peripheral is not on the bus\r\n");
