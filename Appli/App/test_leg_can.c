@@ -35,6 +35,8 @@ static float         s_gait_phase;
 static uint8_t       s_gait_done;
 static uint8_t       s_stopped;      /* latched by the user button */
 
+
+
 static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
 /*
  * Which gait column drives this node. Independent of what the actuator is
@@ -196,6 +198,40 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * stops on its own instead of repeating the mistake indefinitely.
  */
 #define LEGTEST_GAIT_CYCLES          1u
+
+/*
+ * TRAJECTORY CAPTURE
+ *
+ * Record commanded against measured for the whole run, then print it as CSV
+ * when the gait finishes. The once-a-second report cannot show a 3.2 s
+ * trajectory - by the time you read a line the interesting part is over.
+ *
+ * This is the thing to look at when the leg moves but not as far as it should:
+ * the peak-to-peak summary says immediately whether the drive is tracking or
+ * clipping, and the CSV shows WHERE in the cycle it gives up.
+ *
+ * 512 samples at 100 Hz covers 5.1 s, enough for one cycle at quarter speed
+ * plus the entry ramp. 8 KB of RAM out of 448.
+ */
+#define LEGTEST_CAPTURE              1
+#define CAPTURE_HZ                   100u
+#define CAPTURE_MAX                  512u
+
+#if LEGTEST_CAPTURE
+/* One row per sample: what we asked for, and what came back. */
+typedef struct
+{
+    float cmd;
+    float pos;
+    float vel;
+    float trq;
+} cap_row_t;
+
+static cap_row_t s_cap[CAPTURE_MAX];
+static uint16_t  s_cap_n;
+static uint8_t   s_cap_dumped;
+#endif
+
 
 /*
  * VELOCITY POKE - a deliberately dumb test for when position control does
@@ -1066,6 +1102,71 @@ static void report(void)
     printf("\r\n");
 }
 
+#if LEGTEST_CAPTURE
+/*
+ * Print the captured run as CSV, preceded by the number that usually
+ * explains it.
+ *
+ * Peak-to-peak commanded against peak-to-peak measured is the whole tuning
+ * signal. If the drive tracked, they match. If it moved a fraction of what
+ * was asked, something is clipping - and the CSV shows where in the cycle it
+ * stopped keeping up, which distinguishes a velocity limit (fails on the
+ * fast sections) from a current limit (fails under load) from a low position
+ * gain (lags everywhere, evenly).
+ */
+static void cap_dump(void)
+{
+    if (s_cap_dumped || (s_cap_n == 0u))
+    {
+        return;
+    }
+    s_cap_dumped = 1;
+
+    float cmd_lo = 1e9f, cmd_hi = -1e9f;
+    float pos_lo = 1e9f, pos_hi = -1e9f;
+    float err_max = 0.0f, trq_max = 0.0f;
+
+    for (uint16_t n = 0; n < s_cap_n; n++)
+    {
+        float c = s_cap[n].cmd, o = s_cap[n].pos;
+        float e = (c > o) ? (c - o) : (o - c);
+        float t = (s_cap[n].trq > 0.0f) ? s_cap[n].trq : -s_cap[n].trq;
+
+        if (c < cmd_lo) { cmd_lo = c; }
+        if (c > cmd_hi) { cmd_hi = c; }
+        if (o < pos_lo) { pos_lo = o; }
+        if (o > pos_hi) { pos_hi = o; }
+        if (e > err_max) { err_max = e; }
+        if (t > trq_max) { trq_max = t; }
+    }
+
+    float cmd_pp = cmd_hi - cmd_lo;
+    float pos_pp = pos_hi - pos_lo;
+
+    printf("\r\n===== TRAJECTORY, %u samples at %u Hz =====\r\n",
+           (unsigned)s_cap_n, (unsigned)CAPTURE_HZ);
+    printf("commanded travel : %+.4f .. %+.4f turns = %.2f deg\r\n",
+           (double)cmd_lo, (double)cmd_hi, (double)(cmd_pp * 360.0f));
+    printf("achieved  travel : %+.4f .. %+.4f turns = %.2f deg\r\n",
+           (double)pos_lo, (double)pos_hi, (double)(pos_pp * 360.0f));
+    printf("tracking         : %.0f%% of commanded motion\r\n",
+           (double)((cmd_pp > 1e-6f) ? (pos_pp / cmd_pp * 100.0f) : 0.0f));
+    printf("worst error      : %.4f turns (%.2f deg)\r\n",
+           (double)err_max, (double)(err_max * 360.0f));
+    printf("peak torque      : %.3f Nm\r\n\r\n", (double)trq_max);
+
+    printf("t_s,cmd_turns,pos_turns,vel_tps,trq_Nm\r\n");
+    for (uint16_t n = 0; n < s_cap_n; n++)
+    {
+        printf("%.3f,%.5f,%.5f,%.4f,%.4f\r\n",
+               (double)n / (double)CAPTURE_HZ,
+               (double)s_cap[n].cmd, (double)s_cap[n].pos,
+               (double)s_cap[n].vel, (double)s_cap[n].trq);
+    }
+    printf("===== end =====\r\n\r\n");
+}
+#endif
+
 void legtest_run(void)
 {
     uint32_t report_tick = 0;
@@ -1267,6 +1368,10 @@ void legtest_run(void)
                         printf("\r\ngait: %u cycle(s) complete -"
                                " holding final pose\r\n",
                                (unsigned)LEGTEST_GAIT_CYCLES);
+
+#if LEGTEST_CAPTURE
+                        cap_dump();
+#endif
                     }
                 }
 #endif
@@ -1317,6 +1422,22 @@ void legtest_run(void)
             tx_slot = (tx_slot + 1) % JOINT_COUNT;
 #endif
         }
+
+#if LEGTEST_CAPTURE
+        /* Sample joint 0 at CAPTURE_HZ. Only while the axis is live - before
+           arming there is nothing to compare. */
+        if ((s_cap_n < CAPTURE_MAX) &&
+            (s_joint[0].axis_state == ODRV_AXIS_STATE_CLOSED_LOOP) &&
+            ((s_tick % (1000u / CAPTURE_HZ)) == 0u))
+        {
+            s_cap[s_cap_n].cmd = s_joint[0].cmd;
+            s_cap[s_cap_n].pos = s_joint[0].pos;
+            s_cap[s_cap_n].vel = s_joint[0].vel;
+            s_cap[s_cap_n].trq = s_joint[0].torque;
+            s_cap_n++;
+        }
+#endif
+
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
         /* Countdown, so a reset never energises motors without warning. */
