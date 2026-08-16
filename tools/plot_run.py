@@ -48,6 +48,12 @@ DEFAULT_LOG = Path(r"C:\Users\visma\Downloads\putty.log")
 CMD_MOVING_TPS = 0.02
 POS_STILL_TPS = 0.005
 
+# Overshoot below this is not worth chasing, because it is not the drive's
+# fault. reference_gait_rleg_40ms_250hz.xlsx steps about 2 deg between rows
+# 99/100 and 199/0 on every joint - see KNOWN DEFECT in the README - and no
+# gain can track a step. Tuning against it just trades overshoot for lag.
+OVERSHOOT_FLOOR_DEG = 2.5
+
 
 def extract(text):
     """Return a list of runs, each a list of (t, cmd, pos, vel, trq) tuples."""
@@ -224,14 +230,24 @@ def report(m, indent="  "):
     elif m["stuck_mid_pct"] > 5:
         print(f"{indent}--> seizing mid-stroke {m['stuck_mid_pct']:.0f}% of the time. "
               f"Raise vel_gain.")
-    elif m["overshoot_deg"] > 1.5:
-        print(f"{indent}--> mid-stroke is clean, but it sails {m['overshoot_deg']:.1f} deg "
-              f"past each end.\n{indent}    Raise vel_gain further, or cut "
+    elif m["lag_ms"] is not None and m["lag_ms"] > 60:
+        # A proportional position loop following a ramp settles to a steady lag
+        # of 1/pos_gain seconds, independent of vel_gain. So this is the one
+        # symptom vel_gain provably cannot fix, and it is worth checking before
+        # overshoot because overshoot is contaminated by the trajectory defect.
+        print(f"{indent}--> {m['lag_ms']:.0f} ms behind. Lag settles at 1/pos_gain, so "
+              f"vel_gain cannot fix it:\n{indent}    raise pos_gain "
+              f"(1/{1000/m['lag_ms']:.1f} s implies pos_gain is about "
+              f"{1000/m['lag_ms']:.1f}).")
+    elif m["overshoot_deg"] > OVERSHOOT_FLOOR_DEG:
+        print(f"{indent}--> sails {m['overshoot_deg']:.1f} deg past each end. Cut "
               f"vel_integrator_gain to 2x vel_gain.")
-    elif m["lag_ms"] is not None and m["lag_ms"] > 80:
-        print(f"{indent}--> moving but {m['lag_ms']:.0f} ms behind. Raise pos_gain.")
     else:
         print(f"{indent}--> tracking cleanly. Save it: odrv0.save_configuration()")
+        if m["overshoot_deg"] > 1.0:
+            print(f"{indent}    ({m['overshoot_deg']:.1f} deg of overshoot is at or "
+                  f"below the trajectory's own floor - see\n{indent}     KNOWN DEFECT "
+                  f"in the README. Not yours to tune out.)")
 
 
 def write_csv(rows, path):
