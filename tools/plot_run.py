@@ -131,6 +131,23 @@ def metrics(rows):
     stuck_pct = stuck / (n - 1) * 100 if n > 1 else 0
     stuck_mid_pct = stuck_mid / (n - 1) * 100 if n > 1 else 0
 
+    # Telemetry that stopped arriving. The firmware holds the last value it
+    # received, so a drive that faults, disarms or falls off the bus leaves a
+    # perfectly flat trace rather than a gap - and every metric below then
+    # describes a corpse. A joint that is merely stuck still shows torque
+    # varying as the loop pushes and velocity dithering around zero; all three
+    # channels going bit-identical at once can only mean no frames arrived.
+    stale_run = stale_at = 0
+    cur = 0
+    for i in range(1, n):
+        if pos[i] == pos[i - 1] and vel[i] == vel[i - 1] and trq[i] == trq[i - 1]:
+            cur += 1
+            if cur > stale_run:
+                stale_run, stale_at = cur, t[i - cur]
+        else:
+            cur = 0
+    stale_s = stale_run * dt
+
     # How far past the command the joint travels at the ends of the stroke.
     # Once stiction is beaten this becomes the dominant error, and it points at
     # the integrator rather than at vel_gain: the joint is still being pushed
@@ -161,6 +178,7 @@ def metrics(rows):
         "stuck_pct": stuck_pct,
         "stuck_mid_pct": stuck_mid_pct,
         "overshoot_deg": overshoot,
+        "stale_s": stale_s, "stale_at": stale_at,
         "lag_ms": lag_ms,
         "peak_trq": max(abs(x) for x in trq),
     }
@@ -168,6 +186,17 @@ def metrics(rows):
 
 def report(m, indent="  "):
     print(f"{indent}{m['n']} samples over {m['dur']:.2f} s")
+
+    # Before anything else, because every number after it is suspect.
+    if m["stale_s"] > 0.5:
+        print(f"{indent}*** TELEMETRY WENT DEAD at t={m['stale_at']:.2f} s and stayed "
+              f"dead {m['stale_s']:.2f} s ***")
+        print(f"{indent}    pos, vel and trq all froze bit-identical: no CAN frames "
+              f"arrived from the")
+        print(f"{indent}    drive. Check axis_error and the heartbeat in the console "
+              f"log at that time.")
+        print(f"{indent}    THE NUMBERS BELOW DESCRIBE HELD VALUES. Do not tune on "
+              f"this run.")
     print(f"{indent}commanded travel : {m['cmd_pp_deg']:7.2f} deg")
     print(f"{indent}achieved  travel : {m['pos_pp_deg']:7.2f} deg  "
           f"({m['track_pct']:.0f}% - ignore, see comment)")
@@ -189,7 +218,10 @@ def report(m, indent="  "):
     # One instruction, in the order the problems have to be fixed. Chasing
     # overshoot while the joint is still seizing mid-stroke just moves the
     # error around.
-    if m["stuck_mid_pct"] > 5:
+    if m["stale_s"] > 0.5:
+        print(f"{indent}--> run is invalid, see above. Find out why the drive stopped "
+              f"talking before\n{indent}    changing any gain.")
+    elif m["stuck_mid_pct"] > 5:
         print(f"{indent}--> seizing mid-stroke {m['stuck_mid_pct']:.0f}% of the time. "
               f"Raise vel_gain.")
     elif m["overshoot_deg"] > 1.5:
@@ -315,13 +347,18 @@ def do_compare():
         m = metrics(rows)
         runs.append((p.stem, rows))
         lag = "-" if m["lag_ms"] is None else f"{m['lag_ms']:.0f}"
+        flag = "  DEAD TELEMETRY" if m["stale_s"] > 0.5 else ""
         print(f"{p.stem:<26} {m['rms_deg']:8.2f} {m['stuck_mid_pct']:10.1f} "
               f"{m['overshoot_deg']:9.2f} {m['worst_deg']:10.2f} {lag:>7} "
-              f"{m['peak_trq']:8.3f}")
+              f"{m['peak_trq']:8.3f}{flag}")
 
     print()
-    best = min(runs, key=lambda r: metrics(r[1])["rms_deg"])
-    print(f"best RMS so far: {best[0]}")
+    valid = [r for r in runs if metrics(r[1])["stale_s"] <= 0.5]
+    if valid:
+        best = min(valid, key=lambda r: metrics(r[1])["rms_deg"])
+        print(f"best RMS so far: {best[0]}")
+    if len(valid) != len(runs):
+        print(f"({len(runs) - len(valid)} run(s) excluded - telemetry died mid-run)")
 
     plot_compare(runs)
     return 0
