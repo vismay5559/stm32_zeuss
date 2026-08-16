@@ -34,7 +34,10 @@ extern TIM_HandleTypeDef   htim6;
 static float         s_gait_phase;
 static uint8_t       s_gait_done;
 static uint8_t       s_gait_running;
-static uint8_t       s_stopped;      /* latched by the user button */
+static uint8_t       s_stopped;      /* disarmed: by the button, or by the
+                                        gait finishing. Latched either way -
+                                        gates both transmission and re-arming,
+                                        so recovery is a board reset. */
 
 
 
@@ -285,6 +288,27 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * 512 samples at 100 Hz covers 5.1 s, enough for one cycle at quarter speed
  * plus the entry ramp. 8 KB of RAM out of 448.
  */
+/*
+ * What to do when the gait finishes.
+ *
+ * With this at 0 the firmware keeps streaming the frozen final pose at 1 kHz
+ * with the axis still in CLOSED_LOOP_CONTROL, so the motor servos on that pose
+ * indefinitely. It never settles: the loop hunts around the setpoint against
+ * stiction, the integrator winds up until the joint breaks loose, it slips, and
+ * the cycle repeats. That is the creeping you can watch after the run is over,
+ * and it is a pointless way to heat a motor on a bench.
+ *
+ * At 1 the axes are commanded to IDLE and transmission stops, which is what
+ * "the test is over" should mean.
+ *
+ * HAZARD - IDLE DE-ENERGISES THE MOTOR AND THE JOINT GOES LIMP. On a bare
+ * output shaft that is exactly what you want. With a leg attached it will fall
+ * to wherever gravity puts it, at whatever speed gravity chooses, the instant
+ * the last cycle completes. Set this to 0 before running an assembled leg, or
+ * make sure the fixture can catch it.
+ */
+#define LEGTEST_GAIT_IDLE_AFTER      1
+
 #define LEGTEST_CAPTURE              1
 #define CAPTURE_HZ                   100u
 #define CAPTURE_MAX                  2048u
@@ -684,6 +708,46 @@ static void send_axis_state(int j, uint32_t state)
     data[3] = (uint8_t)((state >> 24) & 0xFFu);
 
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_AXIS_STATE, data, 4u);
+}
+
+/*
+ * Command every axis to IDLE and stop commanding.
+ *
+ * Order matters. The queue is discarded BEFORE the idle commands are enqueued,
+ * because whatever is already in it is position setpoints - they would go out
+ * after the idle, and leave anyone reading a bus trace wondering why the test
+ * kept commanding an axis it had just shut down.
+ *
+ * The caller sets s_stopped. That is deliberate: this function only talks to
+ * the drives, so it can also be used somewhere that wants to disarm without
+ * latching the test off.
+ */
+static void disarm_all(void)
+{
+    s_txq_tail = s_txq_head;
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        send_axis_state(j, ODRV_AXIS_STATE_IDLE);
+    }
+
+    /*
+     * Get them onto the wire before returning. tx_pump() otherwise only runs
+     * once per main-loop pass, so these would sit in the queue behind whatever
+     * the caller does next - and cap_dump() blocks for seconds printing the
+     * capture. An idle command that arrives after that is not a disarm.
+     *
+     * Bounded, because a bus with nothing acknowledging never drains: the FIFO
+     * stays full and this would spin forever. Inside a disarm is the worst
+     * place in the program to hang, so it gives up and lets the caller carry
+     * on - the drives are on their own watchdog for exactly that case.
+     */
+    for (uint32_t spin = 0u;
+         (s_txq_tail != s_txq_head) && (spin < 100000u);
+         spin++)
+    {
+        tx_pump();
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1308,16 +1372,7 @@ void legtest_run(void)
         if (!s_stopped && (BSP_PB_GetState(BUTTON_USER) == 0))
         {
             s_stopped = 1;
-
-            /* Drop everything already queued first. Those are position
-               setpoints that would otherwise still go out AFTER the idle
-               command and could re-energise nothing but confusion. */
-            s_txq_tail = s_txq_head;
-
-            for (int j = 0; j < JOINT_COUNT; j++)
-            {
-                send_axis_state(j, ODRV_AXIS_STATE_IDLE);
-            }
+            disarm_all();
 
             printf("\r\n*** STOPPED by user button - axes commanded"
                    " to IDLE.\r\n    Reset the board to run again. ***\r\n\r\n");
@@ -1493,9 +1548,28 @@ void legtest_run(void)
                     if (!s_gait_done)
                     {
                         s_gait_done = 1;
+
+#if LEGTEST_GAIT_IDLE_AFTER
+                        /* Disarm BEFORE dumping. cap_dump() prints ~1600 lines
+                           over a 115200 baud console, which takes long enough
+                           that leaving the motor servoing through it would add
+                           two minutes of pointless creeping and heating to
+                           every run. */
+                        s_stopped = 1;
+                        disarm_all();
+
                         printf("\r\ngait: %u cycle(s) complete -"
-                               " holding final pose\r\n",
+                               " axes commanded to IDLE\r\n"
+                               "      (motor is now unpowered and the joint is"
+                               " free; reset to run again)\r\n",
                                (unsigned)LEGTEST_GAIT_CYCLES);
+#else
+                        printf("\r\ngait: %u cycle(s) complete -"
+                               " holding final pose\r\n"
+                               "      (still servoing: it will creep against"
+                               " stiction until reset)\r\n",
+                               (unsigned)LEGTEST_GAIT_CYCLES);
+#endif
 
 #if LEGTEST_CAPTURE
                         cap_dump();
