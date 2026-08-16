@@ -48,11 +48,17 @@ DEFAULT_LOG = Path(r"C:\Users\visma\Downloads\putty.log")
 CMD_MOVING_TPS = 0.02
 POS_STILL_TPS = 0.005
 
-# Overshoot below this is not worth chasing, because it is not the drive's
-# fault. reference_gait_rleg_40ms_250hz.xlsx steps about 2 deg between rows
-# 99/100 and 199/0 on every joint - see KNOWN DEFECT in the README - and no
-# gain can track a step. Tuning against it just trades overshoot for lag.
-OVERSHOOT_FLOOR_DEG = 2.5
+# Overshoot worth acting on. This was briefly set to 2.5 on the theory that the
+# trajectory's 2 deg steps imposed a floor - they do not. Raising pos_gain from
+# 11.9 to 20 took overshoot from 2.83 to 0.33 deg with the same trajectory. The
+# steps cost error at the seams, not overshoot at the ends of the stroke.
+OVERSHOOT_ACT_DEG = 1.0
+
+# Samples within this of a trajectory discontinuity are reported separately.
+# The seams are the data's fault and the rest is the drive's, and keeping them
+# apart is the difference between "my actuator tracks to 0.58 deg" and "my
+# actuator tracks to 0.75 deg".
+SEAM_GUARD_S = 0.15
 
 
 def extract(text):
@@ -105,6 +111,22 @@ def metrics(rows):
     rms = (sum(e * e for e in err) / n) ** .5
 
     dt = (t[-1] - t[0]) / (n - 1) if n > 1 else 0.01
+
+    # Split the error either side of the trajectory's discontinuities. They are
+    # found rather than hardcoded: a seam is where the commanded velocity spikes
+    # far above the rest of the trajectory, which is exactly what a step between
+    # adjacent table rows looks like after interpolation. On a clean trajectory
+    # nothing crosses the threshold and the two figures converge.
+    dcmd = [abs(cmd[i] - cmd[i - 1]) / dt for i in range(1, n)]
+    guard = int(SEAM_GUARD_S / dt)
+    near = set()
+    if dcmd:
+        thr = 0.35 * max(dcmd)
+        for i, v in enumerate(dcmd, 1):
+            if v > thr:
+                near.update(range(max(0, i - guard), min(n, i + guard + 1)))
+    away = [err[i] for i in range(n) if i not in near]
+    rms_smooth = (sum(e * e for e in away) / len(away)) ** .5 if away else rms
 
     # Peak-to-peak ratio flatters a joint that lurches past the setpoint and
     # back - a leg thrashing at 300% of the commanded stroke scores better than
@@ -178,7 +200,8 @@ def metrics(rows):
         "n": n, "dur": t[-1] - t[0], "dt": dt,
         "cmd_pp_deg": cmd_pp * 360, "pos_pp_deg": pos_pp * 360,
         "track_pct": pos_pp / cmd_pp * 100 if cmd_pp > 1e-6 else 0,
-        "rms_deg": rms * 360,
+        "rms_deg": rms * 360, "rms_smooth_deg": rms_smooth * 360,
+        "seam_pct": len(near) / n * 100,
         "worst_deg": max(abs(e) for e in err) * 360,
         "worst_at": t[max(range(n), key=lambda i: abs(err[i]))],
         "stuck_pct": stuck_pct,
@@ -207,6 +230,9 @@ def report(m, indent="  "):
     print(f"{indent}achieved  travel : {m['pos_pp_deg']:7.2f} deg  "
           f"({m['track_pct']:.0f}% - ignore, see comment)")
     print(f"{indent}RMS error        : {m['rms_deg']:7.2f} deg   <- tune on this")
+    if m["seam_pct"] > 1:
+        print(f"{indent}  away from seams: {m['rms_smooth_deg']:7.2f} deg   "
+              f"(the {m['seam_pct']:.0f}% near a trajectory step is the data's fault)")
     print(f"{indent}worst error      : {m['worst_deg']:7.2f} deg  "
           f"at t={m['worst_at']:.2f}s")
     print(f"{indent}stuck mid-stroke : {m['stuck_mid_pct']:7.1f} %     <- and this")
@@ -239,15 +265,11 @@ def report(m, indent="  "):
               f"vel_gain cannot fix it:\n{indent}    raise pos_gain "
               f"(1/{1000/m['lag_ms']:.1f} s implies pos_gain is about "
               f"{1000/m['lag_ms']:.1f}).")
-    elif m["overshoot_deg"] > OVERSHOOT_FLOOR_DEG:
+    elif m["overshoot_deg"] > OVERSHOOT_ACT_DEG:
         print(f"{indent}--> sails {m['overshoot_deg']:.1f} deg past each end. Cut "
               f"vel_integrator_gain to 2x vel_gain.")
     else:
         print(f"{indent}--> tracking cleanly. Save it: odrv0.save_configuration()")
-        if m["overshoot_deg"] > 1.0:
-            print(f"{indent}    ({m['overshoot_deg']:.1f} deg of overshoot is at or "
-                  f"below the trajectory's own floor - see\n{indent}     KNOWN DEFECT "
-                  f"in the README. Not yours to tune out.)")
 
 
 def write_csv(rows, path):
