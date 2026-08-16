@@ -204,6 +204,61 @@ const float g_gait_turns[GAIT_SAMPLES][GAIT_JOINTS] = {
     { +0.010775f, -0.057029f, +0.078271f, +0.020933f },
 };
 
+/*
+ * Velocity of the trajectory at table row i, in turns/s at nominal playback.
+ *
+ * Central difference across the neighbours. The gait is a closed cycle, so the
+ * indices wrap rather than clamp - a one-sided difference at the seam would
+ * put a false velocity step exactly where the cycle repeats, which is the one
+ * place a discontinuity would be felt on every single lap.
+ */
+static float row_vel(int i, int k)
+{
+    int prev = (i - 1 + GAIT_SAMPLES) % GAIT_SAMPLES;
+    int next = (i + 1) % GAIT_SAMPLES;
+
+    return (g_gait_turns[next][k] - g_gait_turns[prev][k]) /
+           (2.0f * GAIT_DT_S);
+}
+
+void gait_sample_vel(float phase, float *turns_out, float *tps_out)
+{
+    phase -= (float)(int)phase;
+    if (phase < 0.0f)
+    {
+        phase += 1.0f;
+    }
+
+    float    x = phase * (float)GAIT_SAMPLES;
+    int      i = (int)x;
+    float    f = x - (float)i;
+    int      j = (i + 1) % GAIT_SAMPLES;
+
+    if (i >= GAIT_SAMPLES)
+    {
+        i = GAIT_SAMPLES - 1;
+        j = 0;
+        f = 0.0f;
+    }
+
+    for (int k = 0; k < GAIT_JOINTS; k++)
+    {
+        if (turns_out != 0)
+        {
+            turns_out[k] = g_gait_turns[i][k] +
+                           (g_gait_turns[j][k] - g_gait_turns[i][k]) * f;
+        }
+
+        if (tps_out != 0)
+        {
+            float vi = row_vel(i, k);
+            float vj = row_vel(j, k);
+
+            tps_out[k] = vi + (vj - vi) * f;
+        }
+    }
+}
+
 void gait_sample(float phase, float *turns_out)
 {
     /* Wrap into [0,1). The caller's phase clock is free-running, so this is

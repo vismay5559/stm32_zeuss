@@ -42,4 +42,23 @@ extern const float g_gait_turns[GAIT_SAMPLES][GAIT_JOINTS];
  */
 void gait_sample(float phase, float *turns_out);
 
+/*
+ * As gait_sample, but also returns the trajectory's VELOCITY in turns/s.
+ *
+ * The velocity is at NOMINAL playback - one cycle per GAIT_CYCLE_S. A caller
+ * playing the gait at a different rate must scale it by the same factor it
+ * scales the phase clock, or the feedforward will not match the motion it is
+ * feeding forward. Playing at 0.25x with unscaled velocity asks the drive to
+ * move four times faster than the position setpoint is going.
+ *
+ * Central difference over the neighbouring table samples, then interpolated,
+ * so the result is continuous rather than the piecewise-constant staircase a
+ * plain forward difference of the interpolated position would give. The table
+ * is a sampling of a smooth optimised trajectory; this estimates the velocity
+ * of that underlying curve, not of its linear reconstruction.
+ *
+ * turns_out or tps_out may be NULL if only one is wanted.
+ */
+void gait_sample_vel(float phase, float *turns_out, float *tps_out);
+
 #endif /* GAIT_REF_H */

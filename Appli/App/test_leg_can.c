@@ -201,6 +201,77 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
 #define LEGTEST_GAIT_CYCLES          5u
 
 /*
+ * VELOCITY FEEDFORWARD
+ *
+ * Send the trajectory's own velocity alongside each position setpoint, in
+ * bytes 4-5 of Set_Input_Pos.
+ *
+ * Without it the position loop has to MANUFACTURE the motion out of tracking
+ * error: the only way the drive knows to move is by first falling behind. That
+ * costs a lag proportional to speed over pos_gain, and on a joint with real
+ * stiction it costs more than that, because the error has to grow large enough
+ * to break the joint loose before anything happens at all.
+ *
+ * With it, the velocity the trajectory calls for is handed to the velocity
+ * loop directly and the position loop only corrects the residual. This is free
+ * accuracy on a trajectory that is known in advance - which this one entirely
+ * is, since it is a table compiled into flash.
+ *
+ * Set to 0 to A/B it against the same run. Do that before tuning gains, not
+ * after: feedforward changes what "good tracking" looks like, so gains tuned
+ * without it will be too stiff once it is on.
+ *
+ * MEASURED MAGNITUDES, hip_pitch, straight off the spreadsheet:
+ *
+ *   velocity at 1.00x   -0.716 .. +0.675 turns/s
+ *   velocity at 0.25x   -0.179 .. +0.169 turns/s   <- what this test sends
+ *   as int16 thousandths     -179 .. +169          (field holds +/-32767)
+ *
+ * Two things follow. The wire quantum of 0.001 turns/s is 0.6% at the peak,
+ * so resolution is a non-issue. And the trajectory is not slow: it asks for
+ * 0.18 turns/s even at quarter speed, which is most of the motion the position
+ * loop was previously being asked to invent out of tracking error alone.
+ *
+ * CHECK vel_limit BEFORE TRUSTING THIS. The drive clamps both the setpoint and
+ * the feedforward to axis0.controller.config.vel_limit. Set below 0.18 and the
+ * gait cannot be followed at quarter speed no matter what the gains are, and
+ * the clamp is silent - it looks exactly like a tracking failure.
+ */
+#define LEGTEST_GAIT_VEL_FF          1
+
+/*
+ * TORQUE FEEDFORWARD - plumbed, but there is nothing to put in it.
+ *
+ * Bytes 6-7 of Set_Input_Pos take a torque feedforward, and it is the term
+ * that would cancel gravity and limb inertia before they become tracking
+ * error. It is also the term most likely to fix what this leg is doing.
+ *
+ * It cannot be filled from the current data. reference_gait_rleg_40ms_250hz.xlsx
+ * contains five columns - time_s, hipP_r_deg, hipRoll_r_deg, knee_r_deg,
+ * ankle_r_deg - and every one of them is a POSITION. There is no torque
+ * anywhere in the spreadsheet, and a torque feedforward invented from a
+ * position table would be a guess wearing the costume of a measurement.
+ *
+ * Two honest ways to get one, when it is wanted:
+ *
+ *   1. Re-export it. gait_ref.h records that the source was gait_library_v1.npz
+ *      from Pinocchio + CasADi trajectory optimisation. An optimiser that
+ *      solved for these positions necessarily computed the joint torques to
+ *      achieve them - they exist in the npz and were simply not carried into
+ *      the xlsx. Add a torque column, teach tools/gen_gait.py to emit it, and
+ *      this becomes a table lookup like everything else.
+ *
+ *   2. Compute gravity compensation on the fly, from link mass and centre of
+ *      mass against measured joint angle. Less complete than the optimiser's
+ *      answer - it ignores inertia and contact - but it is the dominant term
+ *      for a leg moving this slowly, and it needs no new data source.
+ *
+ * Until one of those exists this stays zero and the signature carries it, so
+ * that adding it later is a value change and not a protocol change.
+ */
+#define LEGTEST_GAIT_TORQUE_FF       0
+
+/*
  * TRAJECTORY CAPTURE
  *
  * Record commanded against measured for the whole run, then print it as CSV
@@ -512,7 +583,27 @@ static void tx_pump(void)
     }
 }
 
-static void send_input_pos(int j, float pos)
+/*
+ * Pack a float into the int16 feedforward fields, which carry thousandths.
+ *
+ * Saturating rather than wrapping matters: an int16 that rolls over turns a
+ * too-large forward velocity into a large REVERSE one, and hands the drive a
+ * command to slam the joint backwards at full speed. Clipping merely asks for
+ * less than the trajectory wanted. The trajectory never comes close to the
+ * limit, which is exactly why the guard has to be here - it only ever fires
+ * when something upstream has already gone wrong.
+ */
+static int16_t ff_thousandths(float v)
+{
+    float scaled = v * 1000.0f;
+
+    if (scaled >  32767.0f) { return  32767; }
+    if (scaled < -32768.0f) { return -32768; }
+
+    return (int16_t)scaled;
+}
+
+static void send_input_pos(int j, float pos, float vel_ff, float trq_ff)
 {
     uint8_t  data[8];
     uint32_t bits;
@@ -522,10 +613,15 @@ static void send_input_pos(int j, float pos)
     data[1] = (uint8_t)((bits >> 8) & 0xFFu);
     data[2] = (uint8_t)((bits >> 16) & 0xFFu);
     data[3] = (uint8_t)((bits >> 24) & 0xFFu);
-    data[4] = 0;   /* vel_ff    - left at zero for a bring-up test */
-    data[5] = 0;
-    data[6] = 0;   /* torque_ff */
-    data[7] = 0;
+
+    /* Both fields are int16 little-endian, 0.001 units: turns/s and Nm. */
+    uint16_t v = (uint16_t)ff_thousandths(vel_ff);
+    uint16_t q = (uint16_t)ff_thousandths(trq_ff);
+
+    data[4] = (uint8_t)(v & 0xFFu);
+    data[5] = (uint8_t)((v >> 8) & 0xFFu);
+    data[6] = (uint8_t)(q & 0xFFu);
+    data[7] = (uint8_t)((q >> 8) & 0xFFu);
 
     s_joint[j].cmd = pos;
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_POS, data, 8u);
@@ -962,10 +1058,20 @@ void legtest_init(void)
     printf("closed loop: disabled (safe) - axes stay IDLE, motors cannot move.\r\n");
     printf("             positions are still transmitted so TX can be verified.\r\n");
 #endif
-    printf("\r\nFor telemetry, ODrive must be publishing cyclically:\r\n");
-    printf("  axis0.config.can.encoder_msg_rate_ms = 10\r\n");
-    printf("  axis0.config.can.torque_msg_rate_ms  = 10\r\n");
-    printf("  axis0.config.can.heartbeat_msg_rate_ms = 100\r\n");
+    /*
+     * These are a REQUIREMENT printed for the operator, not a readback - the
+     * board has no way to query the drive's config over CAN. Do not read this
+     * block as a report of what the ODrive is doing. What it is actually doing
+     * shows up in the enc=/trq=/hb= counters on the per-second status line:
+     * they are cumulative, so the increment between two lines is the rate in
+     * Hz. 10 ms here is a ceiling, not a target - faster is better and 1 ms is
+     * what the capture wants.
+     */
+    printf("\r\nSET THESE ON THE ODRIVE (this is a reminder, not a readback):\r\n");
+    printf("  axis0.config.can.encoder_msg_rate_ms   <= 10   (1 is better)\r\n");
+    printf("  axis0.config.can.torque_msg_rate_ms    <= 10   (1 is better)\r\n");
+    printf("  axis0.config.can.heartbeat_msg_rate_ms  = 100\r\n");
+    printf("  actual rates = the per-second growth of enc= trq= hb= below\r\n");
     printf("==============================================\r\n\r\n");
 }
 
@@ -1236,6 +1342,18 @@ void legtest_run(void)
          */
         float target[JOINT_COUNT] = { 0.0f };
 
+        /*
+         * Feedforward that goes out with the position, per joint.
+         *
+         * These must be the derivative of what target[] is actually DOING,
+         * not of the trajectory in the abstract. Every branch below that sets
+         * target[] therefore sets these too, and the zero initialiser is the
+         * right answer for every branch that holds station - a stationary
+         * setpoint has zero velocity, whatever the table says at that phase.
+         */
+        float target_vel[JOINT_COUNT] = { 0.0f };
+        float target_trq[JOINT_COUNT] = { 0.0f };
+
 #if LEGTEST_ENABLE_CLOSED_LOOP
         /* Stay at zero through the arming delay so the leg does not lurch the
            instant the axes come live. */
@@ -1339,10 +1457,18 @@ void legtest_run(void)
                 /* Straight-line move into the start of the trajectory. */
                 float a = (float)since_arm / (float)LEGTEST_GAIT_ENTRY_MS;
 
+                /* A straight line has one constant velocity: the whole
+                   distance over the whole ramp. The entry deserves the same
+                   feedforward as the gait - it is the move most likely to be
+                   large, and the one where the drive is coldest. */
+                float ramp_s = (float)LEGTEST_GAIT_ENTRY_MS * 0.001f;
+
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
                     target[j] = s_entry_from[j] +
                                 (first[j] - s_entry_from[j]) * a;
+
+                    target_vel[j] = (first[j] - s_entry_from[j]) / ramp_s;
                 }
             }
             else
@@ -1378,20 +1504,46 @@ void legtest_run(void)
                 }
 #endif
 
-                gait_sample(s_gait_phase, all);
+                float all_vel[GAIT_JOINTS];
+
+                gait_sample_vel(s_gait_phase, all, all_vel);
+
+                /*
+                 * Two scalings, and both are mandatory.
+                 *
+                 * LEGTEST_GAIT_SPEED, because the phase clock is turning at
+                 * that fraction of nominal and the velocity has to agree with
+                 * the position it accompanies. Feeding unscaled velocity at
+                 * quarter speed would ask for four times the motion the
+                 * setpoint is making, and the drive would run away from a
+                 * setpoint it is simultaneously being told to track.
+                 *
+                 * Zero once the cycles are done, because holding the final
+                 * pose freezes the PHASE, not the table. The trajectory still
+                 * has a velocity at that phase; the command no longer does.
+                 * Sending the table's value there would drive the joint off
+                 * a stationary setpoint for as long as the test is left
+                 * running - a slow push with nothing to stop it.
+                 */
+                float vscale = s_gait_done ? 0.0f : LEGTEST_GAIT_SPEED;
+
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
-                    target[j] = all[s_gait_col[j]] + s_zero_offset[j];
+                    target[j]     = all[s_gait_col[j]] + s_zero_offset[j];
+                    target_vel[j] = all_vel[s_gait_col[j]] * vscale;
                 }
             }
 #else
             float t     = (float)since_arm * 0.001f;
-            float phase = 2.0f * 3.14159265f * LEGTEST_FREQ_HZ * t;
+            float w     = 2.0f * 3.14159265f * LEGTEST_FREQ_HZ;
+            float phase = w * t;
             float v     = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
+            float dv    = LEGTEST_AMPLITUDE_TURNS * w * cosf(phase);
 
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                target[j] = v;
+                target[j]     = v;
+                target_vel[j] = dv;
             }
 #endif
         }
@@ -1410,7 +1562,12 @@ void legtest_run(void)
                 send_input_vel(j, (s_tick > LEGTEST_ARM_DELAY_MS)
                                       ? LEGTEST_VEL_POKE_TURNS_S : 0.0f);
 #else
-                send_input_pos(j, target[j]);
+                /* The toggles fold at compile time; keeping them here rather
+                   than in the branches above means every regime gets the same
+                   treatment and none can be forgotten when one is added. */
+                send_input_pos(j, target[j],
+                               LEGTEST_GAIT_VEL_FF    ? target_vel[j] : 0.0f,
+                               LEGTEST_GAIT_TORQUE_FF ? target_trq[j] : 0.0f);
 #endif
             }
 #else
@@ -1419,7 +1576,9 @@ void legtest_run(void)
             send_input_vel(tx_slot, (s_tick > LEGTEST_ARM_DELAY_MS)
                                         ? LEGTEST_VEL_POKE_TURNS_S : 0.0f);
 #else
-            send_input_pos(tx_slot, target[tx_slot]);
+            send_input_pos(tx_slot, target[tx_slot],
+                           LEGTEST_GAIT_VEL_FF    ? target_vel[tx_slot] : 0.0f,
+                           LEGTEST_GAIT_TORQUE_FF ? target_trq[tx_slot] : 0.0f);
 #endif
             tx_slot = (tx_slot + 1) % JOINT_COUNT;
 #endif
