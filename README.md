@@ -102,6 +102,10 @@ tools/
    check_proto.py         proves the C and Python layouts agree
    test_pi_link.py        proves the Pi side sustains 1 kHz, no hardware needed
    gen_gait.py            spreadsheet -> gait_ref.c
+   plot_run.py            PuTTY log -> tracking plot + gain-tuning metrics
+
+runs/                            archived captures, one CSV per gain setting
+                                 (generated - `plot_run.py -l NAME`)
 
 Appli/Core/, Appli/USB_DEVICE/   CubeMX-generated (edit only in USER CODE blocks)
 Boot/                            bootloader project, also CubeMX-generated
@@ -152,7 +156,7 @@ Two separate commands. **The Appli needs an external loader**; the Boot does not
 # Appli -> external flash at 0x70000000
 STM32_Programmer_CLI -c port=SWD mode=UR \
   -el "C:/ST/STM32CubeCLT_1.22.0/STM32CubeProgrammer/bin/ExternalLoader/MX25UW25645G_NUCLEO-H7S3L8.stldr" \
-  -d Appli/build/nexus_first_Appli.elf -v
+  -d Appli/build/nexus_first_Appli.hex -v
 
 # Boot -> internal flash at 0x08000000
 STM32_Programmer_CLI -c port=SWD mode=UR -d Boot/build/nexus_first_Boot.elf -v -rst
@@ -160,6 +164,13 @@ STM32_Programmer_CLI -c port=SWD mode=UR -d Boot/build/nexus_first_Boot.elf -v -
 
 Notes:
 
+- **Flash the Appli `.hex`, not the `.elf`.** The ELF carries two LOAD segments
+  that hold no data (`0x20000000` heap/stack in DTCM, `0x24070000` non-cacheable
+  buffers). STM32CubeProgrammer tries to erase at every segment address, the
+  external loader only knows how to drive flash at `0x70000000`, and the whole
+  download aborts with `Error: failed to download Sector[0]`. The `.hex` records
+  only sections that contain data, so it programs cleanly. The Boot is internal
+  flash with no external loader attached, so its ELF is fine.
 - Use the loader **without** the `-XSPIM1` suffix; this board wires the flash
   to XSPI port 2.
 - `mode=UR` (connect under reset) is important for an XIP project — running
@@ -244,6 +255,46 @@ Two conversions happen in the generator, and both are worth knowing:
 
 `gait_sample(phase, out)` interpolates linearly between the 250 Hz samples and
 wraps at 1.0, so the 1 kHz loop gets a smooth ramp rather than a staircase.
+
+#### KNOWN DEFECT — the spreadsheet is not continuous
+
+`reference_gait_rleg_40ms_250hz.xlsx` contains **two step discontinuities**, at
+rows 99→100 (phase 0.5) and 199→0 (phase 1.0). Every joint jumps about 2° in a
+single 4 ms sample while every other step in the trajectory is under 0.15°:
+
+| column | median step | row 99→100 | row 199→0 |
+|---|---|---|---|
+| hipP_r_deg | 0.134° | **−2.013°** | **+1.961°** |
+| hipRoll_r_deg | 0.059° | **+1.798°** | **+1.808°** |
+| knee_r_deg | 0.034° | **+1.658°** | **−1.969°** |
+| ankle_r_deg | 0.142° | −0.781° | **−1.510°** |
+
+The two halves are not duplicates of one another (they differ by up to 13.8°),
+so this is two separate 0.4 s optimiser solutions concatenated without a
+periodicity constraint at either join. It is a defect in the source data, not in
+the generator or the firmware.
+
+Interpolation does **not** rescue it. It makes position continuous and leaves
+velocity discontinuous: the 2° is still delivered inside one row-time, so during
+those 16 ms at 0.25× the drive is commanded to move at 0.35 turn/s when the real
+gait never exceeds **0.029 turn/s**. Twelve times the peak velocity of the
+actual motion, twice per cycle, on every joint at once.
+
+Consequences worth knowing before you read any tracking plot:
+
+- Tracking error has a floor of roughly 2° at those two phases that no gain
+  setting can remove. Do not tune against it.
+- Velocity feedforward faithfully amplifies it — it feeds forward a velocity
+  that exists only because the data is broken, as a kick at a direction
+  reversal.
+- Any peak-velocity figure computed by differentiating this table is dominated
+  by the two joins rather than by the gait.
+
+The real fix is upstream: re-run the optimisation with `q(T) = q(0)` and a
+continuous half-step join. Blending the joins in `tools/gen_gait.py` would make
+the bench test a clean test signal, but the firmware would then no longer be
+playing what the optimiser produced — acceptable for actuator bring-up, not
+something to carry into the robot silently.
 
 **Two safety behaviours that are not optional:**
 
@@ -419,6 +470,120 @@ ground, physical e-stop within reach, low current and velocity limits set in
 odrivetool, and bring up one node at a time before running all four. Also
 enable ODrive's own watchdog (`axis0.config.enable_watchdog`) — that is the
 layer that protects the hardware if this firmware stops.
+
+### Feedforward
+
+`Set_Input_Pos` carries three fields, not one: position (float32 turns), then
+`Vel_FF` and `Torque_FF` as int16 at 0.001 units. Without them the drive has to
+*discover* every motion from tracking error, which means it is always behind by
+whatever error it took to generate the torque.
+
+`LEGTEST_GAIT_VEL_FF` (default 1) sends the trajectory's own derivative.
+`gait_sample_vel()` computes it as a central difference across neighbouring
+table rows — wrapping rather than clamping at the seam — then interpolates, so
+the result is continuous rather than the staircase a forward difference of the
+interpolated position would give.
+
+Two scalings are mandatory and both are easy to get wrong:
+
+- **Multiply by `LEGTEST_GAIT_SPEED`.** The phase clock runs at that fraction of
+  nominal and the velocity must agree with the position it accompanies. Unscaled
+  feedforward at 0.25× asks for four times the motion the setpoint is making.
+- **Zero it once the cycles are done.** Holding the final pose freezes the
+  *phase*, not the table. The trajectory still has a velocity at that phase; the
+  command no longer does. Sending the table's value there drives the joint off a
+  stationary setpoint for as long as the test is left running.
+
+The int16 fields saturate rather than wrap. A wrapped int16 turns "too fast
+forward" into "full speed backward", which is a command to slam the joint the
+wrong way at full velocity; clipping merely asks for less than the trajectory
+wanted.
+
+`LEGTEST_GAIT_TORQUE_FF` is **0 and the array stays zero**, because the
+spreadsheet has no torque column — it is `time_s, hipP, hipRoll, knee, ankle`,
+positions only. The parameter is plumbed so that adding real data later is a
+value change rather than a protocol change. Two honest sources: re-export joint
+torques from `gait_library_v1.npz` (the Pinocchio/CasADi solve necessarily
+computed them, they just were not carried into the xlsx), or compute gravity
+compensation on the fly from link mass and measured angle. Inventing a torque
+trajectory from a position table would be a guess wearing the costume of a
+measurement.
+
+**Feedforward authority is scaled by `vel_gain`.** `Vel_FF` is added to the
+velocity setpoint, which is then multiplied by `vel_gain` to become torque — so
+with a small `vel_gain` the feedforward contributes almost nothing and appears
+to do nothing. Tune `vel_gain` first, then judge whether feedforward helped.
+
+### Tuning gains against captured runs
+
+With `LEGTEST_CAPTURE 1` the board records `cmd`, `pos`, `vel` and `trq` for
+joint 0 into a 2048-row RAM buffer at `CAPTURE_HZ` (100 Hz, so 20.5 s of
+capacity), **only while the gait is running** so the entry ramp is excluded and
+`t=0` is the first sample of real gait. Nothing is transmitted during the run.
+When the gait completes it dumps the buffer over UART as CSV, once per boot.
+
+Point PuTTY at a log file — *All session output*, **Always append** — and:
+
+```bash
+python tools/plot_run.py                    # plot the newest run
+python tools/plot_run.py -l vg1.0_vi5.0     # ...and archive it under that name
+python tools/plot_run.py --compare          # overlay everything archived
+```
+
+The log path defaults to `DEFAULT_LOG` at the top of the script. Label runs with
+the gains that produced them; `try4` is meaningless by the next morning.
+
+Read these two numbers, in this order:
+
+- **`stuck mid-stroke`** — fraction of samples where the command is sweeping
+  fast and the encoder is not moving. This is missing torque authority and it is
+  what `vel_gain` cures. Drive it to zero *first*.
+- **`overshoot`** — how far past the command the joint travels at the ends of
+  the stroke. Once stiction is beaten this dominates, and it points at the
+  integrator rather than at `vel_gain`.
+
+Sticking at direction *reversals* is reported separately because some of it is
+unavoidable in any geared joint, and lumping it in hides the moment the real
+problem is solved. `lag` is suppressed entirely while the joint sticks
+mid-stroke — a best-fit time shift against a frozen trace is meaningless, and a
+confident number there sends you tuning `pos_gain` when the problem is
+`vel_gain`.
+
+**Ignore `tracking %`.** It is a peak-to-peak ratio, so a joint thrashing 300%
+past the setpoint scores better than one lagging gently. It is printed only
+because it appears in older logs.
+
+The loop, one round per gain change — gains are live over USB, no reflash:
+
+```
+1. odrivetool:  set vel_gain and vel_integrator_gain, read them back
+2. board:       press RESET        (leg clear, stop button in reach)
+3. wait ~21 s:  3 s arm + 2 s ramp + 16 s gait, then it dumps
+4. host:        python tools/plot_run.py -l vgX_viY
+```
+
+If the capture count in the first line of output has not gone up, no new run was
+recorded — PuTTY was not logging, or the reset did not take. Do not archive
+anything until it does. `odrv0.save_configuration()` only once you are happy;
+until then a power cycle silently reverts the gains and you are tuning against a
+moving baseline without knowing it.
+
+A worked example, hip_pitch on node 3, where `pos_gain × vel_gain` is the whole
+stiffness of the position loop:
+
+| | `vel_gain` 0.167, `vi` 0.333 | `vel_gain` 0.5, `vi` 2.5 |
+|---|---|---|
+| stiffness | 1.99 Nm/turn | 5.95 Nm/turn |
+| RMS error | 12.16° | **2.14°** |
+| worst error | 20.30° | 5.01° |
+| stuck mid-stroke | seizing for seconds | 0.8% |
+
+At the first setting the proportional term needed 27° of error to make the
+~0.15 Nm that breaks the joint loose, and the whole gait is 13.8° — so the
+position loop could never move the joint at all, and every motion came from the
+integrator slowly winding up at 0.64 Hz. That is what stick-slip looks like in a
+log, and it is a gain being an order of magnitude too small rather than anything
+mechanical.
 
 ### `NEXUS_MODE_IMU` — BNO085 over UART
 
