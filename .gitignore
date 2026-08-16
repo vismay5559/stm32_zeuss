@@ -11,3 +11,8 @@ mx.scratch/
 
 __pycache__/
 *.pyc
+
+# Plots regenerated on every run of tools/plot_run.py. The archived run CSVs in
+# runs/ ARE tracked: they are the record of what each gain setting actually did,
+# and they are small.
+runs/*.png
