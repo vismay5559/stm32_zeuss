@@ -187,6 +187,22 @@ static uint8_t leg_sources_ok(const joint_src_t *map, uint8_t enc_valid,
             {
                 return 0;
             }
+
+            /*
+             * Nor is one that has stopped reporting at all.
+             *
+             * When a bus goes quiet - bus-off, a pulled connector, a drive
+             * reboot - act->pos simply stops changing. The last value
+             * persists, axis_error stays 0, and without this check forward
+             * kinematics produces a confident foot position from angles that
+             * are seconds old. The contact update then pulls the entire state
+             * towards a foot that is not there, which is precisely what the
+             * "treat a bad leg as lifted" rule below exists to prevent.
+             */
+            if (act->pos_age[map[j].index] > ACT_POS_STALE_TICKS)
+            {
+                return 0;
+            }
         }
     }
     return 1;

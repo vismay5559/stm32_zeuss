@@ -13,11 +13,60 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
 # Define the build type
+#
+# RelWithDebInfo, not Debug: this firmware has a hard 1 ms budget and the
+# estimator's predict step alone is two 21x21 matrix products. An unoptimised
+# build is not a slower version of the robot, it is a different one. -O2 with
+# full debug symbols keeps the debugger usable without giving that up.
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug")
+    set(CMAKE_BUILD_TYPE "RelWithDebInfo")
 endif()
 
+# What this firmware does, and what it insists on being healthy.
+# See Appli/App/nexus_mode.h and Appli/App/health.h.
+#
+# Both are also read from the ENVIRONMENT, and that is not redundancy.
+# The top-level project builds this one through ExternalProject_Add, whose
+# CMAKE_ARGS are fixed in the CubeMX-generated mx-generated.cmake - so a
+# -D on `cmake --preset ...` never reaches this file, while an environment
+# variable passes straight through. Editing the generated file instead would
+# work until the next CubeMX run silently reverted it.
+#
+#     NEXUS_MODE=NEXUS_MODE_LEG_CAN cmake --preset Debug     # whole project
+#     cmake -S Appli -B Appli/build -DNEXUS_MODE=...         # this one alone
+if(NOT NEXUS_MODE AND DEFINED ENV{NEXUS_MODE})
+    set(NEXUS_MODE "$ENV{NEXUS_MODE}")
+endif()
+
+set(NEXUS_MODE "${NEXUS_MODE}" CACHE STRING
+    "Firmware mode: NEXUS_MODE_ROBOT, NEXUS_MODE_LEG_CAN or NEXUS_MODE_IMU")
+if(NOT NEXUS_MODE)
+    set(NEXUS_MODE "NEXUS_MODE_ROBOT" CACHE STRING "" FORCE)
+endif()
+set_property(CACHE NEXUS_MODE PROPERTY STRINGS
+    NEXUS_MODE_ROBOT NEXUS_MODE_LEG_CAN NEXUS_MODE_IMU)
+
+if(NOT HEALTH_EXPECTED_MASK AND DEFINED ENV{HEALTH_EXPECTED_MASK})
+    set(HEALTH_EXPECTED_MASK "$ENV{HEALTH_EXPECTED_MASK}")
+endif()
+set(HEALTH_EXPECTED_MASK "${HEALTH_EXPECTED_MASK}" CACHE STRING
+    "Subsystems that must be healthy before the robot may arm. Empty = all.")
+
 message("Build type: " ${CMAKE_BUILD_TYPE})
+message("Nexus mode: " ${NEXUS_MODE})
+
+if(NOT NEXUS_MODE STREQUAL "NEXUS_MODE_ROBOT")
+    message(WARNING
+        "Building a BRING-UP TEST binary (${NEXUS_MODE}), not the robot loop. "
+        "It will not answer the Pi. Unset NEXUS_MODE for flight firmware.")
+endif()
+
+if(HEALTH_EXPECTED_MASK)
+    message(WARNING
+        "HEALTH_EXPECTED_MASK is narrowed to ${HEALTH_EXPECTED_MASK}. "
+        "Subsystems outside it cannot fault, so the failsafe will not act on "
+        "them. Bring-up only - unset it before anything walks.")
+endif()
 
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -46,6 +95,8 @@ set(CMAKE_CXX_COMPILER_FORCED "true")
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    NEXUS_MODE=${NEXUS_MODE}
+    $<$<BOOL:${HEALTH_EXPECTED_MASK}>:HEALTH_EXPECTED_MASK=${HEALTH_EXPECTED_MASK}>
 )
 
 # Enable CMake support for ASM and C languages
@@ -61,6 +112,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app.c
     App/contact.c
     App/health.c
+    App/safety.c
+    App/watchdog.c
     App/lie_group.c
     App/kinematics.c
     App/inekf.c

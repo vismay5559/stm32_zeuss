@@ -18,8 +18,32 @@
 #define NEXUS_MODE_IMU       2   /* IMU only: print quaternion/accel/gyro     */
 #define NEXUS_MODE_LEG_TORQUE 3  /* one leg, STM32-side PD -> Set_Input_Torque */
 
+/*
+ * The default is the ROBOT loop, deliberately.
+ *
+ * A test mode has to be asked for, because the failure it causes is silent: a
+ * board flashed with LEG_CAN answers no USB packets and drives one leg from a
+ * canned trajectory, which from the Pi's side is indistinguishable from a dead
+ * link. Select a test mode at configure time rather than by editing this file:
+ *
+ *     cmake --preset Release -DNEXUS_MODE=NEXUS_MODE_LEG_CAN
+ *
+ * That way the choice appears in the build log and in the .elf, instead of
+ * living in an uncommitted local edit.
+ */
 #ifndef NEXUS_MODE
-#define NEXUS_MODE  NEXUS_MODE_LEG_CAN
+#define NEXUS_MODE  NEXUS_MODE_ROBOT
+#endif
+
+/* Short name for the boot banner and for the mode byte the Pi receives. */
+#if   (NEXUS_MODE == NEXUS_MODE_ROBOT)
+#define NEXUS_MODE_NAME  "ROBOT"
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+#define NEXUS_MODE_NAME  "LEG_CAN"
+#elif (NEXUS_MODE == NEXUS_MODE_IMU)
+#define NEXUS_MODE_NAME  "IMU"
+#else
+#error "NEXUS_MODE is not one of NEXUS_MODE_ROBOT / _LEG_CAN / _IMU"
 #endif
 
 #endif /* NEXUS_MODE_H */

@@ -8,6 +8,9 @@
 #include "contact.h"
 #include "critical.h"
 #include "health.h"
+#include "safety.h"
+#include "watchdog.h"
+#include "nexus_mode.h"
 #include "fusion.h"
 #include <stdio.h>
 #include <string.h>
@@ -25,10 +28,22 @@ static uint32_t          s_startup_grace;
 /* Ticks to ignore at startup before overruns count as real faults. */
 #define STARTUP_GRACE_TICKS  50u
 
-/* Periodic loop-timing report on the serial console. Costs real time - a
-   ~45 character line at 115200 baud blocks for ~4 ms, i.e. four missed ticks -
-   so the backlog it creates is discarded afterwards and it is easy to switch
-   off entirely once timing is trusted. */
+/*
+ * Periodic loop-timing report on the serial console.
+ *
+ * This costs more real time than it used to claim. The line expands to ~110
+ * characters, and at 115200 8N1 a character is 86.8 us - so it blocks for
+ * ~9.5 ms and misses nine ticks, not four. The backlog it creates is
+ * discarded uncounted afterwards, because those misses are the diagnostic's
+ * doing rather than the loop's.
+ *
+ * It also sets the floor for the watchdog period: whatever this costs must
+ * fit comfortably inside wdg_timeout_ms(). If this line grows, check that
+ * budget before shipping it.
+ *
+ * The right long-term answer is to send these counters in the state packet -
+ * the Pi already reads at 1 kHz - and keep the serial line for boot only.
+ */
 #define NEXUS_LOOP_STATS  1
 static nexus_state_t     s_state;
 
@@ -168,6 +183,17 @@ void app_init(void)
     BSP_LED_Init(LED_YELLOW);
     BSP_LED_Off(LED_YELLOW);
 
+    printf("APPLI: mode %s, protocol v%u\r\n",
+           NEXUS_MODE_NAME, (unsigned)NEXUS_PROTO_VERSION);
+
+    /* Read RCC_RSR before anything else can clear it - a board that has been
+       quietly rebooting itself mid-run must say so on the very next line. */
+    wdg_init_reset_cause();
+    if (wdg_reset_was_watchdog())
+    {
+        printf("APPLI: *** last reset came from the WATCHDOG ***\r\n");
+    }
+
     check_noncacheable_region();
 
     memset(&s_state, 0, sizeof(s_state));
@@ -176,10 +202,14 @@ void app_init(void)
     s_overruns     = 0;
     s_startup_grace = 0;
 
-    /* Nothing is wired up yet, so only the timing check is armed. Add each
-       flag here (or call health_set_expected) as you connect that hardware -
-       the red LED then tells you the moment it starts talking. */
-    health_init(HEALTH_EXPECTED_NOW);
+    /*
+     * Watch everything HEALTH_EXPECTED_MASK names - by default the whole
+     * robot. safety.c refuses to arm until all of it is healthy, so narrowing
+     * this during bring-up is a build-time decision (see health.h) rather
+     * than something to edit in and forget to edit out.
+     */
+    health_init(HEALTH_EXPECTED_MASK);
+    safety_init();
     fusion_init();
 
     contact_init();
@@ -187,6 +217,32 @@ void app_init(void)
     act_init();
     link_usb_init();
     imu_init();
+
+    /*
+     * Start the watchdog last, and only now.
+     *
+     * Everything above blocks for a long time - imu_init() alone spends the
+     * better part of a second on the sensor's reset sequence - and none of it
+     * can refresh a watchdog. Arming it here means the first thing it ever
+     * supervises is the control loop, which is the only thing it should be
+     * supervising.
+     */
+    if (wdg_start())
+    {
+        printf("APPLI: watchdog armed, %lu ms\r\n",
+               (unsigned long)wdg_timeout_ms());
+    }
+    else
+    {
+        /* No watchdog means no recovery from a hang. Say so loudly rather
+           than running on and looking healthy. */
+        printf("APPLI: *** WATCHDOG FAILED TO START - LSI not running ***\r\n");
+
+        /* main() does not run its BSP_LED_Init calls until after app_init(),
+           so init here or this warning has no visible half. */
+        BSP_LED_Init(LED_RED);
+        BSP_LED_On(LED_RED);
+    }
 
     HAL_TIM_Base_Start(&htim2);
     HAL_TIM_Base_Start_IT(&htim6);
@@ -305,8 +361,20 @@ void app_run(void)
         {
             float targets[NEXUS_NUM_JOINTS];
 
-            memcpy(targets, cmd.target_pos, sizeof(targets));
-            act_set_targets(targets);
+            /*
+             * Nothing reaches the actuators without passing safety.c first.
+             *
+             * The CRC in link_usb.c proves the bytes survived the wire. It
+             * says nothing about whether the policy that produced them is
+             * still sane, whether this board is allowed to be moving, or
+             * whether the frame is one we have already acted on - and a NaN
+             * that gets as far as act_set_targets() poisons the interpolator
+             * permanently.
+             */
+            if (safety_accept_command(&cmd, targets))
+            {
+                act_set_targets(targets);
+            }
         }
 
         if (s_tick_pending == 0u)
@@ -346,7 +414,22 @@ void app_run(void)
         act_tick_1khz();
         build_and_send_state();
         health_tick();
+
+        /* Act on what health_tick() just found. This is the step that takes
+           the actuators away when nobody is flying the robot any more. */
+        safety_tick(health_faults());
+
         update_health_leds();
+
+        /*
+         * Refresh the watchdog HERE and nowhere else.
+         *
+         * This point is reached only by a cycle that ran every stage above to
+         * completion. Refreshing from the idle loop instead would keep the
+         * dog fed while the control loop was stalled - which is the exact
+         * failure the watchdog exists to catch.
+         */
+        wdg_refresh();
 
         uint32_t dt = __HAL_TIM_GET_COUNTER(&htim2) - t_start;
         if (dt > s_loop_us_max)
@@ -364,12 +447,15 @@ void app_run(void)
             uint32_t ovr = s_overruns;
             uint32_t mx  = s_loop_us_max;
 
-            printf("loop max %lu us | overruns %lu | can drop %lu/%lu | "
-                   "usb drop %lu | health 0x%02lX watching 0x%02lX blink %u\r\n",
+            printf("%s | loop max %lu us | overruns %lu | can drop %lu/%lu | "
+                   "usb drop %lu | rej %lu | health 0x%02lX watching 0x%02lX "
+                   "blink %u\r\n",
+                   safety_state_name(),
                    (unsigned long)mx, (unsigned long)ovr,
                    (unsigned long)act_tx_dropped(0),
                    (unsigned long)act_tx_dropped(1),
                    (unsigned long)link_usb_tx_dropped(),
+                   (unsigned long)safety_rejected(),
                    (unsigned long)health_faults(),
                    (unsigned long)health_expected(),
                    (unsigned)health_blink_code());

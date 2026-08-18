@@ -630,8 +630,22 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /*
+   * Spinning here with interrupts off used to mean the drives kept holding
+   * their last commanded position on a board that had stopped controlling
+   * anything. Take the actuators down first.
+   *
+   * act_emergency_idle() bypasses the software queue and returns immediately
+   * if the CAN peripherals were never started, so it is safe this early -
+   * Error_Handler() is reachable from HAL init failures long before app_init().
+   */
   __disable_irq();
+  act_emergency_idle();
+
+  /* Reachable before main()'s BSP_LED_Init calls, so init before lighting. */
+  BSP_LED_Init(LED_RED);
+  BSP_LED_On(LED_RED);
+
   while (1)
   {
   }

@@ -46,6 +46,31 @@
  */
 #define HEALTH_EXPECTED_NOW  (HEALTH_TIMING | HEALTH_IMU)
 
+/* Everything the finished robot has plugged in. */
+#define HEALTH_EXPECTED_ROBOT  (HEALTH_TIMING | HEALTH_IMU | HEALTH_ENC | \
+                                HEALTH_CAN1   | HEALTH_CAN2 | HEALTH_LINK)
+
+/*
+ * What app_init() actually watches.
+ *
+ * This defaults to the full set, because safety.c will not arm the actuators
+ * until everything being watched is healthy - and a failsafe that is not
+ * watching the Pi link is not a failsafe. A partially wired bench therefore
+ * sits in BOOT and refuses to arm, which is the correct answer to "half the
+ * robot is missing", not an obstacle to work around.
+ *
+ * During bring-up, narrow it at configure time rather than by editing here:
+ *
+ *     HEALTH_EXPECTED_MASK='(HEALTH_TIMING|HEALTH_IMU)' cmake --preset Debug
+ *
+ * (An environment variable, not -D: the top-level project configures Appli/
+ * through ExternalProject_Add and does not forward -D arguments. See
+ * Appli/CMakeLists.txt.)
+ */
+#ifndef HEALTH_EXPECTED_MASK
+#define HEALTH_EXPECTED_MASK  HEALTH_EXPECTED_ROBOT
+#endif
+
 void     health_init(uint32_t expected_mask);
 void     health_set_expected(uint32_t mask);
 uint32_t health_expected(void);

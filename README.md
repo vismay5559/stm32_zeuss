@@ -131,6 +131,34 @@ cmake --preset Debug
 cmake --build build/Debug
 ```
 
+`--preset Debug` is for bring-up. **Flight firmware is `--preset Release`** —
+this loop has a 1 ms budget and the estimator's predict step alone is two 21x21
+matrix products, so an unoptimised build is not a slower robot, it is a
+different one.
+
+```bash
+cmake --preset Release
+cmake --build build/Release
+```
+
+Either preset builds the **robot loop** by default. A test-mode binary looks
+exactly like a dead link from the Pi's side, so selecting one is deliberate and
+goes through the environment rather than an edit to `nexus_mode.h`:
+
+```bash
+NEXUS_MODE=NEXUS_MODE_LEG_CAN cmake --preset Debug
+cmake --build build/Debug
+```
+
+(An environment variable rather than `-D` because the top-level project
+configures `Appli/` through `ExternalProject_Add`, whose arguments live in the
+CubeMX-generated `mx-generated.cmake`. A `-D` on the outer command never
+reaches the inner project; the environment does. `-D` works when configuring
+`Appli/` on its own.)
+
+The configure step prints the mode and warns when it is not `NEXUS_MODE_ROBOT`,
+and the board prints it again on the serial console at boot.
+
 Outputs, per context:
 
 ```
@@ -798,6 +826,58 @@ quaternion entirely to test whether the fusion engine is what costs the
 accelerometer its budget; the Pi still gets `quat` from our own estimator, which
 is fused with leg kinematics and is the better estimate anyway.
 
+## Arming, faults and the failsafe
+
+The firmware does not simply do as it is told. Between the Pi and the
+actuators sits a small state machine (`Appli/App/safety.c`):
+
+```
+BOOT  ---- everything being watched is healthy ---->  IDLE
+                                                       |  command with
+                                                       |  CMD_ENABLE set
+                                                       v
+FAULT <--------- HEALTH_LINK or HEALTH_TIMING ------ ARMED
+  |                                                    ^
+  +---- faults clear ----> IDLE ---- re-arm handshake --+
+```
+
+**What the Pi has to do**
+
+| | |
+|---|---|
+| Set `CMD_ENABLE` | `link.send_command(...)` does this by default. Without the flag nothing reaches the actuators. |
+| Advance `seq` | Replayed or out-of-order frames are refused. `NexusLink` handles this. |
+| Stand down cleanly | `link.stand_down()` at the end of a run, so the axes idle instead of holding torque. |
+| Re-arm after a fault | A latched fault clears only after a command with `CMD_ENABLE` **off**, then one with it on. `stand_down()` then `send_command()`. |
+
+**What the firmware does on its own**
+
+- **Commands stop for 200 ms** → `HEALTH_LINK` → FAULT → every axis is asked to
+  go `IDLE`, and the request is repeated every 100 ms while the fault stands.
+  The last target is *not* held indefinitely any more.
+- **A tick is missed** → `HEALTH_TIMING` → the same.
+- **A command fails validation** — NaN, outside `SAFETY_POS_*_TURNS`, or a jump
+  larger than `SAFETY_MAX_STEP_TURNS` — it is refused and counted. Ten in a row
+  faults the link.
+- **The loop stops completing cycles** → the independent watchdog resets the
+  board after 100 ms. It is refreshed only by a tick that ran to completion,
+  never from the idle loop.
+- **A hard fault, or `Error_Handler()`** → `Set_Axis_State(IDLE)` goes out on
+  both CAN buses before anything spins forever.
+
+A watchdog reset is announced on the serial console at the next boot. Do not
+ignore it: it means the loop stopped, and the board came back looking healthy.
+
+> **Bring-up note.** `safety.c` will not arm until every subsystem in
+> `HEALTH_EXPECTED_MASK` is healthy, and that defaults to the whole robot — a
+> failsafe that is not watching the Pi link is not a failsafe. On a partially
+> wired bench, narrow it at configure time rather than editing the header:
+> `HEALTH_EXPECTED_MASK='(HEALTH_TIMING|HEALTH_IMU)' cmake --preset Debug`.
+> The configure step warns whenever it is narrowed, because subsystems outside
+> the mask cannot fault and the failsafe therefore cannot act on them.
+
+---
+
 ## What the Pi receives
 
 One **422-byte packet every millisecond** (422 KB/s, well under 1% of USB HS).
@@ -1151,16 +1231,19 @@ Open it at **115200 8N1, no flow control**. Boot prints its external-memory
 init trace; the Appli prints a status line every 2 seconds:
 
 ```
-loop max 234 us | overruns 0 | can drop 0/0 | health 0x01 watching 0x21 blink 1
+ARMED | loop max 234 us | overruns 0 | can drop 0/0 | usb drop 0 | rej 0 | health 0x00 watching 0x3F blink 0
 ```
 
 | Field | Meaning |
 |---|---|
+| state | `BOOT` / `IDLE` / `ARMED` / `FAULT` — see the failsafe section |
 | `loop max` | Longest single cycle, of a 1000 µs budget |
 | `overruns` | Ticks missed because a cycle ran long. Should stay 0 |
 | `can drop` | Frames dropped per bus because the bus could not keep up |
+| `usb drop` | State packets skipped because the host was not draining the endpoint |
+| `rej` | Commands refused by validation since boot. Non-zero means the Pi is sending something wrong |
 | `health` | Bitmask of faulted subsystems — see below |
-| `watching` | Which subsystems are armed (`HEALTH_EXPECTED_NOW`) |
+| `watching` | Which subsystems are armed (`HEALTH_EXPECTED_MASK`) |
 | `blink` | What the red LED is currently blinking |
 
 ### LEDs
@@ -1181,9 +1264,12 @@ Red also goes solid from `Error_Handler()` or a hard fault.
 
 **"Healthy" means data is flowing, not that the peripheral initialised.** Every
 peripheral initialises fine with nothing plugged in, which tells you nothing —
-so an unconnected sensor is deliberately a fault. `HEALTH_EXPECTED_NOW` in
-`Appli/App/health.h` gates which subsystems may complain; add each flag as you
-wire that hardware, and red going dark is your proof it works.
+so an unconnected sensor is deliberately a fault. `HEALTH_EXPECTED_MASK` in
+`Appli/App/health.h` gates which subsystems may complain; it defaults to the
+whole robot, and red going dark is your proof each one works. During bring-up,
+narrow it at configure time (see the failsafe section) rather than editing the
+header — health now decides whether the robot may arm, not just which LED
+blinks.
 
 ---
 
@@ -1194,6 +1280,7 @@ wire that hardware, and red going dark is your proof it works.
 | Boot chain, XIP execution | ✅ working |
 | 1 kHz loop | ✅ ~230 µs of a 1000 µs budget, zero overruns |
 | Health LEDs, serial console | ✅ working |
+| Failsafe, watchdog, command validation | ✅ host-tested, ⚠️ never exercised on a real fault |
 | **IMU (BNO085)** | ✅ **working on hardware** — quaternions, gravity, gyro |
 | Pi link, protocol v3 | ✅ C/Python verified, 1 kHz proven in test |
 | State estimator | ✅ wired in, ⚠️ never run on real sensor data |
@@ -1237,6 +1324,18 @@ simple bandwidth saturation. Untested next steps, in order: `IMU_ENABLE_QUAT 0`,
 requesting 800 Hz to exploit the `≤ 2.1 × requested` rule, and the Game Rotation
 Vector (`0x08`, 6-axis, much cheaper — and better on a robot full of motor
 magnets). 158 Hz is usable but below where it should be.
+
+**The failsafe has never fired on hardware.** `safety.c` and `watchdog.c` are
+covered by host tests (`tools/hosttest/run.sh`), which is not the same thing as
+having watched a robot go limp when the USB cable was pulled. Before anything
+walks: pull the cable mid-run and confirm the axes idle; stall the loop
+deliberately and confirm the board resets and says so at the next boot.
+
+**The command envelope is a placeholder.** `SAFETY_POS_MIN/MAX_TURNS` and
+`SAFETY_MAX_STEP_TURNS` in `safety.h` are loose bounds chosen to catch garbage,
+not this machine's real joint travel. They need measuring on the robot — a
+limit that is wrong in the loose direction only fails to stop a sick robot,
+which is why they start there rather than tight.
 
 **Estimator calibration constants are placeholders.** The `sign` and `offset`
 per joint in `fusion.c` are `+1` and `0`. Until they are measured on the real
