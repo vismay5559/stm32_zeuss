@@ -118,6 +118,11 @@ void kin_foot(const kin_params_t *params,
 {
     fk_position(params, hip_offset, q, p_out);
 
+    if (J_out == NULL)
+    {
+        return;
+    }
+
     /*
      * Jacobian by central differences.
      *

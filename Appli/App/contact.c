@@ -10,8 +10,25 @@
  * as lift-off; conversely a false "in contact" corrupts an InEKF velocity
  * estimate badly, so landing is only declared once the switch has settled.
  */
+/*
+ * Overridable at configure time. These are exactly the numbers you want to
+ * trim against a real gait - a foot that chatters as it rolls, a heel strike
+ * that bounces - and having to edit and reflash to try a value discourages
+ * trying any.
+ *
+ *     CONTACT_MAKE_TICKS=4 CONTACT_BREAK_TICKS=12 cmake --preset Debug
+ */
+#ifndef CONTACT_MAKE_TICKS
 #define CONTACT_MAKE_TICKS   3u
+#endif
+#ifndef CONTACT_BREAK_TICKS
 #define CONTACT_BREAK_TICKS  8u
+#endif
+
+/* Break must outlast make, or a planted foot that chatters reads as lift-off -
+   which is the failure this asymmetry exists to prevent. */
+_Static_assert(CONTACT_BREAK_TICKS > CONTACT_MAKE_TICKS,
+               "contact break confirmation must be longer than make");
 
 #define STABLE_TICKS_MAX     0xFFFFu
 

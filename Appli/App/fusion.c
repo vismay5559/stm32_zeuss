@@ -195,11 +195,63 @@ static void update_status(void)
                       (inekf_num_contacts(&s_f) > 0);
 
     /*
-     * A NaN anywhere means the filter has diverged. Comparing a NaN against
-     * anything is false, so the check below rejects it naturally - but say so
-     * explicitly, because a diverged filter must never report OK.
+     * A NaN anywhere means the filter has diverged, and a diverged filter must
+     * never report OK.
+     *
+     * This used to check vvar, p[2] and v[0] - three numbers out of a state
+     * that is a rotation matrix, three vectors, two contact positions and a
+     * 21x21 covariance. A NaN in the rotation or in a contact position
+     * survived all three checks and went out in the packet. Sweeping the whole
+     * thing is 40-odd comparisons on a tick that already does tens of
+     * thousands of multiply-accumulates.
      */
-    uint8_t sane = !(isnan((float)vvar) || isnan(s_f.p[2]) || isnan(s_f.v[0]));
+    uint8_t sane = 1;
+
+    for (int i = 0; i < 9; i++)
+    {
+        if (isnan((float)s_f.R[i])) { sane = 0; }
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        if (isnan((float)s_f.v[i]) || isnan((float)s_f.p[i]) ||
+            isnan((float)s_f.bg[i]) || isnan((float)s_f.ba[i]))
+        {
+            sane = 0;
+        }
+    }
+    for (int k = 0; k < INEKF_MAX_CONTACTS; k++)
+    {
+        if (!s_f.active[k])
+        {
+            continue;
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            if (isnan((float)s_f.d[k][i])) { sane = 0; }
+        }
+    }
+
+    /*
+     * The covariance diagonal too. A negative variance is not a NaN but is
+     * just as impossible, and it is the first visible sign of the covariance
+     * losing positive-definiteness - which is what the Joseph form and the
+     * explicit symmetrisation exist to prevent, and worth catching if they
+     * ever fail to.
+     */
+    for (int i = 0; i < INEKF_ERR_MAX; i++)
+    {
+        inekf_real_t d = s_f.P[IDX(i, i)];
+
+        if (isnan((float)d) || (d < 0.0f))
+        {
+            sane = 0;
+        }
+    }
+
+    if (isnan((float)vvar))
+    {
+        sane = 0;
+    }
 
     if (!sane)
     {
@@ -333,7 +385,15 @@ void fusion_tick(const imu_sample_t *imu,
          * which cares most about the swing foot.
          */
         leg_angles(maps[leg], act, q);
-        kin_foot(&s_kin, hips[leg], q, p_body, J);
+
+        /*
+         * The Jacobian is only wanted when this foot is planted, and it costs
+         * eight extra FK evaluations - more than the position. A swing foot is
+         * evaluated purely for foot_z, so it asks for the position alone.
+         */
+        uint8_t want_jacobian = down;
+
+        kin_foot(&s_kin, hips[leg], q, p_body, want_jacobian ? J : NULL);
 
         s_foot_body[leg][0] = p_body[0];
         s_foot_body[leg][1] = p_body[1];

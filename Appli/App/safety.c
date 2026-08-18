@@ -178,6 +178,15 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
          * Pi using the protocol correctly, and it is also the handshake that
          * clears a latched fault.
          */
+        /*
+         * Acknowledge whatever stopped us at the same time. A latched timing
+         * fault would otherwise still be standing on the next enabled command,
+         * and the robot could never be armed again without a power cycle.
+         */
+        if (s_needs_rearm)
+        {
+            health_clear_latched();
+        }
         s_needs_rearm = 0;
 
         s_arm_wait = 0;

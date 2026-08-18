@@ -949,6 +949,14 @@ Two more that are worth wiring into any policy loop:
 |---|---|
 | `fk_valid` | bit 0 = `foot_z[0]` (right) is a real measurement, bit 1 = `foot_z[1]` (left). An invalid entry is also sent as NaN. Use `pkt.foot_z_right` / `pkt.foot_z_left`, which return `None` rather than a number you should not trust. |
 | `safety_state` | `BOOT` / `IDLE` / `ARMED` / `FAULT` — whether the board is driving the actuators, and whether it has taken them away from you. `pkt.armed` and `pkt.faulted`. |
+| `stream_flags` | `STREAM_GAIT_LIVE` says `ref_angle` and `phase` are real. Check `pkt.gait_live` rather than watching `phase` for movement — a gait parked at phase 0 looks identical to one that does not exist. |
+
+And a **diagnostics block**: `loop_us_max` (worst control cycle since the last
+packet, so a live signal rather than a since-boot high-water mark), `overruns`,
+`usb_dropped`, `can_dropped`, `can_bus_off` and `enc_stalls`. These used to go
+only to the serial console, in a line that cost ~9.5 ms of a 1 ms loop every two
+seconds — a diagnostic causing nine of the missed ticks it reported. Watch
+`overruns` for *change* rather than for zero; it is cumulative.
 
 And **`fused_valid`**, which matters more than the rest:
 
@@ -1028,10 +1036,10 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **The policy block is contiguous and its offset is checked.**
   `tools/check_proto.py` fails if the block moves or gains a gap, because the
   zero-copy slice above would then read the wrong bytes silently.
-- **Protocol version is 4.** v1 sent raw encoder counts; v2 added the health
+- **Protocol version is 5.** v1 sent raw encoder counts; v2 added the health
   byte and alignment; v3 added the policy block and split the contacts; v4 added
-  `fk_valid` and `safety_state` and grew the packet from 422 to 424 bytes.
-  Mismatched versions reject each other rather than silently misparsing.
+  `fk_valid` and `safety_state`; v5 added the diagnostics block. 422 → 424 → 444
+  bytes. Mismatched versions reject each other rather than silently misparsing.
 
 ## Watching it live — Rerun
 
@@ -1246,6 +1254,14 @@ and ODrives, neither of which has produced real data yet.
 Open it at **115200 8N1, no flow control**. Boot prints its external-memory
 init trace; the Appli prints a status line every 2 seconds:
 
+**Off by default.** Every counter it carried now ships in the state packet at
+1 kHz instead. Turn it on only when there is no Pi attached — it blocks the
+control loop for ~9.5 ms each time it prints:
+
+```bash
+NEXUS_LOOP_STATS=1 cmake --preset Debug
+```
+
 ```
 ARMED | loop max 234 us | overruns 0 | can drop 0/0 | usb drop 0 | rej 0 | health 0x00 watching 0x3F blink 0
 ```
@@ -1298,7 +1314,7 @@ blinks.
 | Health LEDs, serial console | ✅ working |
 | Failsafe, watchdog, command validation | ✅ host-tested, ⚠️ never exercised on a real fault |
 | **IMU (BNO085)** | ✅ **working on hardware** — quaternions, gravity, gyro |
-| Pi link, protocol v4 | ✅ C/Python verified, 1 kHz proven in test |
+| Pi link, protocol v5 | ✅ C/Python verified, 1 kHz proven in test |
 | Peripheral fault recovery | ✅ SPI stall, CAN bus-off, IMU error paths implemented |
 | Drive lifecycle (arm / clear / idle) | ✅ implemented, ⚠️ never run against real ODrives |
 | State estimator | ✅ wired in, ⚠️ never run on real sensor data |
@@ -1342,6 +1358,13 @@ simple bandwidth saturation. Untested next steps, in order: `IMU_ENABLE_QUAT 0`,
 requesting 800 Hz to exploit the `≤ 2.1 × requested` rule, and the Game Rotation
 Vector (`0x08`, 6-axis, much cheaper — and better on a robot full of motor
 magnets). 158 Hz is usable but below where it should be.
+
+**A latched timing fault is cleared by the re-arm handshake.** `HEALTH_TIMING`
+still latches — a missed deadline matters after the tick that missed it — but it
+is now latched against an *acknowledged* overrun count rather than against zero.
+Comparing to zero meant one missed tick locked the robot out for the rest of the
+session, which also made the `FAULT → IDLE` recovery path dead code for the most
+likely fault there is. `link.stand_down()` acknowledges it.
 
 **The failsafe has never fired on hardware.** `safety.c` and `watchdog.c` are
 covered by host tests (`tools/hosttest/run.sh`), which is not the same thing as

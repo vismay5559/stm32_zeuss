@@ -40,6 +40,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* Print each peripheral as it initialises. Bring-up aid; see the call site. */
+#ifndef NEXUS_TRACE_PERIPHERAL_INIT
+#define NEXUS_TRACE_PERIPHERAL_INIT  0
+#endif
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -136,17 +141,27 @@ int main(void)
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
-  /* TEMPORARY per-peripheral tracing: whichever line prints last is the one
-     that hung. Remove once the Appli boots cleanly. */
-  printf("  GPIO...\r\n");    MX_GPIO_Init();
-  printf("  GPDMA1...\r\n");  MX_GPDMA1_Init();
-  printf("  FDCAN1...\r\n");  MX_FDCAN1_Init();
-  printf("  FDCAN2...\r\n");  MX_FDCAN2_Init();
-  printf("  SPI1...\r\n");    MX_SPI1_Init();
-  printf("  USART1...\r\n");  MX_USART1_UART_Init();
-  printf("  TIM2...\r\n");    MX_TIM2_Init();
-  printf("  TIM6...\r\n");    MX_TIM6_Init();
-  printf("  USB...\r\n");     MX_USB_DEVICE_Init();
+  /*
+   * Per-peripheral tracing: whichever line prints last is the one that hung.
+   * Invaluable while a peripheral is still capable of wedging the boot, and
+   * pure noise once it is not - so it is a switch rather than something to
+   * remember to delete. The Appli boots cleanly now, hence off by default.
+   */
+#if NEXUS_TRACE_PERIPHERAL_INIT
+#define MX_TRACE(name)  printf("  " name "...\r\n")
+#else
+#define MX_TRACE(name)  ((void)0)
+#endif
+
+  MX_TRACE("GPIO");    MX_GPIO_Init();
+  MX_TRACE("GPDMA1");  MX_GPDMA1_Init();
+  MX_TRACE("FDCAN1");  MX_FDCAN1_Init();
+  MX_TRACE("FDCAN2");  MX_FDCAN2_Init();
+  MX_TRACE("SPI1");    MX_SPI1_Init();
+  MX_TRACE("USART1");  MX_USART1_UART_Init();
+  MX_TRACE("TIM2");    MX_TIM2_Init();
+  MX_TRACE("TIM6");    MX_TIM6_Init();
+  MX_TRACE("USB");     MX_USB_DEVICE_Init();
   /*
    * XSPI2 is deliberately NOT initialised here.
    *
@@ -186,16 +201,13 @@ int main(void)
   /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
   BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
 
-  /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity */
-  BspCOMInit.BaudRate   = 115200;
-  BspCOMInit.WordLength = COM_WORDLENGTH_8B;
-  BspCOMInit.StopBits   = COM_STOPBITS_1;
-  BspCOMInit.Parity     = COM_PARITY_NONE;
-  BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
-  if (BSP_COM_Init(COM1, &BspCOMInit) != BSP_ERROR_NONE)
-  {
-    Error_Handler();
-  }
+  /*
+   * CubeMX generates a BSP_COM_Init here, but SysInit above already ran one -
+   * the console has to be up before the peripheral trace, not after it. Doing
+   * it twice re-initialises a working UART for no reason, and the second call
+   * routes failure to Error_Handler(), which now disarms the actuators. Left
+   * as a note rather than deleted, because CubeMX will regenerate it.
+   */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */

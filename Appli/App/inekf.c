@@ -22,7 +22,6 @@ void inekf_default_params(inekf_params_t *p)
     p->init_orientation  = 0.5236f;   /* 30 deg */
     p->init_velocity     = 1.0f;
     p->init_position     = 0.1f;
-    p->init_contact      = 0.1f;
     p->init_gyro_bias    = 0.005f;
     p->init_accel_bias   = 0.05f;
 
@@ -52,7 +51,15 @@ void inekf_reset(inekf_t *f)
         f->P[IDX(INEKF_IDX_BG  + i, INEKF_IDX_BG  + i)] = q->init_gyro_bias   * q->init_gyro_bias;
         f->P[IDX(INEKF_IDX_BA  + i, INEKF_IDX_BA  + i)] = q->init_accel_bias  * q->init_accel_bias;
     }
-    /* Inactive contact blocks stay at zero until the foot lands. */
+    /*
+     * Inactive contact blocks stay at zero until the foot lands.
+     *
+     * There is deliberately no init_contact parameter. A new contact does not
+     * start from a fixed prior - inekf_add_contact() gives it the position
+     * block's covariance plus the encoder noise through the leg Jacobian,
+     * which is what equation 32 says. The parameter that used to sit here was
+     * never read by anything.
+     */
 }
 
 void inekf_init(inekf_t *f, const inekf_params_t *params)

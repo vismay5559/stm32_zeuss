@@ -20,6 +20,9 @@ static int     s_disarm_calls;
 static int     s_arm_requests;
 static uint8_t s_closed_loop = 1;   /* drives are ready unless a test says not */
 
+static int s_clear_latched_calls;
+
+void health_clear_latched(void)   { s_clear_latched_calls++; }
 void act_disarm(void)             { s_disarm_calls++; }
 uint8_t act_is_armed(void)        { return 0; }
 void act_request_arm(void)        { s_arm_requests++; }
@@ -64,6 +67,7 @@ static void arm(float pos)
     s_seq = 0;
     s_disarm_calls = 0;
     s_arm_requests = 0;
+    s_clear_latched_calls = 0;
     s_closed_loop  = 1;
 
     safety_tick(0);                       /* BOOT -> IDLE */
@@ -177,8 +181,19 @@ static void test_fault_requires_explicit_rearm(void)
     CHECK(safety_state() != SAFETY_ARMED, "re-armed without a handshake");
 
     /* The Pi drops ENABLE, acknowledging it lost control... */
+    s_clear_latched_calls = 0;
     c = make_cmd(0.0f, 0);
     (void)safety_accept_command(&c, t);
+
+    /*
+     * The handshake must also acknowledge the latched timing fault. Without
+     * this, one missed tick locks the robot out for the rest of the session -
+     * health.c latches HEALTH_TIMING, safety.c treats it as fatal, and the
+     * recovery path below can never complete.
+     */
+    CHECK(s_clear_latched_calls == 1,
+          "the re-arm handshake did not acknowledge the latched fault "
+          "(%d calls)", s_clear_latched_calls);
 
     /* ...and only now may it take the robot back. */
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
@@ -192,6 +207,7 @@ static void test_enable_off_stands_down(void)
 
     arm(0.0f);
     s_disarm_calls = 0;
+    s_clear_latched_calls = 0;
 
     float t[NEXUS_NUM_JOINTS];
     nexus_cmd_t c = make_cmd(0.0f, 0);
@@ -199,6 +215,12 @@ static void test_enable_off_stands_down(void)
     CHECK(safety_accept_command(&c, t) == 0, "acted on a disabled command");
     CHECK(safety_state() == SAFETY_IDLE, "did not stand down on ENABLE off");
     CHECK(s_disarm_calls == 1, "did not disarm on ENABLE off");
+
+    /* A routine stand-down is not a fault acknowledgement. Clearing the
+       latched fault on every disabled command would defeat the latch. */
+    CHECK(s_clear_latched_calls == 0,
+          "a routine stand-down cleared the latched fault (%d calls)",
+          s_clear_latched_calls);
 }
 
 static void test_rejects_nan_and_out_of_range(void)

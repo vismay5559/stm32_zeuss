@@ -52,6 +52,20 @@ endif()
 set(HEALTH_EXPECTED_MASK "${HEALTH_EXPECTED_MASK}" CACHE STRING
     "Subsystems that must be healthy before the robot may arm. Empty = all.")
 
+# Tunables worth trying a value of without editing a header and reflashing.
+# Same environment-or-cache handling as above, same reason.
+foreach(opt CONTACT_MAKE_TICKS CONTACT_BREAK_TICKS NEXUS_TRACE_PERIPHERAL_INIT
+            NEXUS_LOOP_STATS)
+    if(NOT ${opt} AND DEFINED ENV{${opt}})
+        set(${opt} "$ENV{${opt}}")
+    endif()
+    set(${opt} "${${opt}}" CACHE STRING "See the header that defines it.")
+    if(${opt} STREQUAL "")
+    else()
+        message("${opt}: ${${opt}}")
+    endif()
+endforeach()
+
 message("Build type: " ${CMAKE_BUILD_TYPE})
 message("Nexus mode: " ${NEXUS_MODE})
 
@@ -97,6 +111,10 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     NEXUS_MODE=${NEXUS_MODE}
     $<$<BOOL:${HEALTH_EXPECTED_MASK}>:HEALTH_EXPECTED_MASK=${HEALTH_EXPECTED_MASK}>
+    $<$<BOOL:${CONTACT_MAKE_TICKS}>:CONTACT_MAKE_TICKS=${CONTACT_MAKE_TICKS}>
+    $<$<BOOL:${CONTACT_BREAK_TICKS}>:CONTACT_BREAK_TICKS=${CONTACT_BREAK_TICKS}>
+    $<$<BOOL:${NEXUS_TRACE_PERIPHERAL_INIT}>:NEXUS_TRACE_PERIPHERAL_INIT=${NEXUS_TRACE_PERIPHERAL_INIT}>
+    $<$<BOOL:${NEXUS_LOOP_STATS}>:NEXUS_LOOP_STATS=${NEXUS_LOOP_STATS}>
 )
 
 # Enable CMake support for ASM and C languages

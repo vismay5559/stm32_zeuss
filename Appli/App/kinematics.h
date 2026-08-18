@@ -38,9 +38,15 @@ void kin_defaults(kin_params_t *p);
  *   q       four joint angles, in chain order:
  *           [hip_pitch, hip_roll, knee_pitch, ankle_pitch]  (rad)
  *   p_out   contact position in body frame                  (m, 3)
- *   J_out   d(p)/d(q), row-major 3x4                        (m/rad)
+ *   J_out   d(p)/d(q), row-major 3x4                        (m/rad), or NULL
  *
  * Pass the matching hip offset from kin_params_t for the leg in question.
+ *
+ * J_out may be NULL. The Jacobian costs eight extra forward-kinematic
+ * evaluations - more than the position itself - and only the contact update
+ * needs it. A swing foot is evaluated every tick purely to report foot_z, and
+ * asking for its Jacobian there was half the FK work in the loop going
+ * straight in the bin.
  */
 void kin_foot(const kin_params_t *params,
               const inekf_real_t *hip_offset,

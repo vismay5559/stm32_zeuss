@@ -2,6 +2,7 @@
 #define HEALTH_H
 
 #include <stdint.h>
+#include "imu_bno085.h"
 
 /*
  * Subsystem health tracking.
@@ -75,8 +76,29 @@ void     health_init(uint32_t expected_mask);
 void     health_set_expected(uint32_t mask);
 uint32_t health_expected(void);
 
-/* Call once per 1 kHz tick, after the subsystems have been serviced. */
-void     health_tick(void);
+/*
+ * Call once per 1 kHz tick, after the subsystems have been serviced.
+ *
+ * Takes the sensor readings the caller has ALREADY fetched this tick rather
+ * than fetching its own. It used to call imu_get() and enc_get() again for
+ * data app.c had read microseconds earlier - two more critical sections and a
+ * struct copy every millisecond, and worse, a second sample that could differ
+ * from the one that went into the packet.
+ */
+void     health_tick(const imu_sample_t *imu, uint8_t enc_valid);
+
+/*
+ * Acknowledge the latched timing fault.
+ *
+ * Every other check clears itself the moment data flows again. HEALTH_TIMING
+ * deliberately does not - a missed deadline matters after the tick that missed
+ * it - so something has to be able to say "I have seen that, carry on", or the
+ * first overrun of a session locks the robot out permanently.
+ *
+ * Called by safety.c on the explicit re-arm handshake, so acknowledging is
+ * always a deliberate act by whoever is flying the robot.
+ */
+void     health_clear_latched(void);
 
 /* Currently-faulted subsystems, already masked by "expected". 0 = all good. */
 uint32_t health_faults(void);

@@ -36,6 +36,37 @@ typedef struct
 void imu_init(void);
 
 /*
+ * Try to bring a silent sensor back, one step per call.
+ *
+ * HAL_UART_ErrorCallback already recovers the LINK - a noise glitch no longer
+ * kills reception permanently. What had no recovery at all was the SENSOR:
+ * the BNO085 can wedge (this driver documents that at length as a known
+ * power-up behaviour), health.c raises HEALTH_IMU after 50 ms, and the
+ * resync/reset/request sequence that fixes it only ever ran once, at boot.
+ *
+ * It cannot simply be called again from the control loop. That sequence takes
+ * the better part of a second - byte-spaced transmission plus the sensor's own
+ * boot time - and blocking for that long inside a 1 kHz loop would miss
+ * hundreds of ticks and trip the watchdog. So it is a state machine: call this
+ * once per tick while the IMU is stale, and it advances one step, with the
+ * waits counted in ticks rather than spent in HAL_Delay.
+ *
+ * The longest single blocking step is the 64-byte resync burst, about 8 ms -
+ * comfortably inside the watchdog period, and only ever while the robot is
+ * already not being driven.
+ *
+ * Call ONLY when the actuators are not armed. It transmits to the sensor and
+ * throws away the parser state, which is not something to do mid-stride.
+ *
+ * Returns 1 while a recovery is in progress, 0 when idle or finished.
+ */
+uint8_t imu_recover_step(void);
+
+/* Recovery sequences started since boot. Non-zero means the sensor has been
+   wedging in flight, which is worth knowing even after it comes back. */
+uint32_t imu_recoveries(void);
+
+/*
  * Re-send the SET_FEATURE commands that ask for the three reports.
  *
  * imu_init() sends them once, 100 ms after boot. That is only enough if the
