@@ -100,6 +100,23 @@ FUSION_INVALID = 0
 FUSION_CONVERGING = 1
 FUSION_OK = 2
 
+# safety_state - what the board is allowing itself to do
+SAFETY_BOOT = 0
+SAFETY_IDLE = 1
+SAFETY_ARMED = 2
+SAFETY_FAULT = 3
+
+SAFETY_NAMES = {
+    SAFETY_BOOT: "BOOT",
+    SAFETY_IDLE: "IDLE",
+    SAFETY_ARMED: "ARMED",
+    SAFETY_FAULT: "FAULT",
+}
+
+# fk_valid bits, matching foot_z's order
+FK_RIGHT_VALID = 1 << 0
+FK_LEFT_VALID = 1 << 1
+
 ACT_TELEM_FRESH = 1 << 0
 ACT_HB_FRESH = 1 << 1
 
@@ -169,6 +186,8 @@ STATE_FORMAT = (
     "B"      # contacts
     "B"      # fused_valid
     "B"      # health
+    "B"      # fk_valid        bit per foot_z entry
+    "B"      # safety_state    SAFETY_*
     "H"      # crc
 )
 STATE_SIZE = struct.calcsize(STATE_FORMAT)
@@ -253,6 +272,8 @@ class NexusState:
     contacts: int
     fused_valid: int
     health: int
+    fk_valid: int                # bit per foot_z entry; see foot_z_right/left
+    safety_state: int            # SAFETY_*
 
     # ---- convenience ----------------------------------------------------
 
@@ -283,10 +304,46 @@ class NexusState:
         return bool(self.contact[CONTACT_R_TOE] or self.contact[CONTACT_R_HEEL])
 
     @property
+    def foot_z_right(self) -> Optional[float]:
+        """Right foot height above the stance ground, or None if the leg's
+        joint angles were unreadable when this packet was built.
+
+        Do not read foot_z[0] directly without checking. An unusable entry is
+        sent as NaN (and flagged here), because the value it used to carry was
+        0.0 - indistinguishable from a foot resting exactly on the ground."""
+        return self.foot_z[0] if (self.fk_valid & FK_RIGHT_VALID) else None
+
+    @property
+    def foot_z_left(self) -> Optional[float]:
+        """Left foot height, or None. See foot_z_right."""
+        return self.foot_z[1] if (self.fk_valid & FK_LEFT_VALID) else None
+
+    @property
+    def armed(self) -> bool:
+        """True when the board is actually driving the actuators."""
+        return self.safety_state == SAFETY_ARMED
+
+    @property
+    def faulted(self) -> bool:
+        """True when the board has taken the actuators away from you.
+
+        Recovering needs a stand_down() followed by an enabled command - see
+        NexusLink.stand_down()."""
+        return self.safety_state == SAFETY_FAULT
+
+    @property
+    def safety_state_name(self) -> str:
+        return SAFETY_NAMES.get(self.safety_state, "?")
+
+    @property
     def fusion_usable(self) -> bool:
         """True only once the estimator reports it has converged. Treat height
         and velocity as meaningless before this - the filter starts with a
-        30 degree orientation and 1 m/s velocity uncertainty."""
+        30 degree orientation and 1 m/s velocity uncertainty.
+
+        This also stays False while the firmware's robot_config.h has not been
+        marked calibrated: a filter can converge beautifully onto geometry that
+        does not match the robot, and converged is not the same as correct."""
         return self.fused_valid == FUSION_OK
 
     def faults(self) -> List[str]:
@@ -368,6 +425,8 @@ class NexusState:
             contacts=take(1)[0],
             fused_valid=take(1)[0],
             health=take(1)[0],
+            fk_valid=take(1)[0],
+            safety_state=take(1)[0],
         )
 
     @classmethod

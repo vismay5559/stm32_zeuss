@@ -325,6 +325,7 @@ static void parse_reports(const uint8_t *p, uint16_t n)
             s_sample.quat[0] = q_to_float(&p[i + 10], 14);
             i += 14u;
             s_n_rv++;
+            s_sample.quat_seq++;
             updated = 1;
         }
         else if ((id == SH2_ACCELEROMETER) && ((i + 10u) <= n))
@@ -334,6 +335,7 @@ static void parse_reports(const uint8_t *p, uint16_t n)
             s_sample.accel[2] = q_to_float(&p[i + 8], 8);
             i += 10u;
             s_n_accel++;
+            s_sample.accel_seq++;
             updated = 1;
         }
         else if ((id == SH2_GYRO) && ((i + 10u) <= n))
@@ -343,6 +345,7 @@ static void parse_reports(const uint8_t *p, uint16_t n)
             s_sample.gyro[2] = q_to_float(&p[i + 8], 9);
             i += 10u;
             s_n_gyro++;
+            s_sample.gyro_seq++;
             updated = 1;
         }
         else

@@ -74,6 +74,18 @@ typedef enum
 /* Consecutive rejected commands before the link is treated as untrustworthy. */
 #define SAFETY_MAX_REJECTS     10u
 
+/*
+ * How many enabled commands to wait for every axis to reach closed-loop
+ * control before giving up. The Pi commands at 250 Hz, so this is about a
+ * second - generous for a state transition the drives complete in
+ * milliseconds, and short enough that a drive which is never going to arm is
+ * reported rather than waited on forever.
+ *
+ * Failing to arm is a FAULT, not a quiet refusal: a robot that thinks it is
+ * being controlled while half its axes are idle is worse than one that stops.
+ */
+#define SAFETY_ARM_TIMEOUT_CMDS  250u
+
 void safety_init(void);
 
 /*

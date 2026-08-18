@@ -19,6 +19,9 @@ static float          s_last_pos[NEXUS_NUM_JOINTS];
  */
 static uint8_t        s_needs_rearm;
 
+/* Enabled commands spent waiting for the drives to reach closed loop. */
+static uint32_t       s_arm_wait;
+
 void safety_init(void)
 {
     s_state       = SAFETY_BOOT;
@@ -27,6 +30,7 @@ void safety_init(void)
     s_have_seq    = 0;
     s_last_seq    = 0;
     s_needs_rearm = 0;
+    s_arm_wait    = 0;
     memset(s_last_pos, 0, sizeof(s_last_pos));
 }
 
@@ -61,6 +65,7 @@ static void enter_fault(void)
 
     s_state       = SAFETY_FAULT;
     s_needs_rearm = 1;
+    s_arm_wait    = 0;
 
     /* Order matters: stop commanding first, then ask the drives to idle.
        The other way round leaves one more SET_INPUT_POS chasing the IDLE. */
@@ -175,6 +180,8 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
          */
         s_needs_rearm = 0;
 
+        s_arm_wait = 0;
+
         if (s_state == SAFETY_ARMED)
         {
             s_state = SAFETY_IDLE;
@@ -215,6 +222,27 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
         return 0;
     }
 
+    /*
+     * The command is good. Before acting on it, make sure the drives are
+     * actually in a state to act.
+     *
+     * This firmware used to send position commands and assume ten ODrives had
+     * been put into closed-loop control by hand before power-on - so an axis
+     * that tripped mid-run could only be recovered by someone with a laptop,
+     * and an axis that was never armed silently ignored everything.
+     */
+    if (!act_all_closed_loop())
+    {
+        act_request_arm();
+
+        if (++s_arm_wait >= SAFETY_ARM_TIMEOUT_CMDS)
+        {
+            enter_fault();
+        }
+        return 0;
+    }
+
+    s_arm_wait   = 0;
     s_reject_run = 0;
     s_last_seq   = cmd->seq;
     s_have_seq   = 1;

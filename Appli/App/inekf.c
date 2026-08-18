@@ -269,13 +269,16 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
 
     const inekf_real_t sg2 = q->noise_gyro * q->noise_gyro;
 
-    for (int a = 0; a < nrow; a++)
+    /* ra/rb, not a/b: `a` is the bias-corrected accelerometer a few dozen
+       lines up, and shadowing it in the middle of the covariance assembly is
+       the kind of thing that reads correctly right up until it isn't. */
+    for (int ra = 0; ra < nrow; ra++)
     {
-        for (int b = 0; b < nrow; b++)
+        for (int rb = 0; rb < nrow; rb++)
         {
             inekf_real_t blk3[9];
-            lg_mat3_mul_bt(blk3, pre[a], pre[b]);      /* Pa * Pb^T */
-            lg_matn_set_block3_scaled(Qb, row[a], row[b], blk3, sg2);
+            lg_mat3_mul_bt(blk3, pre[ra], pre[rb]);    /* Pa * Pb^T */
+            lg_matn_set_block3_scaled(Qb, row[ra], row[rb], blk3, sg2);
         }
     }
 

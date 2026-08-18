@@ -9,6 +9,7 @@
 #include "critical.h"
 #include "health.h"
 #include "safety.h"
+#include "robot_config.h"
 #include "watchdog.h"
 #include "nexus_mode.h"
 #include "fusion.h"
@@ -256,9 +257,6 @@ void app_on_tick(void)
 /* ODrive reports turns; the policy block is radians on the output side. */
 #define TURNS_TO_RAD   6.28318531f
 
-/* AS5048A is 14-bit over a full turn. */
-#define ENC_TO_RAD     (6.28318531f / 16384.0f)
-
 static void build_and_send_state(void)
 {
     imu_sample_t    imu;
@@ -284,7 +282,6 @@ static void build_and_send_state(void)
     /* ---- after-spring encoders -------------------------------------- */
     uint16_t enc_raw[NEXUS_NUM_ENCODERS];
     uint8_t  enc_valid;
-    float    enc_rad[NEXUS_NUM_ENCODERS];
 
     enc_get(enc_raw, &enc_valid);
     for (int e = 0; e < NEXUS_NUM_ENCODERS; e++)
@@ -294,9 +291,16 @@ static void build_and_send_state(void)
          * encoder sits after the series spring, so it reads how far the spring
          * has wound up. Torque is deflection times the spring constant, done
          * on the Pi where the constant can be tuned without reflashing.
+         *
+         * Which is why the raw count is referenced to a zero and wrapped into
+         * +/-pi rather than sent as a bare 0..2pi angle: deflection is a small
+         * SIGNED quantity either side of rest, and a joint whose rest position
+         * sits near the wrap point would otherwise jump a full turn between
+         * two adjacent ticks - straight into the Pi's torque estimate.
+         *
+         * The zeros live in robot_config.h and have not been measured yet.
          */
-        enc_rad[e]              = (float)enc_raw[e] * ENC_TO_RAD;
-        s_state.spring_angle[e] = enc_rad[e];
+        s_state.spring_angle[e] = robot_spring_deflection((uint8_t)e, enc_raw[e]);
     }
     s_state.enc_valid = enc_valid;
 
@@ -317,6 +321,7 @@ static void build_and_send_state(void)
     }
 
     s_state.health           = (uint8_t)health_faults();
+    s_state.safety_state     = (uint8_t)safety_state();
     s_state.contact_ticks[0] = contact_stable_ticks(0);
     s_state.contact_ticks[1] = contact_stable_ticks(1);
 
@@ -331,8 +336,7 @@ static void build_and_send_state(void)
 
     /* Estimate before packing, so the packet carries this tick's fused state
        rather than the previous one. */
-    fusion_tick(&imu, enc_rad, enc_valid, &act,
-                s_state.contacts, s_state.timestamp_us);
+    fusion_tick(&imu, &act, s_state.contacts, s_state.timestamp_us);
     fusion_fill_state(&s_state);
 
     /* ---- actuator diagnostics --------------------------------------- */
@@ -411,6 +415,7 @@ void app_run(void)
 
         enc_start_read();
         contact_poll();
+        act_bus_service();
         act_tick_1khz();
         build_and_send_state();
         health_tick();

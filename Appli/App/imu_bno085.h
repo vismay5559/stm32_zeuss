@@ -10,7 +10,27 @@ typedef struct
                             The estimator needs what the accelerometer
                             physically reads, not linear acceleration. */
     float    gyro[3];    /* rad/s */
+
+    /*
+     * Advances when ANY of the three reports updated. Good for "is the sensor
+     * alive at all" - which is all health.c wants - and wrong for anything
+     * that needs to know whether a particular signal is new.
+     */
     uint32_t seq;
+
+    /*
+     * Per-report counters.
+     *
+     * The three reports arrive at different rates: gyro and accelerometer at
+     * 400 Hz, the rotation vector at 100 Hz. A shared counter cannot tell
+     * "the accelerometer produced a new reading" from "the quaternion did",
+     * and the estimator's prediction step needs the former - propagating on a
+     * quaternion-only frame integrates the same gyro and accelerometer sample
+     * a second time over a fresh dt.
+     */
+    uint32_t accel_seq;
+    uint32_t gyro_seq;
+    uint32_t quat_seq;
 } imu_sample_t;
 
 void imu_init(void);

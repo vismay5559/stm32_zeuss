@@ -1,19 +1,26 @@
 #include "kinematics.h"
+#include "robot_config.h"
 #include <math.h>
 #include <string.h>
 
+/*
+ * The numbers themselves live in robot_config.h, with every other thing about
+ * this particular robot that the firmware cannot work out for itself. They
+ * used to be written here as 0.30 / 0.30 / 0.05, which is what a placeholder
+ * looks like, in a file whose name suggests it knows the machine.
+ */
 void kin_defaults(kin_params_t *p)
 {
-    p->thigh_length = 0.30f;
-    p->shank_length = 0.30f;
-    p->foot_height  = 0.05f;
+    p->thigh_length = ROBOT_THIGH_LENGTH_M;
+    p->shank_length = ROBOT_SHANK_LENGTH_M;
+    p->foot_height  = ROBOT_FOOT_HEIGHT_M;
 
     p->left_hip_offset[0]  =  0.0f;
-    p->left_hip_offset[1]  =  0.05f;
+    p->left_hip_offset[1]  =  ROBOT_HIP_OFFSET_Y_M;
     p->left_hip_offset[2]  =  0.0f;
 
     p->right_hip_offset[0] =  0.0f;
-    p->right_hip_offset[1] = -0.05f;
+    p->right_hip_offset[1] = -ROBOT_HIP_OFFSET_Y_M;
     p->right_hip_offset[2] =  0.0f;
 }
 

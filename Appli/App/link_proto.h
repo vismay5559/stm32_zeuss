@@ -31,7 +31,7 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     3u      /* v3: policy block, 4 contacts        */
+#define NEXUS_PROTO_VERSION     4u      /* v4: fk_valid + safety_state         */
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
@@ -69,6 +69,16 @@
 
 /* cmd flags bits. */
 #define NEXUS_CMD_ENABLE        (1u << 0)
+
+/* safety_state values - see safety.h. */
+#define NEXUS_SAFETY_BOOT       0u
+#define NEXUS_SAFETY_IDLE       1u
+#define NEXUS_SAFETY_ARMED      2u
+#define NEXUS_SAFETY_FAULT      3u
+
+/* fk_valid bits, matching foot_z's order. */
+#define NEXUS_FK_RIGHT_VALID    (1u << 0)
+#define NEXUS_FK_LEFT_VALID     (1u << 1)
 
 typedef struct __attribute__((packed))
 {
@@ -146,8 +156,22 @@ typedef struct __attribute__((packed))
     uint8_t  fused_valid;                    /* 418 NEXUS_FUSION_*              */
     uint8_t  health;                         /* 419 health.h bitmask            */
 
-    uint16_t crc;                            /* 420 CRC16-CCITT over 0..419     */
-} nexus_state_t;                             /* 422 total                       */
+    /*
+     * Which foot_z entries are real measurements: bit 0 = foot_z[0] (right),
+     * bit 1 = foot_z[1] (left). An invalid entry is sent as NaN as well, so a
+     * reader can use either signal - but never treat a foot_z as a height
+     * without checking one of them. It used to be sent as 0.0, which reads as
+     * "exactly on the ground".
+     */
+    uint8_t  fk_valid;                       /* 420 bit per foot                */
+
+    /* NEXUS_SAFETY_* - whether the board is allowed to be driving, and why
+       not. Lets the Pi see a fault it caused, and see that a stand-down or a
+       re-arm handshake was actually acted on. */
+    uint8_t  safety_state;                   /* 421                             */
+
+    uint16_t crc;                            /* 422 CRC16-CCITT over 0..421     */
+} nexus_state_t;                             /* 424 total                       */
 
 typedef struct __attribute__((packed))
 {

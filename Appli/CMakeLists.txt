@@ -114,6 +114,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/health.c
     App/safety.c
     App/watchdog.c
+    App/robot_config.c
     App/lie_group.c
     App/kinematics.c
     App/inekf.c

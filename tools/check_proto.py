@@ -62,6 +62,8 @@ FIELDS = [
     ("contacts",         "B", 1),
     ("fused_valid",      "B", 1),
     ("health",           "B", 1),
+    ("fk_valid",         "B", 1),
+    ("safety_state",     "B", 1),
     ("crc",              "H", 1),
 ]
 

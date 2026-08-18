@@ -5,6 +5,7 @@
 #include "link_proto.h"
 
 /* ODrive axis states, from CANSimple's Heartbeat and Set_Axis_State. */
+#define ODRV_AXIS_STATE_UNDEFINED            0u
 #define ODRV_AXIS_STATE_IDLE                 1u
 #define ODRV_AXIS_STATE_CLOSED_LOOP_CONTROL  8u
 
@@ -69,6 +70,44 @@ uint8_t act_is_armed(void);
  * probably lands beats ten actuators holding torque for certain.
  */
 void act_emergency_idle(void);
+
+/*
+ * Ask every axis to enter closed-loop control, and clear any latched errors
+ * first.
+ *
+ * The firmware used to do neither: it sent position commands and assumed ten
+ * drives had been put into closed loop by hand before power-on. That is a
+ * reasonable bench posture and an untenable one for a machine that is supposed
+ * to come up on its own - and it meant an axis that tripped mid-run could only
+ * be recovered by someone with a laptop.
+ *
+ * Idempotent; the request is repeated at a low rate until the axes report they
+ * arrived. Errors are cleared only here, on an explicit arm - never
+ * automatically, because an error that clears itself is an error nobody
+ * investigates.
+ */
+void act_request_arm(void);
+
+/* Non-zero once every axis reports CLOSED_LOOP_CONTROL on its heartbeat. */
+uint8_t act_all_closed_loop(void);
+
+/* Bitmask of joints NOT in closed loop, for diagnostics. */
+uint16_t act_not_closed_loop_mask(void);
+
+/*
+ * Poll both buses for protocol errors and drive bus-off recovery.
+ *
+ * Call once per tick. A bus that reaches bus-off stays there forever
+ * otherwise: nothing in the driver noticed, and the only symptom was
+ * act_rx_count() quietly ceasing to change.
+ */
+void act_bus_service(void);
+
+/* Times each bus has entered bus-off since boot. */
+uint32_t act_bus_off_count(uint8_t bus);
+
+/* Transmit error counter, the leading indicator that a bus is failing. */
+uint8_t act_tx_error_count(uint8_t bus);
 
 /* Moves queued frames into the hardware TX FIFO. Must be called often from
    the main loop - see the queue comment in act_odrive.c. */

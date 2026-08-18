@@ -16,10 +16,14 @@
 
 /* ---- stubs for the actuator driver ---------------------------------- */
 
-static int s_disarm_calls;
+static int     s_disarm_calls;
+static int     s_arm_requests;
+static uint8_t s_closed_loop = 1;   /* drives are ready unless a test says not */
 
-void act_disarm(void)      { s_disarm_calls++; }
-uint8_t act_is_armed(void) { return 0; }
+void act_disarm(void)             { s_disarm_calls++; }
+uint8_t act_is_armed(void)        { return 0; }
+void act_request_arm(void)        { s_arm_requests++; }
+uint8_t act_all_closed_loop(void) { return s_closed_loop; }
 
 /* ---- harness --------------------------------------------------------- */
 
@@ -59,6 +63,8 @@ static void arm(float pos)
     safety_init();
     s_seq = 0;
     s_disarm_calls = 0;
+    s_arm_requests = 0;
+    s_closed_loop  = 1;
 
     safety_tick(0);                       /* BOOT -> IDLE */
 
@@ -75,6 +81,7 @@ static void test_boot_refuses_commands(void)
 
     safety_init();
     s_seq = 0;
+    s_closed_loop = 1;
 
     float t[NEXUS_NUM_JOINTS];
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
@@ -269,6 +276,7 @@ static void test_replayed_and_stale_seq(void)
     /* Sequence wrap must still read as forward motion, not as stale. */
     safety_init();
     s_seq = 0;
+    s_closed_loop = 1;
     safety_tick(0);
 
     nexus_cmd_t a = make_cmd(0.0f, NEXUS_CMD_ENABLE);
@@ -311,6 +319,7 @@ static void test_good_command_passes_through_intact(void)
 
     safety_init();
     s_seq = 0;
+    s_closed_loop = 1;
     safety_tick(0);
 
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
@@ -329,6 +338,61 @@ static void test_good_command_passes_through_intact(void)
     }
 }
 
+/*
+ * The firmware used to send position commands to drives that might be sitting
+ * in IDLE, and never notice. Nothing moved, and nothing said why.
+ */
+static void test_arms_the_drives_before_commanding(void)
+{
+    printf("drives are put into closed loop before any command is acted on\n");
+
+    safety_init();
+    s_seq = 0;
+    s_arm_requests = 0;
+    s_disarm_calls = 0;
+    s_closed_loop  = 0;              /* drives are idle */
+    safety_tick(0);
+
+    float t[NEXUS_NUM_JOINTS];
+    nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+
+    CHECK(safety_accept_command(&c, t) == 0,
+          "commanded actuators that were not in closed loop");
+    CHECK(s_arm_requests == 1, "did not ask the drives to arm");
+    CHECK(safety_state() != SAFETY_ARMED, "reported ARMED with idle drives");
+
+    /* Drives arrive in closed loop; the next command goes through. */
+    s_closed_loop = 1;
+    c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&c, t) == 1, "refused a command once armed");
+    CHECK(safety_state() == SAFETY_ARMED, "did not reach ARMED");
+}
+
+static void test_drives_that_never_arm_fault(void)
+{
+    printf("drives that never reach closed loop fault rather than hang\n");
+
+    safety_init();
+    s_seq = 0;
+    s_arm_requests = 0;
+    s_disarm_calls = 0;
+    s_closed_loop  = 0;
+    safety_tick(0);
+
+    float t[NEXUS_NUM_JOINTS];
+
+    for (unsigned i = 0; i < SAFETY_ARM_TIMEOUT_CMDS; i++)
+    {
+        nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+        (void)safety_accept_command(&c, t);
+    }
+
+    CHECK(safety_state() == SAFETY_FAULT,
+          "still %s after %u commands with the drives refusing to arm",
+          safety_state_name(), SAFETY_ARM_TIMEOUT_CMDS);
+    CHECK(s_disarm_calls == 1, "did not disarm after failing to arm");
+}
+
 int main(void)
 {
     printf("safety.c host tests\n-------------------\n");
@@ -344,6 +408,8 @@ int main(void)
     test_replayed_and_stale_seq();
     test_sustained_garbage_faults();
     test_good_command_passes_through_intact();
+    test_arms_the_drives_before_commanding();
+    test_drives_that_never_arm_fault();
 
     printf("-------------------\n%s (%d failure%s)\n",
            s_fail ? "FAILED" : "PASSED", s_fail, s_fail == 1 ? "" : "s");

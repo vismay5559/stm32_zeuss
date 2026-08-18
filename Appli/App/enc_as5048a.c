@@ -16,6 +16,24 @@ static uint16_t s_angle[NEXUS_NUM_ENCODERS];
 static uint8_t  s_valid;
 static volatile uint8_t s_busy;
 
+/*
+ * A transfer that never completes used to be permanent.
+ *
+ * s_busy is set before the DMA starts and cleared only in the completion
+ * callback, so if that callback never arrived - an SPI error, an aborted
+ * channel, a glitch on the bus - enc_start_read() returned early forever. The
+ * angles froze at their last values and s_valid stayed at "all four good", so
+ * health.c never noticed either: it watches the validity mask, which by then
+ * was a fossil.
+ *
+ * Age the in-flight transfer instead, and treat one that overstays as failed.
+ */
+#define ENC_XFER_TIMEOUT_TICKS  5u
+
+static uint16_t s_busy_ticks;
+static uint32_t s_stalls;
+static uint32_t s_errors;
+
 static uint8_t even_parity(uint16_t v)
 {
     v ^= (uint16_t)(v >> 8);
@@ -32,18 +50,46 @@ void enc_init(void)
         s_tx[i] = AS5048A_CMD_READ_ANGLE;
     }
     memset(s_angle, 0, sizeof(s_angle));
-    s_valid = 0;
-    s_busy  = 0;
+    s_valid      = 0;
+    s_busy       = 0;
+    s_busy_ticks = 0;
+    s_stalls     = 0;
+    s_errors     = 0;
 
     HAL_GPIO_WritePin(enc_cs_GPIO_Port, enc_cs_Pin, GPIO_PIN_SET);
+}
+
+/* Give up on the transfer in flight and leave the encoders marked invalid. */
+static void abort_transfer(void)
+{
+    (void)HAL_SPI_Abort(&hspi1);
+    HAL_GPIO_WritePin(enc_cs_GPIO_Port, enc_cs_Pin, GPIO_PIN_SET);
+
+    s_busy       = 0;
+    s_busy_ticks = 0;
+
+    /*
+     * Clear the validity mask, not just the busy flag. Leaving it set would
+     * hand out the last good sample indefinitely as though it were current -
+     * and health.c, which only watches this mask, would keep reporting the
+     * encoders as fine.
+     */
+    s_valid = 0;
 }
 
 void enc_start_read(void)
 {
     if (s_busy)
     {
+        if (++s_busy_ticks >= ENC_XFER_TIMEOUT_TICKS)
+        {
+            s_stalls++;
+            abort_transfer();
+        }
         return;
     }
+
+    s_busy_ticks = 0;
     s_busy = 1;
 
     HAL_GPIO_WritePin(enc_cs_GPIO_Port, enc_cs_Pin, GPIO_PIN_RESET);
@@ -59,6 +105,7 @@ void enc_start_read(void)
 void enc_on_dma_complete(void)
 {
     HAL_GPIO_WritePin(enc_cs_GPIO_Port, enc_cs_Pin, GPIO_PIN_SET);
+    s_busy_ticks = 0;
 
     uint8_t valid = 0;
 
@@ -94,4 +141,33 @@ void enc_get(uint16_t angle[NEXUS_NUM_ENCODERS], uint8_t *valid_mask)
     *valid_mask = s_valid;
 
     critical_exit(primask);
+}
+
+uint32_t enc_stalls(void)
+{
+    return s_stalls;
+}
+
+uint32_t enc_errors(void)
+{
+    return s_errors;
+}
+
+/*
+ * Overrides the HAL's __weak stub.
+ *
+ * Without this an SPI error leaves the DMA aborted and s_busy stuck at 1, and
+ * the encoders are dead for the rest of the run with nothing to show for it.
+ * imu_bno085.c has had the equivalent for its UART for a while; the SPI path
+ * never got one.
+ */
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance != SPI1)
+    {
+        return;
+    }
+
+    s_errors++;
+    abort_transfer();
 }

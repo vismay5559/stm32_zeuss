@@ -23,15 +23,19 @@ void fusion_init(void);
 /*
  * Call once per 1 kHz tick, after the sensors have been serviced.
  *
- *   imu       latest sample; the prediction step only runs when imu->seq moves
- *   enc_rad   NEXUS_NUM_ENCODERS after-spring angles, radians
- *   enc_valid bit per encoder, from enc_get()
- *   act       actuator telemetry, positions in turns
+ *   imu       latest sample; prediction runs only when BOTH the accelerometer
+ *             and gyro sequence numbers have moved
+ *   act       actuator telemetry, positions in turns - the source of every
+ *             joint angle forward kinematics uses
  *   contacts  debounced contact bitmask from contact.c
  *   now_us    free-running microsecond counter, for the real dt
+ *
+ * The spring encoders are deliberately absent. They measure deflection, not
+ * joint angle, and feeding them to forward kinematics is what this used to get
+ * wrong; they reach the Pi as spring_angle for the torque calculation and play
+ * no part in the estimate.
  */
 void fusion_tick(const imu_sample_t *imu,
-                 const float *enc_rad, uint8_t enc_valid,
                  const act_telemetry_t *act,
                  uint8_t contacts,
                  uint32_t now_us);

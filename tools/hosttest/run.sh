@@ -21,8 +21,13 @@ CC="${CC:-cc}"
 
 # -Wconversion is deliberate: C1 (a joint index silently narrowed into a
 # bitmask field) is exactly the class of bug it catches.
+# -Wconversion and -Wshadow are deliberate, and -Werror keeps them honest.
+# C1 - a joint index silently narrowed into a bitmask field - is exactly the
+# class of bug the first catches, and the second found an estimator loop index
+# shadowing the accelerometer vector in the same function.
 CFLAGS="-std=c11 -O1 -g -Wall -Wextra -Wconversion -Wshadow -Werror
         -I$HERE/stub -I$APP"
+LDLIBS="-lm"
 
 mkdir -p "$OUT"
 rm -f "$OUT"/*
@@ -44,7 +49,7 @@ run_suite() {
     done
 
     echo "=== building $name ==="
-    if ! $CC $CFLAGS -o "$bin" "$@" 2>&1; then
+    if ! $CC $CFLAGS -o "$bin" "$@" $LDLIBS 2>&1; then
         echo "  BUILD FAILED"
         fail=1
         return
@@ -65,6 +70,18 @@ run_suite test_contact \
 run_suite test_safety \
     "$HERE/test_safety.c" \
     "$APP/safety.c"
+
+run_suite test_fusion \
+    "$HERE/test_fusion.c" \
+    "$APP/fusion.c" \
+    "$APP/inekf.c" \
+    "$APP/lie_group.c" \
+    "$APP/kinematics.c" \
+    "$APP/robot_config.c"
+
+run_suite test_robot_config \
+    "$HERE/test_robot_config.c" \
+    "$APP/robot_config.c"
 
 run_suite test_watchdog \
     "$HERE/test_watchdog.c" \

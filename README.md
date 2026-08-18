@@ -919,12 +919,18 @@ Four things worth understanding:
 - **`spring_angle` is deflection, not a joint angle.** The encoder sits *after*
   the series spring, so it reads how far the spring has wound up. Torque is
   deflection × spring constant, computed on the Pi where the constant is tunable.
+  It is a **signed** value in ±π, referenced to a mechanical zero in
+  `robot_config.h` — not the raw 0..2π angle it used to be, which stepped by a
+  full turn for any joint resting near the wrap point. The estimator does **not**
+  use it: forward kinematics takes all four joint angles per leg from the drives.
 - **`vel_hdg` is in the heading frame, not the world.** Forward means where the
   robot faces. Yaw is the one part of the pose the filter cannot observe, so it
   drifts — but the same drifting yaw defines both the velocity and the frame, so
   the error cancels.
 - **`foot_z` is computed every tick, including during swing.** A gait policy
-  cares most about the foot that is off the ground.
+  cares most about the foot that is off the ground. A foot whose leg cannot be
+  read is sent as **NaN** with its `fk_valid` bit clear — never as 0.0, which
+  reads as "resting exactly on the ground".
 - **`ref_angle` and `phase` read zero** until the gait library runs on the
   STM32. The Pi can tell because `phase` never advances.
 
@@ -937,17 +943,26 @@ does: `imu_quat` (the sensor's own 9-axis fusion, independent of ours),
 estimated IMU biases, `contact_ticks`, and `health` — the same bitmask the red
 LED blinks.
 
+Two more that are worth wiring into any policy loop:
+
+| Field | Meaning |
+|---|---|
+| `fk_valid` | bit 0 = `foot_z[0]` (right) is a real measurement, bit 1 = `foot_z[1]` (left). An invalid entry is also sent as NaN. Use `pkt.foot_z_right` / `pkt.foot_z_left`, which return `None` rather than a number you should not trust. |
+| `safety_state` | `BOOT` / `IDLE` / `ARMED` / `FAULT` — whether the board is driving the actuators, and whether it has taken them away from you. `pkt.armed` and `pkt.faulted`. |
+
 And **`fused_valid`**, which matters more than the rest:
 
 | Value | Meaning |
 |---|---|
 | `INVALID` | no contact, IMU stale, or the filter diverged |
 | `CONVERGING` | running, uncertainty still large |
-| `OK` | velocity uncertainty low for 500 consecutive ticks |
+| `OK` | velocity uncertainty low for 500 consecutive ticks **and** the robot has been measured (`ROBOT_CONFIG_CALIBRATED`) |
 
 **Check `fusion_usable` before using height or velocity.** The filter starts
 with 30° of orientation uncertainty and 1 m/s of velocity uncertainty; for the
-first ~2 seconds those numbers are meaningless.
+first ~2 seconds those numbers are meaningless. It also stays `CONVERGING`
+forever while `robot_config.h` says the robot has not been measured — converged
+is not the same as correct, and the covariance cannot tell the difference.
 
 ### Rates
 
@@ -1013,9 +1028,10 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **The policy block is contiguous and its offset is checked.**
   `tools/check_proto.py` fails if the block moves or gains a gap, because the
   zero-copy slice above would then read the wrong bytes silently.
-- **Protocol version is 3.** v1 sent raw encoder counts; v2 added the health
-  byte and alignment; v3 added the policy block and split the contacts. Mismatched
-  versions reject each other rather than silently misparsing.
+- **Protocol version is 4.** v1 sent raw encoder counts; v2 added the health
+  byte and alignment; v3 added the policy block and split the contacts; v4 added
+  `fk_valid` and `safety_state` and grew the packet from 422 to 424 bytes.
+  Mismatched versions reject each other rather than silently misparsing.
 
 ## Watching it live — Rerun
 
@@ -1282,7 +1298,9 @@ blinks.
 | Health LEDs, serial console | ✅ working |
 | Failsafe, watchdog, command validation | ✅ host-tested, ⚠️ never exercised on a real fault |
 | **IMU (BNO085)** | ✅ **working on hardware** — quaternions, gravity, gyro |
-| Pi link, protocol v3 | ✅ C/Python verified, 1 kHz proven in test |
+| Pi link, protocol v4 | ✅ C/Python verified, 1 kHz proven in test |
+| Peripheral fault recovery | ✅ SPI stall, CAN bus-off, IMU error paths implemented |
+| Drive lifecycle (arm / clear / idle) | ✅ implemented, ⚠️ never run against real ODrives |
 | State estimator | ✅ wired in, ⚠️ never run on real sensor data |
 | Encoders (SPI) | ⚠️ initialises, no hardware attached |
 | CAN / ODrive | ⚠️ initialises, no hardware attached |
@@ -1337,10 +1355,22 @@ not this machine's real joint travel. They need measuring on the robot — a
 limit that is wrong in the loose direction only fails to stop a sick robot,
 which is why they start there rather than tight.
 
-**Estimator calibration constants are placeholders.** The `sign` and `offset`
-per joint in `fusion.c` are `+1` and `0`. Until they are measured on the real
-leg, forward kinematics is offset by however wrong they are — **and the filter
-will trust it completely.** This is the main thing hardware unblocks.
+**The robot has never been measured.** Link lengths, hip offsets, per-joint
+signs and offsets, and the encoder zeros are all placeholders, now gathered in
+`Appli/App/robot_config.h`. Until they are measured, forward kinematics is
+wrong by however wrong they are.
+
+The filter no longer trusts it blindly: while `ROBOT_CONFIG_CALIBRATED` is `0`
+the estimator reports `CONVERGING` forever and never `OK`, however well its
+covariance settles. A converged filter built on guessed geometry is
+confidently wrong, and the covariance cannot tell you that. Measure the robot,
+set the flag, and `fusion_usable` starts meaning something.
+
+**The joint map is not confirmed.** `gait_ref.h` (generated from the drive
+configuration) and the old map in `fusion.c` disagreed about which node is
+`hip_roll` and which is `hip_pitch`. `robot_config.c` follows `gait_ref.h`
+because it is generated rather than hand-written, but one of them is wrong and
+only the robot can say which. Same gate applies.
 
 **`ref_angle` and `phase` read zero.** The gait library does not run on the
 STM32 yet; only the leg test plays the trajectory. Space is reserved in the
