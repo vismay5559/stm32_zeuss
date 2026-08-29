@@ -29,7 +29,7 @@ extern TIM_HandleTypeDef   htim6;
  * scan below listens before transmitting and prints every node that answers.
  * ODrive ships with node_id 0.
  */
-#define JOINT_COUNT      1
+#define JOINT_COUNT      3
 
 static float         s_gait_phase;
 static uint8_t       s_gait_done;
@@ -41,7 +41,7 @@ static uint8_t       s_stopped;      /* disarmed: by the button, or by the
 
 
 
-static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
+static const uint8_t s_node_id[JOINT_COUNT]  = { 1, 3, 4 };
 /*
  * Which gait column drives this node. Independent of what the actuator is
  * physically bolted to - on the bench the drive is a knee, but any column can
@@ -53,7 +53,8 @@ static const uint8_t s_node_id[JOINT_COUNT]  = { 3 };
  *   KNEE        +0.0709 .. +0.0840 turns   ( 4.7 deg)
  *   ANKLE       +0.0167 .. +0.0595 turns   (15.4 deg)
  */
-static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_HIP_PITCH };
+static const uint8_t s_gait_col[JOINT_COUNT] =
+    { GAIT_COL_HIP_PITCH, GAIT_COL_KNEE, GAIT_COL_ANKLE };
 
 /*
  * Where the gait's zero sits in the drive's own coordinates, in TURNS.
@@ -72,9 +73,37 @@ static const uint8_t s_gait_col[JOINT_COUNT] = { GAIT_COL_HIP_PITCH };
  * homing position rather than around the intended joint angle. The MOTION is
  * identical either way; only where it happens changes.
  */
-static const float s_zero_offset[JOINT_COUNT] = { 0.0f };
+static const float s_zero_offset[JOINT_COUNT] = { 0.0f, 0.0f, 0.0f };
 
-static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
+static const char *const s_joint_name[JOINT_COUNT] =
+    { "hip_pitch", "knee", "ankle" };
+
+/*
+ * Turns the DRIVE wants, per turn of the JOINT it moves.
+ *
+ * Set_Input_Pos is denominated in turns of whatever shaft the ODrive's
+ * encoder is on, and that is not the same shaft on every joint of this leg.
+ *
+ *   hip pitch, knee   47:1, encoder on the LOAD side. The drive already
+ *                     counts output turns, so the gait value goes straight
+ *                     out.                                        scale 1
+ *   ankle              9:1, encoder on the MOTOR side, before the gearbox.
+ *                     The motor must turn nine times for one turn of the
+ *                     joint.                                      scale 9
+ *
+ * Getting this wrong on the ankle is a 9x position error into a joint with
+ * a +-35 deg mechanical stop, so it lives next to the node ids rather than
+ * buried at the point of use. It scales the VELOCITY FEEDFORWARD too - that
+ * is turns/s of the same shaft, and scaling position while leaving
+ * feedforward alone gives a drive fighting its own feedforward.
+ */
+static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
+
+/* Gait value (output-shaft turns) -> what this joint's drive is sent. */
+static float joint_cmd(int j, float out_turns)
+{
+    return (out_turns + s_zero_offset[j]) * s_cmd_scale[j];
+}
 
 /*
  * Listen this long before transmitting anything, in ms.
@@ -138,7 +167,7 @@ static const char *const s_joint_name[JOINT_COUNT] = { "hip_pitch" };
  * is still a complete test of the TX path.
  * ==========================================================================
  */
-#define LEGTEST_ENABLE_CLOSED_LOOP   1
+#define LEGTEST_ENABLE_CLOSED_LOOP   0
 
 /*
  * Delay before arming, in ticks (ms). A reset must never energise motors
@@ -1425,7 +1454,7 @@ void legtest_run(void)
             gait_sample(0.0f, all);
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                first[j] = all[s_gait_col[j]] + s_zero_offset[j];
+                first[j] = joint_cmd(j, all[s_gait_col[j]]);
             }
 
             if (since_arm == 1u)
@@ -1465,7 +1494,7 @@ void legtest_run(void)
 
                     for (int k = 0; k < JOINT_COUNT; k++)
                     {
-                        float want = g0[s_gait_col[k]] + s_zero_offset[k];
+                        float want = joint_cmd(k, g0[s_gait_col[k]]);
 
                         printf("  %s: at %+.4f, gait starts at %+.4f"
                                " -> ramp %+.4f turns (%+.1f deg)\r\n",
@@ -1476,6 +1505,7 @@ void legtest_run(void)
                         printf("     to play the gait around where the leg is"
                                " now, set s_zero_offset[%d] = %+.4f\r\n",
                                k, (double)(s_entry_from[k]
+                                           / s_cmd_scale[k]
                                            - g0[s_gait_col[k]]));
 
                         /* Sweep the whole cycle to find the travel. Knowing
@@ -1603,8 +1633,9 @@ void legtest_run(void)
 
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
-                    target[j]     = all[s_gait_col[j]] + s_zero_offset[j];
-                    target_vel[j] = all_vel[s_gait_col[j]] * vscale;
+                    target[j]     = joint_cmd(j, all[s_gait_col[j]]);
+                    target_vel[j] = all_vel[s_gait_col[j]] * vscale
+                                    * s_cmd_scale[j];
                 }
             }
 #else
