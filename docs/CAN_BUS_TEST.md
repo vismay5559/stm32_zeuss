@@ -1,10 +1,13 @@
 # CAN bus bring-up test — one assembled leg
 
-Run every test here, in order, **before** any motor is energised. Each has a
-pass criterion you can read off the console. Stop at the first failure; they are
-ordered so that an early failure makes the later results meaningless.
+Run every test here, in order, before the leg is allowed to run a trajectory.
+Each has a pass criterion you can read off the console. Stop at the first
+failure; they are ordered so that an early failure makes the later results
+meaningless.
 
-Firmware: `NEXUS_MODE_LEG_CAN` with `LEGTEST_ENABLE_CLOSED_LOOP 0`.
+Tests 0–3 run with **motors off** (`LEGTEST_ENABLE_CLOSED_LOOP 0`). Tests 4–5
+energise one axis at a time and are the first time anything can move.
+
 Host: PuTTY logging *All session output*, **Always append**, to `putty.log`.
 
 ---
@@ -18,12 +21,12 @@ Host: PuTTY logging *All session output*, **Always append**, to `putty.log`.
 | knee pitch | 3 | 47:1 | **load** side (output shaft) | 1:1 — send output turns |
 | ankle pitch | 4 | 9:1 | **MOTOR** side | **x9** — send 9 × output turns |
 
-> **UNRESOLVED — read before proceeding.** The brief said "hip pitch, knee
-> pitch, ankle pitch on CAN ids 1, 3, 4 respectively" and then "(2 is for knee
-> pitch)". Those contradict each other. This table assumes node 2 is the
-> non-working hip roll. **Test 3 resolves it by measurement and must pass before
-> anything is commanded** — a wrong map drives one joint with another joint's
-> trajectory, into a hard stop.
+> **UNRESOLVED.** The brief said "hip pitch, knee pitch, ankle pitch on CAN ids
+> 1, 3, 4 respectively" and then "(2 is for knee pitch)". Those contradict. This
+> table assumes node 2 is the non-working hip roll. Test 4 confirms it by
+> commanding one axis at a time and watching which joint moves; that cannot be
+> done earlier because **hip and knee are non-backdrivable** and will not move
+> by hand.
 
 ## Mechanical limits
 
@@ -33,9 +36,9 @@ Host: PuTTY logging *All session output*, **Always append**, to `putty.log`.
 | knee pitch | ±35° | +25.53° .. +30.23° | **4.77°** | tight |
 | ankle pitch | ±35° | +6.03° .. +21.41° | 13.59° | ok |
 
-Those margins assume the joint's zero is **exactly** where the encoder's zero
-is. A 5° homing error puts hip pitch or knee into its stop on the first cycle.
-Test 6 exists because of this.
+Those margins assume each joint's zero is exactly where its encoder's zero is.
+A 5° zeroing error puts hip pitch or knee into its stop on the first cycle.
+Test 5 exists because of this.
 
 ---
 
@@ -87,131 +90,132 @@ The per-second status line carries **cumulative** counters. The rate is the
 difference between two consecutive lines, not the number printed.
 
 ```
-  node 1 hip_pitch : pos= ... state=1 err=0x00000000  hb=29 enc=3238 trq=3164
-  node 1 hip_pitch : pos= ... state=1 err=0x00000000  hb=39 enc=4268 trq=4194
-                                                        +10    +1030    +1030
+  node 1 hip_pitch : pos= ... state=1 err=0x00000000  hb=100 enc=3238 trq=320
+  node 1 hip_pitch : pos= ... state=1 err=0x00000000  hb=200 enc=4268 trq=420
+                                                        +100    +1030    +100
 ```
 
-Required ODrive config, per axis:
+ODrive config, per axis:
 
 ```python
-odrv0.axis0.config.can.encoder_msg_rate_ms   = 1
-odrv0.axis0.config.can.torque_msg_rate_ms    = 1
-odrv0.axis0.config.can.heartbeat_msg_rate_ms = 100
+odrv0.axis0.config.can.encoder_msg_rate_ms   = 1     # 1000 Hz
+odrv0.axis0.config.can.torque_msg_rate_ms    = 10    #  100 Hz
+odrv0.axis0.config.can.heartbeat_msg_rate_ms = 10    #  100 Hz
 ```
 
 | # | check | pass |
 |---|---|---|
 | 2.1 | Encoder frames per second, each node | 950 – 1050 |
-| 2.2 | Torque frames per second, each node | 950 – 1050 |
-| 2.3 | Heartbeats per second, each node | 9 – 11 |
+| 2.2 | Torque frames per second, each node | 95 – 105 |
+| 2.3 | Heartbeats per second, each node | 95 – 105 |
 | 2.4 | `---- SILENT ----` appears for any node | never |
 
-> The startup banner prints these rates as a **reminder of what to configure**.
+Encoder at 1 kHz matches the command rate, so every setpoint can be compared
+against a fresh measurement. Torque and heartbeat at 100 Hz match `CAPTURE_HZ`,
+which is all the capture can record anyway.
+
+> The startup banner prints message rates as a **reminder of what to configure**.
 > It is not a readback — the board cannot query an ODrive's config over CAN.
 > Only the counter deltas above tell you the real rate.
 
-## Test 3 — identity, direction and gear ratio (**resolves the node map**)
-
-Motors are still off, so every joint back-drives by hand. One joint at a time,
-watching the `pos=` field for **all** nodes.
-
-For each joint:
-
-1. Note `pos=` on every node.
-2. Move that joint by hand through a known angle — **30°** is convenient and
-   safely inside every limit.
-3. Note `pos=` again on every node.
-
-| # | check | pass |
-|---|---|---|
-| 3.1 | Exactly **one** node's `pos` changes | if two move, they share a node id |
-| 3.2 | It is the node this document claims | otherwise the map is wrong — **stop** |
-| 3.3 | No other node's `pos` drifts beyond encoder noise | otherwise coupling or a wiring fault |
-
-Then check magnitude, which is where the two gearbox conventions separate:
-
-| joint | hand-move 30° of **output** | expected Δ`pos` | because |
-|---|---|---|---|
-| hip pitch (1) | 30° | **0.0833 turns** | encoder is on the output shaft |
-| knee pitch (3) | 30° | **0.0833 turns** | encoder is on the output shaft |
-| ankle pitch (4) | 30° | **0.7500 turns** | encoder is on the motor, ×9 |
-
-| # | check | pass |
-|---|---|---|
-| 3.4 | Hip and knee Δ`pos` for a 30° move | 0.083 ± 0.01 turns |
-| 3.5 | Ankle Δ`pos` for a 30° move | 0.750 ± 0.05 turns |
-| 3.6 | Sign of Δ`pos` moving in the joint's **positive** gait direction | positive |
-
-3.5 is the test that proves the ×9. If the ankle reads 0.083 like the others,
-its encoder is **not** on the motor side and every ankle command would be 9×
-too large. 3.6 catches a reversed encoder, which turns a position loop into a
-divergent one the instant it is armed.
-
-## Test 4 — two-minute soak, transmitting, motors off
+## Test 3 — two-minute soak, transmitting, motors off
 
 Arm nothing. Let the firmware stream `Set_Input_Pos` at 1 kHz to all three nodes
 with `LEGTEST_ENABLE_CLOSED_LOOP 0`, so the drives accept setpoints and act on
-none of them. Run **120 seconds** without touching the leg.
+none of them. Run **120 seconds**.
 
 | # | check | pass |
 |---|---|---|
-| 4.1 | `txfail` | `0` for the whole run |
-| 4.2 | `qdrop` | `0` for the whole run |
-| 4.3 | `TEC` and `REC` | `0` at every status line |
-| 4.4 | `[WARNING]`, `[ERROR-PASSIVE]`, `[BUS-OFF]` | never appear |
-| 4.5 | Bus utilisation | < 60% |
-| 4.6 | Any node goes `---- SILENT ----` | never |
+| 3.1 | `txfail` | `0` for the whole run |
+| 3.2 | `qdrop` | `0` for the whole run |
+| 3.3 | `TEC` and `REC` | `0` at every status line |
+| 3.4 | `[WARNING]`, `[ERROR-PASSIVE]`, `[BUS-OFF]` | never appear |
+| 3.5 | Bus utilisation | < 60% |
+| 3.6 | Any node goes `---- SILENT ----` | never |
 
-Then repeat 4.1–4.6 **while flexing the harness by hand** through the leg's full
+Then repeat 3.1–3.6 **while flexing the harness by hand** through the leg's full
 range of motion. An intermittent conductor at a joint passes a static soak and
 fails in service; this is the version of the test that finds it.
 
 Expected load, three nodes, CAN-FD 1 Mbit arbitration / 5 Mbit data:
 
-| direction | frames/s | note |
-|---|---|---|
-| STM32 → drives | 3 000 | `Set_Input_Pos`, 1 kHz × 3 |
-| drives → STM32 | ~6 030 | encoder + torque at 1 kHz, heartbeat at 10 Hz, × 3 |
-| **total** | **~9 030** | measured ~15% with one node; budget ~45% with three |
+| direction | frames/s |
+|---|---|
+| STM32 → drives, `Set_Input_Pos` 1 kHz × 3 | 3 000 |
+| drives → STM32, encoder 1 kHz × 3 | 3 000 |
+| drives → STM32, torque 100 Hz × 3 | 300 |
+| drives → STM32, heartbeat 100 Hz × 3 | 300 |
+| **total** | **6 600** |
 
-If 4.5 fails, drop `encoder_msg_rate_ms` and `torque_msg_rate_ms` to 2 ms before
-touching the command rate. Telemetry is for logging; the 1 kHz command stream is
-what the control loop actually needs.
+Roughly 33% at the firmware's 50 µs/frame estimate. If 3.5 fails anyway, drop
+`encoder_msg_rate_ms` to 2 before touching the command rate — telemetry is for
+logging, the 1 kHz command stream is what the control loop needs.
 
-## Test 5 — arming and disarming, one node at a time
+## Test 4 — identity, direction and gear ratio (**first motion**)
 
-Still no gait. For each node individually, joint free to move, hand on the stop
-button:
+Hip and knee are non-backdrivable, so nothing here can be done by hand. Each
+axis is armed on its own and given a small commanded move, and you watch which
+joint physically responds.
 
-| # | step | pass |
-|---|---|---|
-| 5.1 | Command `CLOSED_LOOP_CONTROL`, watch `state=` | `1` → `8` |
-| 5.2 | `err=` immediately after arming | stays `0x00000000` |
-| 5.3 | Joint resists a gentle hand push | resists, returns |
-| 5.4 | Press the blue stop button | `state=` → `1`, joint goes limp |
-| 5.5 | Repeat for the next node | — |
+**One node at a time. Hand on the stop button. Everything else in IDLE.**
 
-Arm one node at a time. Three joints arming together on a first run is three
-things that can surprise you simultaneously.
-
-## Test 6 — zero and range, before any trajectory
-
-The gait is **absolute**. Nothing in the firmware discovers where a joint's
-mechanical zero is, so it has to be measured.
+For each node in turn:
 
 | # | step | pass |
 |---|---|---|
-| 6.1 | Place each joint at its true mechanical zero, by eye or fixture | — |
-| 6.2 | Record `pos=` for each node | this is the zero offset |
-| 6.3 | Hand-move each joint to its **positive** limit, record `pos=` | matches the limit above |
-| 6.4 | Same at the **negative** limit | matches |
-| 6.5 | Gait range + zero offset, checked against 6.3 / 6.4 | inside both limits with ≥ 3° to spare |
+| 4.1 | Arm that node only; watch `state=` | `1` → `8` |
+| 4.2 | `err=` immediately after arming | stays `0x00000000` |
+| 4.3 | Command **+2° of output** from the present position | joint moves |
+| 4.4 | **Which** joint moved | the one this document claims for that node |
+| 4.5 | No other joint moved | else the map is wrong — **stop and correct it** |
+| 4.6 | Direction matches the joint's positive convention | else the encoder is reversed |
+| 4.7 | Return to start, disarm, `state=` | back to `1` |
 
-6.5 is arithmetic, not a bench step, and it is the last gate before the leg is
-allowed to move under power. Hip pitch has 4.47° of margin and knee has 4.77°.
-If the measured zero offset eats more than that, **the gait cannot be run
-as-is**: set `s_zero_offset` to re-centre it, or reduce the amplitude.
++2° is chosen to be far inside every limit even if the map is wrong: the worst
+case is 2° into the wrong joint, which no joint here can be damaged by.
+
+Then check the scaling, which is where the two gearbox conventions separate:
+
+| joint | command | expected Δ`pos` | expected physical move |
+|---|---|---|---|
+| hip pitch (1) | +0.00556 turns | +0.00556 | **+2° of output** |
+| knee pitch (3) | +0.00556 turns | +0.00556 | **+2° of output** |
+| ankle pitch (4) | +0.05000 turns | +0.05000 | **+2° of output** |
+
+| # | check | pass |
+|---|---|---|
+| 4.8 | Hip and knee move 2° of output for 0.00556 turns commanded | ±0.5° |
+| 4.9 | Ankle moves **2°**, not 18°, for 0.05 turns commanded | ±0.5° |
+
+4.9 is the test that proves `s_cmd_scale[2] = 9.0f` is right. If the ankle moves
+18°, its encoder is **not** on the motor side and the scale must be 1.0 — and
+every ankle command would otherwise be 9× too large, into a ±35° stop.
+
+## Test 5 — zero and range
+
+The gait is **absolute**: sample 0 of hip pitch is −18.57°, not "wherever the leg
+happens to be". Nothing in the firmware discovers where a joint's mechanical
+zero is, so it has to be established and checked.
+
+See `ZEROING.md` for how to set the zero. This test only verifies it.
+
+| # | step | pass |
+|---|---|---|
+| 5.1 | Place the leg in the defined zero pose | by jig or fixture, not by eye |
+| 5.2 | Read `pos=` on every node | each within ±0.5° of `0.0000` |
+| 5.3 | Power cycle everything, return to the same pose, read `pos=` again | same values |
+| 5.4 | Command each joint to its **positive** gait extreme | reaches it, no stop contact |
+| 5.5 | Command each joint to its **negative** gait extreme | reaches it, no stop contact |
+| 5.6 | Clearance to the mechanical stop at both extremes | ≥ 3° |
+
+5.3 is the one people skip. If the reading changes after a power cycle, the zero
+is not persistent and it has to be re-established every time the robot is
+switched on — which is a different operating procedure, not a smaller one.
+
+5.6 is arithmetic against Test 5.2's measured offsets, and it is the last gate
+before a trajectory runs. Hip pitch has 4.47° of nominal margin and knee has
+4.77°; if the measured offset eats more than that, **the gait cannot be run
+as-is** — set `s_zero_offset` to re-centre it, or reduce the amplitude.
 
 ---
 

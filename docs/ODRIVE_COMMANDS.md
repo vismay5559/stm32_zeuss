@@ -88,9 +88,8 @@ fast forward" into "full speed backward" — a command to slam the joint the
 wrong way at full velocity. Clipping only ever asks for less than the trajectory
 wanted.
 
-`Torque_FF` is **always 0** at present: the trajectory spreadsheet has no torque
-column. The field is plumbed so adding gravity compensation later is a value
-change rather than a protocol change.
+`Torque_FF` is **always 0**. The bytes are documented because they are on the
+wire; nothing in this system writes them.
 
 ### 5. End of run
 
@@ -138,7 +137,8 @@ The ankle's commanded turns look alarming next to the others and are correct —
 that is 54° to 193° of *motor* shaft producing 6° to 21° of *output*.
 
 Margins assume the encoder zero coincides with the joint's mechanical zero. It
-does not, until someone measures it. See Test 6 in `CAN_BUS_TEST.md`.
+does not, until someone measures it. See `ZEROING.md`, then Test 5 in
+`CAN_BUS_TEST.md`.
 
 ---
 
@@ -153,13 +153,14 @@ does not, until someone measures it. See Test 6 in `CAN_BUS_TEST.md`.
 Required rates, per axis:
 
 ```python
-odrv0.axis0.config.can.encoder_msg_rate_ms   = 1
-odrv0.axis0.config.can.torque_msg_rate_ms    = 1
-odrv0.axis0.config.can.heartbeat_msg_rate_ms = 100
+odrv0.axis0.config.can.encoder_msg_rate_ms   = 1     # 1000 Hz
+odrv0.axis0.config.can.torque_msg_rate_ms    = 10    #  100 Hz
+odrv0.axis0.config.can.heartbeat_msg_rate_ms = 10    #  100 Hz
 ```
 
-Encoder position at 1 kHz is what the capture logs against the command; the
-heartbeat is what proves the axis is still armed and error-free.
+Encoder at 1 kHz matches the command rate, so every setpoint can be compared
+against a measurement taken in the same millisecond. Torque and heartbeat at
+100 Hz match `CAPTURE_HZ`, which is the fastest the capture records anyway.
 
 ---
 
@@ -168,10 +169,12 @@ heartbeat is what proves the axis is still armed and error-free.
 | direction | frames/s |
 |---|---|
 | STM32 → drives, `Set_Input_Pos` 1 kHz × 3 | 3 000 |
-| drives → STM32, encoder + torque 1 kHz, heartbeat 10 Hz, × 3 | ~6 030 |
-| **total** | **~9 030** |
+| drives → STM32, encoder 1 kHz × 3 | 3 000 |
+| drives → STM32, torque 100 Hz × 3 | 300 |
+| drives → STM32, heartbeat 100 Hz × 3 | 300 |
+| **total** | **6 600** |
 
-Measured ~15% with one node; budget ~45% with three. The TX path is a software
+Roughly 33% at the firmware's 50 µs/frame estimate. The TX path is a software
 ring drained by `tx_pump()` because the hardware FIFO holds three entries and a
 tick hands over more than that. When the ring is full it discards the **oldest**
 entry: these are position setpoints, a stale one is worthless, and dropping the
@@ -200,7 +203,7 @@ Those are two different control strategies and only one can be on the board:
 
 | | this firmware | the checklist |
 |---|---|---|
-| STM32 sends | position + vel feedforward | torque |
+| STM32 sends | position + velocity feedforward | torque |
 | loop closed by | ODrive (pos, vel, current) | STM32 (pos, vel) + ODrive (current) |
 | gains live in | ODrive config, tuned and saved | STM32 firmware |
 | tuning done so far | `pos_gain` 20, `vel_gain` 1.0, `vi` 5.0 | would not apply |
