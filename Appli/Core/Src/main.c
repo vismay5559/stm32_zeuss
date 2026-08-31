@@ -159,7 +159,7 @@ int main(void)
    * no longer generates the call at all. Previously it regenerated every time
    * and had to be commented out by hand.
    */
-
+  
   /* USER CODE BEGIN 2 */
 #if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   printf("APPLI: mode = LEG_CAN (CAN-FD single leg test)\r\n");
@@ -240,9 +240,9 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.NominalTimeSeg1 = 63;
   hfdcan1.Init.NominalTimeSeg2 = 16;
   hfdcan1.Init.DataPrescaler = 1;
-  hfdcan1.Init.DataSyncJumpWidth = 4;
-  hfdcan1.Init.DataTimeSeg1 = 11;
-  hfdcan1.Init.DataTimeSeg2 = 4;
+  hfdcan1.Init.DataSyncJumpWidth = 10;
+  hfdcan1.Init.DataTimeSeg1 = 29;
+  hfdcan1.Init.DataTimeSeg2 = 10;
   hfdcan1.Init.StdFiltersNbr = 1;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
@@ -283,9 +283,9 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.NominalTimeSeg1 = 63;
   hfdcan2.Init.NominalTimeSeg2 = 16;
   hfdcan2.Init.DataPrescaler = 1;
-  hfdcan2.Init.DataSyncJumpWidth = 4;
-  hfdcan2.Init.DataTimeSeg1 = 11;
-  hfdcan2.Init.DataTimeSeg2 = 4;
+  hfdcan2.Init.DataSyncJumpWidth = 10;
+  hfdcan2.Init.DataTimeSeg1 = 29;
+  hfdcan2.Init.DataTimeSeg2 = 10;
   hfdcan2.Init.StdFiltersNbr = 1;
   hfdcan2.Init.ExtFiltersNbr = 0;
   hfdcan2.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;

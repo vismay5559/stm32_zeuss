@@ -14,7 +14,8 @@ yet — see the note at the end.
 ## Addressing
 
 CANSimple: `arbitration_id = (node_id << 5) | cmd_id`, 11-bit standard id,
-CAN-FD with BRS, 1 Mbit arbitration / 5 Mbit data.
+CAN-FD with BRS, 1 Mbit arbitration / **2 Mbit** data. See the README on why
+not 5.
 
 | frame | cmd | node 1 hip | node 3 knee | node 4 ankle |
 |---|---|---|---|---|
@@ -182,15 +183,94 @@ newest would leave the queue replaying seconds-old commands after a recovery.
 
 ---
 
+## Arbitrary parameter access (SDO)
+
+Predefined CANSimple messages cover setpoints and gains. Anything else — any
+parameter reachable from odrivetool or the GUI — goes through `RxSdo`.
+
+| | id | payload |
+|---|---|---|
+| `RxSdo` (us -> drive) | `0x004` | `opcode(1) | endpoint_id(2, LE) | pad(1) | value(4)` |
+| `TxSdo` (drive -> us) | `0x005` | `0(1) | endpoint_id(2, LE) | pad(1) | value(4)` |
+
+`opcode` is `0x00` to read, `0x01` to write. A read sends 4 bytes and the reply
+arrives on `0x005`. A function call (`save_configuration`) is a write with no
+value — 4 bytes.
+
+Writing `spi_encoder0.config.max_error_rate = 0.1` on node 1:
+
+```
+0x024   01 A1 02 00  CD CC CC 3D
+        ^  ^^^^^ ^   ^^^^^^^^^^^
+        |  ep    pad float32 LE
+        write
+```
+
+### Endpoint numbers are version-specific — this is the dangerous part
+
+Endpoint IDs are assigned by position in the firmware's parameter tree. They
+move with **every** firmware and hardware revision. Writing a stale number does
+not fail — it lands on whatever parameter now occupies that slot and silently
+corrupts it.
+
+The numbers hard-coded in `test_leg_can.c` came from `flat_endpoints.json` for
+**fw 0.6.12 / hw 5.2.0**:
+
+| endpoint | id | type |
+|---|---|---|
+| `spi_encoder0.config.max_error_rate` | 673 | float |
+| `save_configuration` | 718 | function |
+
+Get the file matching your drives from the firmware release page, then verify
+with `python -c "import json;d=json.load(open('flat_endpoints.json'));print(d['fw_version'],d['hw_version'],d['endpoints']['<path>'])"`.
+
+So `odrv_check_version()` interrogates every drive with `Get_Version` (`0x000`)
+before writing anything, and skips any drive whose reply does not match exactly:
+
+```
+Get_Version reply: [0] reserved  [1] hw_product_line  [2] hw_version
+                   [3] hw_variant  [4] fw_major  [5] fw_minor
+                   [6] fw_revision  [7] fw_unreleased
+```
+
+A mismatch prints both versions and refuses the write. If your drives are on a
+different build, update the six `EP_JSON_*` defines and the endpoint IDs
+together — never one without the other.
+
+### What this is currently used for
+
+`spi_encoder0.config.max_error_rate` is raised from its default to `0.1`,
+applied at boot to every drive that answers the scan. It is the fraction of SPI
+transactions the drive tolerates coming back corrupt before it declares the
+encoder estimate missing and disarms.
+
+The knee dropped out mid-gait with `nan` in its position stream and
+`err=0x00000008`, ending a run 1.6 s in. Loosening this stops a handful of bad
+reads from killing a run. **It does not fix the link.** A connection at 10%
+error rate is broken; this only buys a usable trace while the harness is
+investigated. Two load-side AS5047Ps have now failed this way.
+
+The write is deliberately **not** persisted — `LEGTEST_SDO_SAVE` is 0, so it is
+re-applied every boot and stays visible in the log rather than hidden in a
+drive's saved config. Set it to 1 to call `save_configuration`; that needs a
+power cycle to re-init the encoder.
+
+The firmware reads the value back after writing and prints `!! DID NOT TAKE` if
+the drive rejected it, so a config that only applies on reboot is visible
+immediately instead of being assumed.
+
+---
+
 ## What we do not send
 
 - **No torque commands.** `Set_Input_Torque` (`0x00E`) is never used.
 - **No trajectory-mode commands.** No `Set_Traj_Vel_Limit` or friends;
   PASSTHROUGH means the ODrive does no planning of its own.
 - **No `Set_Absolute_Position`.** That is a homing command, not a control mode.
-- **No config writes.** Gains, limits and message rates are set in odrivetool
-  and persist in the drive. The firmware never changes them, so what you tuned
-  is what runs.
+- **No persistent config writes.** Gains are pushed at arming and
+  `max_error_rate` at boot, but both are runtime writes that die with the power.
+  `save_configuration` is never called unless `LEGTEST_SDO_SAVE` is set, so what
+  is saved in each drive stays what you saved from odrivetool.
 
 ### Note on the torque-control deployment plan
 

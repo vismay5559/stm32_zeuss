@@ -137,7 +137,7 @@ Then repeat 3.1–3.6 **while flexing the harness by hand** through the leg's fu
 range of motion. An intermittent conductor at a joint passes a static soak and
 fails in service; this is the version of the test that finds it.
 
-Expected load, three nodes, CAN-FD 1 Mbit arbitration / 5 Mbit data:
+Expected load, three nodes, CAN-FD 1 Mbit arbitration / 2 Mbit data:
 
 | direction | frames/s |
 |---|---|

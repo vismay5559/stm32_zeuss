@@ -41,7 +41,7 @@ HSE 24 MHz → PLL1 (M2 N100 P2) → **600 MHz** CPU, 300 MHz AHB, 150 MHz APB.
 |---|---|---|
 | Control tick (TIM6) | 300 MHz / 300 / 1000 | 1.0000 kHz |
 | Timestamp (TIM2) | 300 MHz / 300, 32-bit | 1 MHz, wraps @ 71.6 min |
-| FDCAN | PLL2P = 80 MHz | 1 Mbit nominal / 5 Mbit data |
+| FDCAN | PLL2P = 80 MHz | 1 Mbit nominal / 2 Mbit data |
 | SPI1 | PLL1Q = 100 MHz / 16 | 6.25 MHz, mode 1 |
 | USART1 | PCLK2 150 MHz, OVER8 | 3.000 Mbaud, 0% error |
 | XSPI2 | PLL2S = 400 MHz | see *Known issues* |
@@ -223,6 +223,36 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 | `LEGTEST_TRACE_RX` | 1 | Decode every received frame onto the console |
 | `LEGTEST_TX_DIV` | 1 | 1 = 1 kHz per joint, 4 = 250 Hz per joint |
 
+### Joints that are not on the bus
+
+`bus_scan()` records which configured nodes answered, and a joint that did not
+is skipped everywhere: no setpoints transmitted, never armed, never disarmed,
+excluded from the limit check, and left out of both the run summary and the CSV
+columns. Only a **completely** silent bus disables closed loop.
+
+```
+  !! node 4 (ankle) never answered - that joint is SKIPPED
+     (not armed, not commanded, not captured). The rest of
+     the leg still runs.
+```
+
+This is the single most bug-prone thing in the file, because a joint's presence
+is assumed in seven separate places. Missing one does not produce an error —
+it produces a leg that arms, holds position perfectly and never moves:
+
+```
+node 1 hip_pitch : pos= +3.5485 state=8 err=0x00000000  cmd=+3.5485 err=+0.0000
+```
+
+That was `s_entry_ok` being cleared because the absent ankle had
+`n_encoder == 0`, which routes every tick into the hold-pose branch
+(`target[j] = s_joint[j].pos` — command the joint to where it already is).
+
+**A joint following a trajectory never has zero tracking error.** Sustained
+`err=+0.0000` means the setpoint is the measurement, and something upstream has
+decided not to run. When adding a joint, grep every `for (int j = 0; j <
+JOINT_COUNT` loop and decide explicitly whether it needs `s_joint_live[j]`.
+
 ### The reference gait
 
 `Appli/App/gait_ref.c` is **generated, not hand-written**:
@@ -320,6 +350,39 @@ setpoints: a stale setpoint is worthless, the newest is exactly what the
 actuator should receive, and dropping the newest instead would leave the queue
 full of seconds-old commands that would replay when the bus recovered.
 
+### Two discontinuities in the generated table
+
+The hip column has step changes at samples **99 -> 100** and **199 -> 0** that
+are 15x to 250x the neighbouring step, at points where the joint is at an
+extremum and should be nearly stationary:
+
+```
+sample  hip_turns   step      step x47 (drive turns)
+   98  -0.01868  -0.00002   -0.0010
+   99  -0.01870  -0.00559   -0.2628   <== STEP
+  100  -0.02429  -0.00013   -0.0063
+  ...
+  199  -0.05703  +0.00545   +0.2560   <== STEP
+    0  -0.05158  -0.00005   -0.0022
+```
+
+Both are ~0.0055 output turns (~2 deg). On the knee and ankle that is a small
+bump. On the hip, whose commands are multiplied by 47 because its encoder is on
+the motor side, it becomes a **0.26 turn instantaneous setpoint step** — a jerk
+no drive can follow. It is reliably the largest tracking error in every capture:
+
+```
+1.580,4.65053,4.61714,0.03340
+1.590,4.55174,4.56022,-0.00847   <- cmd steps -0.099
+1.600,4.38751,4.47710,-0.08959   <- cmd steps -0.164, worst error of the run
+```
+
+Sample 100 is phase 0.5 and sample 200 is the seam, so a gait that looks like
+two half-cycles stitched together with a small mismatch at each junction is
+exactly what this pattern means. It is a defect in the **generated table**, not
+in the firmware — fix it in `tools/gen_gait.py` or in the source trajectory, not
+by smoothing in the control loop. Every cycle costs two of these.
+
 ### If the bus goes quiet
 
 CAN is acknowledged: **every** transmitter needs at least one other node to pull
@@ -398,7 +461,7 @@ nominal rate:
 
 ```
 CLASSIC   |------------ 121 bits at 1 Mbit ------------|   121 us
-FD+BRS    |-17 bits-||--- 92 bits at 5 Mbit ---||-12 b-|    47 us
+FD+BRS    |-17 bits-||--- 92 bits at 2 Mbit ---||-12 b-|    75 us
             1 Mbit           data + CRC          1 Mbit
 ```
 
@@ -448,6 +511,43 @@ Reading it:
 - `unknown` counts frames from node IDs you did not configure — a
   misconfigured ODrive shows up here rather than vanishing.
 - `SILENT` = nothing heard from that node for 500 ms.
+
+### Why the data phase runs at 2 Mbit, not 5
+
+The first attempt ran the data phase at 5 Mbit and the bus died under load:
+`TEC=248` climbing to bus-off while **`REC=0`**. Receive errors of zero with a
+saturated transmit counter is decisive — every fault was on frames *we* sent,
+not frames we received. A wiring or termination problem corrupts both
+directions.
+
+At 5 Mbit a bit is 200 ns. The ISO1042 isolated transceivers have a 152 ns
+loop delay — 76% of a bit time. Transmitter Delay Compensation corrects the
+*average* delay, which is why the SSP offset is configured, but it cannot
+correct the isolator's **pulse-width distortion**: tens of ns of asymmetry that
+varies with the bit pattern. That is why the failures were intermittent and
+load-dependent rather than immediate.
+
+At 2 Mbit a bit is 500 ns and the same 152 ns of delay is 30% of it, with
+distortion a correspondingly smaller fraction. The bus has run clean since:
+`TEC=0 REC=0`, no form or stuff errors, across every run.
+
+Timing at 80 MHz PLL2P, `DataPrescaler = 1`:
+
+| | 5 Mbit (was) | 2 Mbit (now) |
+|---|---|---|
+| `DataTimeSeg1` | 11 | 29 |
+| `DataTimeSeg2` | 4 | 10 |
+| `DataSyncJumpWidth` | 4 | 10 |
+| total | 16 tq | 40 tq |
+
+`80 MHz / 40 = 2 Mbit`. Set the same rate in every ODrive
+(`odrv0.can.config.data_baud_rate`) — a drive left at 5 Mbit is electrically
+fine and completely silent, which looks exactly like a broken wire.
+
+One related trap: bus-off recovery was a no-op for a long time because
+`HAL_FDCAN_Start()` only acts when the peripheral is in READY, and it is
+permanently BUSY after the first start. Recovery now clears `CCCR.INIT`
+directly.
 
 ### Enabling closed loop
 
@@ -1091,6 +1191,24 @@ Only genuinely open items live here. Bugs that were found and fixed but that
 CubeMX can silently undo are listed under
 [Working with CubeMX](#working-with-cubemx) instead — they are hazards, not
 outstanding work.
+
+**`report()` stalls the control loop once a second.** The 1 Hz serial report
+blocks setpoint transmission for tens of milliseconds. It is directly visible in
+the counters — `tx=2000` in a normal second, `tx=402` in a second that also
+dumps a capture — and as position discontinuities in the CSV at exactly the
+report boundaries (gait t = 1.01, 2.01, 3.01 s for a run armed at t=3 s with a
+2 s entry ramp). Harmless while tuning, not acceptable once the gait matters.
+Gate it off while `s_gait_running`, or move printing off the control thread.
+
+**Error-passive wedges the TX queue.** When the drives disarm and stop ACKing,
+TX fills, `txfifo_free` hits 0 and every queued frame is dropped — `qdrop`
+climbing 2000/s with `tx=0 rx=0` forever. `can_busoff_poll()` only recovered
+from full bus-off, and error-passive is not bus-off. It now flushes the backlog
+when error-passive coincides with a full FIFO, but that is a symptom fix: the
+open question is why both drives fault with `err=0x08000200` after ~54 s of
+holding a static pose. Read `odrv0.axis0.disarm_reason` in odrivetool — the
+ODrive error-code documentation returns HTTP 403 and the numeric codes here have
+never been decoded against an authoritative source.
 
 **Accelerometer runs at ~158 Hz, not 400.** The gyro reaches 421 Hz but the
 accelerometer — which drives the estimator's velocity and height — is starved by

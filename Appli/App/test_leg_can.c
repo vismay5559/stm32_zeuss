@@ -14,342 +14,205 @@ extern TIM_HandleTypeDef   htim6;
 /*  CONFIGURATION - everything you are likely to change lives up here     */
 /* ===================================================================== */
 
-/*
- * ODrive node IDs, in joint order. Set these to match what you configured in
- * odrivetool (axis0.config.can.node_id). They must be unique on the bus.
- */
-/*
- * WHICH ACTUATORS ARE ON THE BUS
- *
- * Start with one drive and add entries as you connect more. Each entry needs
- * the CAN node id you set in odrivetool (axis0.config.can.node_id) and which
- * column of the reference gait feeds it.
- *
- * If you do not know the node id, leave this as it is and run once: the bus
- * scan below listens before transmitting and prints every node that answers.
- * ODrive ships with node_id 0.
- */
 #define JOINT_COUNT      3
 
 static float         s_gait_phase;
 static uint8_t       s_gait_done;
 static uint8_t       s_gait_running;
-static uint8_t       s_stopped;      /* disarmed: by the button, or by the
-                                        gait finishing. Latched either way -
-                                        gates both transmission and re-arming,
-                                        so recovery is a board reset. */
-
-
+static uint8_t       s_stopped;      
 
 static const uint8_t s_node_id[JOINT_COUNT]  = { 1, 3, 4 };
-/*
- * Which gait column drives this node. Independent of what the actuator is
- * physically bolted to - on the bench the drive is a knee, but any column can
- * be played through it to test a different range of motion.
- *
- * Ranges, from tools/gen_gait.py:
- *   HIP_ROLL    -0.0047 .. +0.0191 turns   ( 8.5 deg)
- *   HIP_PITCH   -0.0570 .. -0.0186 turns   (13.8 deg)  <- entirely NEGATIVE
- *   KNEE        +0.0709 .. +0.0840 turns   ( 4.7 deg)
- *   ANKLE       +0.0167 .. +0.0595 turns   (15.4 deg)
- */
 static const uint8_t s_gait_col[JOINT_COUNT] =
     { GAIT_COL_HIP_PITCH, GAIT_COL_KNEE, GAIT_COL_ANKLE };
 
-/*
- * Where the gait's zero sits in the drive's own coordinates, in TURNS.
- *
- * The trajectory is joint angles in the simulator's convention; the drive
- * measures from wherever it was homed. Those two zeros have no reason to agree,
- * and nothing in the data says how far apart they are.
- *
- * command = gait_turns + zero_offset
- *
- * To find it: put the leg in the pose the gait calls sample 0 - knee at
- * +26.2 degrees - and read `pos` off the console. Whatever it says goes here.
- * The arming log prints exactly this, so one run tells you the number.
- *
- * Leaving it at 0 is not wrong, it just means the gait plays around the drive's
- * homing position rather than around the intended joint angle. The MOTION is
- * identical either way; only where it happens changes.
- */
 static const float s_zero_offset[JOINT_COUNT] = { 0.0f, 0.0f, 0.0f };
 
 static const char *const s_joint_name[JOINT_COUNT] =
     { "hip_pitch", "knee", "ankle" };
 
 /*
- * Turns the DRIVE wants, per turn of the JOINT it moves.
- *
- * Set_Input_Pos is denominated in turns of whatever shaft the ODrive's
- * encoder is on, and that is not the same shaft on every joint of this leg.
- *
- *   hip pitch, knee   47:1, encoder on the LOAD side. The drive already
- *                     counts output turns, so the gait value goes straight
- *                     out.                                        scale 1
- *   ankle              9:1, encoder on the MOTOR side, before the gearbox.
- *                     The motor must turn nine times for one turn of the
- *                     joint.                                      scale 9
- *
- * Getting this wrong on the ankle is a 9x position error into a joint with
- * a +-35 deg mechanical stop, so it lives next to the node ids rather than
- * buried at the point of use. It scales the VELOCITY FEEDFORWARD too - that
- * is turns/s of the same shaft, and scaling position while leaving
- * feedforward alone gives a drive fighting its own feedforward.
+ * Which joints actually answered the boot scan. A joint that never spoke is
+ * not armed, not commanded and not captured - but it does NOT stop the rest of
+ * the leg from running. Filled in by bus_scan() before the timers start, so it
+ * is only ever read after that.
  */
-static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
+static uint8_t s_joint_live[JOINT_COUNT];
 
-/* Gait value (output-shaft turns) -> what this joint's drive is sent. */
+/*
+ * Nodes we listen to but never command. They are not armed, not gaited, not
+ * captured and they cannot block arming - they just appear in the periodic
+ * report so their telemetry is visible. Set MONITOR_COUNT to 0 to drop them.
+ */
+#define MONITOR_COUNT    0
+#if (MONITOR_COUNT > 0)
+static const uint8_t s_mon_node[MONITOR_COUNT] = { 0 };
+static const char *const s_mon_name[MONITOR_COUNT] = { "" };
+#endif
+
+/*
+ * Output-shaft turns -> what each drive is sent.
+ *
+ * TEMPORARY: the hip's load-side AS5047P is dead, so that drive is running on
+ * its onboard MA702, which sits on the MOTOR side of the 47:1. Its pos_estimate
+ * is therefore in motor turns and every command to it must be scaled by 47 -
+ * position AND velocity feedforward alike. Put this back to 1.0 the moment the
+ * load encoder is repaired, or the hip will be commanded 47x too far.
+ *
+ * The knee's load encoder still works, so it stays at 1.0.
+ *
+ * The ankle's encoder is also on the MOTOR side, of a 9:1, so it takes x9 for
+ * the same reason the hip takes x47.
+ */
+static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
+
+/*
+ * Controller gains pushed to each drive over CAN at arming.
+ *
+ * GAIN_KEEP leaves whatever is saved in that drive untouched. These are
+ * runtime writes to controller.config.*; nothing here calls
+ * save_configuration(), so a power cycle reverts them. That is deliberate -
+ * it makes a bad number recoverable by cycling power rather than by digging
+ * through odrivetool.
+ *
+ * The two joints are NOT comparable at the same numbers. vel_gain turns
+ * velocity error into MOTOR torque, and the hip's encoder now sits on the
+ * motor side of its 47:1 while the knee's is on the load side - so identical
+ * numbers give the hip roughly 47x the loop gain at the output. That is why
+ * the hip tracks at 20/1.0/5.0 and the knee, on the same numbers, barely
+ * moved: 3.3 deg commanded, 0.25 deg achieved.
+ *
+ * Step the knee up from here rather than jumping to 47x, and watch for
+ * oscillation in the capture before raising further.
+ */
+#define GAIN_KEEP  (-1.0f)
+
+static const float s_pos_gain[JOINT_COUNT]     = { GAIN_KEEP, 20.0f, GAIN_KEEP };
+static const float s_vel_gain[JOINT_COUNT]     = { GAIN_KEEP,  4.0f, GAIN_KEEP };
+static const float s_vel_int_gain[JOINT_COUNT] = { GAIN_KEEP, 20.0f, GAIN_KEEP };
+
+#define LEGTEST_GAIT_RELATIVE        1
+#define LEGTEST_MAX_SWING_DEG        20.0f
+
+static float s_auto_offset[JOINT_COUNT];
+
 static float joint_cmd(int j, float out_turns)
 {
-    return (out_turns + s_zero_offset[j]) * s_cmd_scale[j];
+    return (out_turns + s_zero_offset[j] + s_auto_offset[j]) * s_cmd_scale[j];
 }
 
-/*
- * Listen this long before transmitting anything, in ms.
- *
- * ODrive sends a heartbeat unprompted, roughly every 100 ms, without being
- * asked. So a silent window at startup answers the question that everything
- * else depends on: is the drive powered, on the right bitrate, and wired the
- * right way round? Nothing we transmit can make that answer ambiguous.
- *
- * Heartbeats arriving means the bus works. Silence means it does not, and no
- * amount of sending Set_Input_Pos will change that.
- */
+static const float s_limit_deg[JOINT_COUNT] = { 25.0f, 35.0f, 35.0f };
+#define LEGTEST_LIMIT_MARGIN_DEG     3.0f
+
+static uint8_t s_arm_blocked;
+
+static uint8_t limits_ok(const float *entry_from)
+{
+    uint8_t ok = 1;
+    float   g0[GAIT_JOINTS];
+
+    gait_sample(0.0f, g0);
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (!s_joint_live[j]) { continue; }
+
+        float lim = s_limit_deg[j];
+        float lo = 1e9f, hi = -1e9f;
+
+        for (int s = 0; s < GAIT_SAMPLES; s++)
+        {
+            float v = g_gait_turns[s][s_gait_col[j]];
+            if (v < lo) { lo = v; }
+            if (v > hi) { hi = v; }
+        }
+
+#if LEGTEST_GAIT_RELATIVE
+        float start = g0[s_gait_col[j]];
+        float up    = (hi - start) * 360.0f;
+        float down  = (start - lo) * 360.0f;
+        float swing = (up > down) ? up : down;
+
+        printf("  %-9s swings +%.1f / -%.1f deg from where it is now"
+               " (travel is +/-%.0f)\r\n",
+               s_joint_name[j], (double)up, (double)down, (double)lim);
+
+        if (swing > LEGTEST_MAX_SWING_DEG)
+        {
+            printf("!! %s: %.1f deg of swing exceeds the %.1f deg cap.\r\n",
+                   s_joint_name[j], (double)swing,
+                   (double)LEGTEST_MAX_SWING_DEG);
+            ok = 0;
+        }
+
+        (void)entry_from;
+#else
+        float at_deg = (entry_from[j] / s_cmd_scale[j]) * 360.0f;
+
+        if ((at_deg > lim) || (at_deg < -lim))
+        {
+            printf("!! %s: measured pose %+.1f deg is outside its +/-%.0f deg"
+                   " travel.\r\n", s_joint_name[j], (double)at_deg,
+                   (double)lim);
+            printf("   The joint cannot physically be there, so this drive's"
+                   " zero is not the robot's\r\n"
+                   "   zero. Set it per docs/ZEROING.md before running.\r\n");
+            ok = 0;
+            continue;
+        }
+
+        float lo_deg = (lo + s_zero_offset[j]) * 360.0f;
+        float hi_deg = (hi + s_zero_offset[j]) * 360.0f;
+        float worst  = (hi_deg > -lo_deg) ? hi_deg : -lo_deg;
+        float clear  = lim - worst;
+
+        if (clear < 0.0f)
+        {
+            printf("!! %s: gait reaches %+.1f..%+.1f deg, past its"
+                   " +/-%.0f deg travel.\r\n", s_joint_name[j],
+                   (double)lo_deg, (double)hi_deg, (double)lim);
+            ok = 0;
+        }
+        else if (clear < LEGTEST_LIMIT_MARGIN_DEG)
+        {
+            printf("!! %s: gait clears its stop by only %.1f deg,"
+                   " want %.1f.\r\n", s_joint_name[j], (double)clear,
+                   (double)LEGTEST_LIMIT_MARGIN_DEG);
+            printf("   Reduce the amplitude or re-centre with"
+                   " s_zero_offset[%d].\r\n", j);
+            ok = 0;
+        }
+#endif
+    }
+
+    return ok;
+}
+
 #define LEGTEST_SCAN_MS              2000u
-
-/*
- * Print every frame received during the scan, decoded.
- *
- * This is the closest thing to a CAN analyser you have without buying one, and
- * for bring-up it is usually enough - the question is almost never "what are
- * the exact bytes" but "is anything arriving, from whom, and does it look
- * like ODrive".
- *
- * Frames are captured into a ring buffer by the RX handler and printed from
- * the main loop. printf() from an interrupt at 115200 baud blocks for
- * milliseconds and would drop the very frames it is trying to show.
- */
 #define LEGTEST_TRACE_RX             0
-
-/*
- * Never transmit. Receive only.
- *
- * CAN is acknowledged, so a transmitter whose frames do not reach the bus
- * drives its own error counter to 255 and takes itself BUS-OFF - which kills
- * RECEPTION too. That is why a working receive path can look completely dead
- * a second after boot.
- *
- * With this set, the controller only ever listens, never reaches bus-off, and
- * reception can be verified for as long as you like. It answers "is our
- * receive path fine and only transmit broken?" - which the counters cannot,
- * because bus-off destroys the evidence.
- */
 #define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
-
-/*
- * ======================= MOTORS LIVE WHEN THIS IS 1 =======================
- *
- * Commands each axis into CLOSED_LOOP_CONTROL over CAN (Set_Axis_State), which
- * energises the motors. Set_Input_Pos alone does NOT do this - an IDLE axis
- * accepts positions and stays unpowered, which is why this is separate.
- *
- * Before running with this at 1:
- *   - leg in a fixture, off the ground, nothing in its swing range
- *   - physical e-stop that cuts actuator power within reach
- *   - low current and velocity limits set in odrivetool
- *   - ODrive watchdog enabled (axis0.config.enable_watchdog = True) so the
- *     actuators shut down by themselves if this firmware ever stops
- *   - bring up ONE node at a time before running all four
- *
- * Set back to 0 to transmit positions without ever energising anything, which
- * is still a complete test of the TX path.
- * ==========================================================================
- */
-#define LEGTEST_ENABLE_CLOSED_LOOP   0
-
-/*
- * Delay before arming, in ticks (ms). A reset must never energise motors
- * instantly - this gives you time to see the countdown and pull power.
- */
+#define LEGTEST_ENABLE_CLOSED_LOOP   1
 #define LEGTEST_ARM_DELAY_MS         3000u
-
-/*
- * STOP BUTTON - the blue USER button (B1) on the Nucleo.
- *
- * Press it at any time and the axis is commanded to IDLE and stays there.
- * There is no un-press: recovering means a reset, which is the correct
- * behaviour for a stop. Something that can be un-stopped by fumbling the same
- * button is not a stop button.
- *
- * This is NOT a substitute for an e-stop that cuts motor power. It travels
- * over the same CAN bus that might be the thing that failed. It is the
- * convenient stop for a bench test that is behaving oddly; the power switch is
- * the one for a bench test that is behaving dangerously.
- */
 #define LEGTEST_STOP_BUTTON          1
-
-/*
- * Motion profile. Only has any effect when closed loop is enabled above.
- *
- *   1 = play the reference gait from gait_ref.c (generated from the
- *       spreadsheet by tools/gen_gait.py)
- *   0 = the old single-joint sine, useful for a first spin of one axis
- */
 #define LEGTEST_MOTION_GAIT          1
-
-/* Sine fallback, used only when LEGTEST_MOTION_GAIT is 0. */
-#define LEGTEST_AMPLITUDE_TURNS      0.05f   /* +/- turns, after gearbox      */
-#define LEGTEST_FREQ_HZ              0.25f   /* slow enough to watch          */
-
-/*
- * Playback speed, 1.0 = the 0.8 s cycle the trajectory was optimised for.
- * START BELOW 1. At quarter speed every joint moves a quarter as fast, so a
- * wrong sign or a bad node mapping shows up as a slow drift you can watch and
- * kill rather than a snap you can only hear.
- */
-#define LEGTEST_GAIT_SPEED           0.25f
-
-/*
- * Time to travel from wherever the leg is when the axes arm to the first pose
- * of the trajectory, in ticks (ms).
- *
- * Without this the first command after arming would be gait phase 0, and the
- * leg would jump there from its resting position as fast as the drives allow.
- * The ramp starts from the MEASURED position, so it is only as good as the CAN
- * telemetry - if no encoder estimates have arrived the entry is skipped and
- * nothing moves.
- */
+#define LEGTEST_AMPLITUDE_TURNS      0.05f 
+#define LEGTEST_FREQ_HZ              0.25f 
+#define LEGTEST_GAIT_SPEED           0.5f
 #define LEGTEST_GAIT_ENTRY_MS        2000u
-
-/*
- * How many gait cycles to play, then hold the final pose. 0 = loop forever.
- *
- * One cycle is the right first move: a complete, bounded piece of motion you
- * can watch start and finish, and if the direction or scaling is wrong it
- * stops on its own instead of repeating the mistake indefinitely.
- */
 #define LEGTEST_GAIT_CYCLES          5u
-
-/*
- * VELOCITY FEEDFORWARD
- *
- * Send the trajectory's own velocity alongside each position setpoint, in
- * bytes 4-5 of Set_Input_Pos.
- *
- * Without it the position loop has to MANUFACTURE the motion out of tracking
- * error: the only way the drive knows to move is by first falling behind. That
- * costs a lag proportional to speed over pos_gain, and on a joint with real
- * stiction it costs more than that, because the error has to grow large enough
- * to break the joint loose before anything happens at all.
- *
- * With it, the velocity the trajectory calls for is handed to the velocity
- * loop directly and the position loop only corrects the residual. This is free
- * accuracy on a trajectory that is known in advance - which this one entirely
- * is, since it is a table compiled into flash.
- *
- * Set to 0 to A/B it against the same run. Do that before tuning gains, not
- * after: feedforward changes what "good tracking" looks like, so gains tuned
- * without it will be too stiff once it is on.
- *
- * MEASURED MAGNITUDES, hip_pitch, straight off the spreadsheet:
- *
- *   velocity at 1.00x   -0.716 .. +0.675 turns/s
- *   velocity at 0.25x   -0.179 .. +0.169 turns/s   <- what this test sends
- *   as int16 thousandths     -179 .. +169          (field holds +/-32767)
- *
- * Two things follow. The wire quantum of 0.001 turns/s is 0.6% at the peak,
- * so resolution is a non-issue. And the trajectory is not slow: it asks for
- * 0.18 turns/s even at quarter speed, which is most of the motion the position
- * loop was previously being asked to invent out of tracking error alone.
- *
- * CHECK vel_limit BEFORE TRUSTING THIS. The drive clamps both the setpoint and
- * the feedforward to axis0.controller.config.vel_limit. Set below 0.18 and the
- * gait cannot be followed at quarter speed no matter what the gains are, and
- * the clamp is silent - it looks exactly like a tracking failure.
- */
 #define LEGTEST_GAIT_VEL_FF          1
-
-/*
- * TORQUE FEEDFORWARD - plumbed, but there is nothing to put in it.
- *
- * Bytes 6-7 of Set_Input_Pos take a torque feedforward, and it is the term
- * that would cancel gravity and limb inertia before they become tracking
- * error. It is also the term most likely to fix what this leg is doing.
- *
- * It cannot be filled from the current data. reference_gait_rleg_40ms_250hz.xlsx
- * contains five columns - time_s, hipP_r_deg, hipRoll_r_deg, knee_r_deg,
- * ankle_r_deg - and every one of them is a POSITION. There is no torque
- * anywhere in the spreadsheet, and a torque feedforward invented from a
- * position table would be a guess wearing the costume of a measurement.
- *
- * Two honest ways to get one, when it is wanted:
- *
- *   1. Re-export it. gait_ref.h records that the source was gait_library_v1.npz
- *      from Pinocchio + CasADi trajectory optimisation. An optimiser that
- *      solved for these positions necessarily computed the joint torques to
- *      achieve them - they exist in the npz and were simply not carried into
- *      the xlsx. Add a torque column, teach tools/gen_gait.py to emit it, and
- *      this becomes a table lookup like everything else.
- *
- *   2. Compute gravity compensation on the fly, from link mass and centre of
- *      mass against measured joint angle. Less complete than the optimiser's
- *      answer - it ignores inertia and contact - but it is the dominant term
- *      for a leg moving this slowly, and it needs no new data source.
- *
- * Until one of those exists this stays zero and the signature carries it, so
- * that adding it later is a value change and not a protocol change.
- */
 #define LEGTEST_GAIT_TORQUE_FF       0
-
-/*
- * TRAJECTORY CAPTURE
- *
- * Record commanded against measured for the whole run, then print it as CSV
- * when the gait finishes. The once-a-second report cannot show a 3.2 s
- * trajectory - by the time you read a line the interesting part is over.
- *
- * This is the thing to look at when the leg moves but not as far as it should:
- * the peak-to-peak summary says immediately whether the drive is tracking or
- * clipping, and the CSV shows WHERE in the cycle it gives up.
- *
- * 512 samples at 100 Hz covers 5.1 s, enough for one cycle at quarter speed
- * plus the entry ramp. 8 KB of RAM out of 448.
- */
-/*
- * What to do when the gait finishes.
- *
- * With this at 0 the firmware keeps streaming the frozen final pose at 1 kHz
- * with the axis still in CLOSED_LOOP_CONTROL, so the motor servos on that pose
- * indefinitely. It never settles: the loop hunts around the setpoint against
- * stiction, the integrator winds up until the joint breaks loose, it slips, and
- * the cycle repeats. That is the creeping you can watch after the run is over,
- * and it is a pointless way to heat a motor on a bench.
- *
- * At 1 the axes are commanded to IDLE and transmission stops, which is what
- * "the test is over" should mean.
- *
- * HAZARD - IDLE DE-ENERGISES THE MOTOR AND THE JOINT GOES LIMP. On a bare
- * output shaft that is exactly what you want. With a leg attached it will fall
- * to wherever gravity puts it, at whatever speed gravity chooses, the instant
- * the last cycle completes. Set this to 0 before running an assembled leg, or
- * make sure the fixture can catch it.
- */
 #define LEGTEST_GAIT_IDLE_AFTER      1
-
 #define LEGTEST_CAPTURE              1
 #define CAPTURE_HZ                   100u
 #define CAPTURE_MAX                  2048u
 
 #if LEGTEST_CAPTURE
-/* One row per sample: what we asked for, and what came back. */
 typedef struct
 {
-    float cmd;
-    float pos;
-    float vel;
-    float trq;
+    float cmd[JOINT_COUNT];
+    float pos[JOINT_COUNT];
+    float trq[JOINT_COUNT];
 } cap_row_t;
 
 static cap_row_t s_cap[CAPTURE_MAX];
@@ -357,125 +220,112 @@ static uint16_t  s_cap_n;
 static uint8_t   s_cap_dumped;
 #endif
 
-
-/*
- * VELOCITY POKE - a deliberately dumb test for when position control does
- * nothing.
- *
- * Set to 1 and the drive is put in VELOCITY control and commanded a slow
- * constant spin. No trajectory, no position error, no gains involved beyond
- * the velocity loop.
- *
- *   it spins   -> the motor, encoder, current limit and calibration are all
- *                 fine, and the fault is in the POSITION control config
- *                 (pos_gain, vel_limit, input_mode)
- *   it does not -> the drive cannot produce torque at all, which is current
- *                 limit, calibration, or motor wiring - not our CAN at all
- *
- * This is the CAN equivalent of the IMU loopback: it removes everything the
- * failure could be blamed on, one layer at a time.
- */
 #define LEGTEST_VEL_POKE             0
 #define LEGTEST_VEL_POKE_TURNS_S     0.5f
-
-/*
- * Classic CAN 2.0, not FD.
- *
- * MEASURED, not assumed: every frame this drive sends decodes as CLASSIC. So
- * whatever the 5 Mbit data rate in its config means, it is not transmitting FD
- * on the wire - and it will not acknowledge FD frames from us either.
- *
- * That one mismatch produced a failure that looked nothing like its cause:
- * reception was perfect (8731 frames, REC=0) while our own transmit error
- * counter climbed to 248 and took the controller BUS-OFF, which then killed
- * reception too. A receive path that works fine, appearing completely dead.
- *
- * Classic frames still run at the 1 Mbit nominal rate, which this bus is
- * already proven to carry. Set back to 1 only after confirming the drive
- * actually sends FD - the trace prints the format of every frame.
- */
 #define LEGTEST_USE_CAN_FD           1
-
-/*
- * Secondary sample point offset for CAN FD, in data time quanta of 12.5 ns.
- * Raise it if TEC climbs with FD enabled: 8 is mid-bit, 11-12 sits later and
- * tolerates a longer path.
- */
-#define LEGTEST_TDC_OFFSET           8u
-
-/*
- * How often each joint gets a Set_Input_Pos, as a divider on the 1 kHz tick.
- *   1 = 1 kHz per joint  (4 TX frames every tick)
- *   4 = 250 Hz per joint (one joint per tick, round-robin)
- *
- * At 1 kHz with encoder+torque telemetry also at 1 kHz, this bus carries
- * 3 frames per node per ms = 12 frames/ms for four nodes. At the current
- * 1 Mbit nominal / 5 Mbit data that is ~50 us per frame, so ~60% bus load -
- * workable for a four-node leg, but see the note in README about raising the
- * NOMINAL bitrate before all five nodes per bus go live.
- */
+#define LEGTEST_TDC_OFFSET           20u
 #define LEGTEST_TX_DIV               1u
+#define NODE_SILENT_TICKS            500u
 
-/* Consider a node dead if nothing has been heard from it for this long. */
-#define NODE_SILENT_TICKS            500u    /* ms */
-
-/*
- * Approximate time one 8-byte frame occupies the bus, used only to report an
- * estimated load figure. Small 8-byte frames are dominated by the arbitration
- * phase, which runs at the NOMINAL rate - which is why raising the nominal
- * bitrate helps far more than raising the data bitrate.
- */
 #if LEGTEST_USE_CAN_FD
-#define FRAME_US                     50u     /* 1 Mbit arb + 5 Mbit data */
+#define FRAME_US                     75u 
 #else
-#define FRAME_US                     121u    /* classic 1 Mbit           */
+#define FRAME_US                     121u
 #endif
 
 /* ===================================================================== */
 
-/* ODrive CANSimple: arbitration id = (node_id << 5) | cmd_id */
 #define ODRV_CMD_HEARTBEAT      0x001u
 #define ODRV_CMD_SET_AXIS_STATE 0x007u
 #define ODRV_CMD_GET_ENCODER    0x009u
 #define ODRV_CMD_SET_CTRL_MODE  0x00Bu
 #define ODRV_CMD_SET_INPUT_POS  0x00Cu
 #define ODRV_CMD_SET_INPUT_VEL  0x00Du
-
-/* Set_Controller_Mode payload values. */
 #define ODRV_CTRL_MODE_VELOCITY 2u
 #define ODRV_CTRL_MODE_POSITION 3u
 #define ODRV_INPUT_MODE_PASSTHR 1u
+#define ODRV_CMD_SET_POS_GAIN   0x01Au
+#define ODRV_CMD_SET_VEL_GAINS  0x01Bu
 #define ODRV_CMD_GET_TORQUES    0x01Cu
-
 #define ODRV_AXIS_STATE_IDLE            1u
 #define ODRV_AXIS_STATE_CLOSED_LOOP     8u
 
+/*
+ * Arbitrary parameter access (ODrive "CANSimple" SDO).
+ *
+ *   RxSdo  0x004  us -> drive   [ opcode | ep_lo | ep_hi | 0 | value(4) ]
+ *   TxSdo  0x005  drive -> us   [   0    | ep_lo | ep_hi | 0 | value(4) ]
+ *
+ * Endpoint numbers are NOT stable: they move with every firmware and hardware
+ * revision. The ones below come from flat_endpoints.json for fw 0.6.12 /
+ * hw 5.2.0. Writing the wrong endpoint silently corrupts an unrelated setting,
+ * so odrv_check_version() interrogates each drive with Get_Version first and
+ * refuses to write to anything that does not match exactly.
+ */
+#define ODRV_CMD_GET_VERSION    0x000u
+#define ODRV_CMD_RX_SDO         0x004u
+#define ODRV_CMD_TX_SDO         0x005u
+#define SDO_OP_READ             0x00u
+#define SDO_OP_WRITE            0x01u
+
+#define EP_JSON_HW_LINE   5u
+#define EP_JSON_HW_VER    2u
+#define EP_JSON_HW_VAR    0u
+#define EP_JSON_FW_MAJOR  0u
+#define EP_JSON_FW_MINOR  6u
+#define EP_JSON_FW_REV    12u
+
+#define EP_SPI_ENC0_MAX_ERROR_RATE  673u   /* float, rw */
+#define EP_SAVE_CONFIGURATION       718u   /* function  */
+
+/*
+ * spi_encoder0.config.max_error_rate - the fraction of SPI transactions the
+ * drive will tolerate coming back bad before it declares the encoder estimate
+ * missing and disarms. The knee has been dropping out mid-gait; loosening this
+ * buys headroom while the harness is investigated. It does NOT fix bad wiring,
+ * it only stops a handful of corrupt reads from ending the run.
+ */
+#define LEGTEST_SET_SPI_ERR_RATE    1
+#define LEGTEST_SPI_MAX_ERROR_RATE  0.1f
+
+/* 1 = also persist it to the drive's flash (needs a power cycle to re-init). */
+#define LEGTEST_SDO_SAVE            0
+
 typedef struct
 {
-    /* Most recent values received */
     float    pos;
     float    vel;
     float    torque;
     uint32_t axis_error;
     uint8_t  axis_state;
-
-    /* Message counters - these are what actually prove the link works */
     uint32_t n_heartbeat;
     uint32_t n_encoder;
     uint32_t n_torque;
-
-    uint32_t last_rx_tick;   /* tick of the most recent frame from this node */
-    float    cmd;            /* last position we commanded                   */
+    uint32_t last_rx_tick;  
+    float    cmd;          
 } joint_t;
 
 static volatile joint_t s_joint[JOINT_COUNT];
-/* Recent frames, captured cheaply in the RX handler and printed elsewhere. */
+
+#if (MONITOR_COUNT > 0)
+static volatile joint_t s_mon[MONITOR_COUNT];
+#endif
+
+/* filled by the RX handler while an SDO / version exchange is outstanding */
+static volatile uint8_t  s_sdo_node;
+static volatile uint16_t s_sdo_ep;
+static volatile uint8_t  s_sdo_got;
+static volatile uint8_t  s_sdo_val[4];
+static volatile uint8_t  s_ver_node;
+static volatile uint8_t  s_ver_got;
+static volatile uint8_t  s_ver[8];
+
 typedef struct
 {
     uint32_t id;
     uint8_t  len;
-    uint8_t  fd;        /* FDCAN_FD_CAN or FDCAN_CLASSIC_CAN */
-    uint8_t  brs;       /* bit rate switch used by the sender */
+    uint8_t  fd;       
+    uint8_t  brs;       
     uint8_t  data[8];
 } trace_t;
 
@@ -483,31 +333,37 @@ static volatile trace_t  s_trace[TRACE_LEN];
 static volatile uint8_t  s_trace_head;
 static volatile uint8_t  s_trace_tail;
 
-/* Every node id heard from, whether or not we were expecting it. */
 static volatile uint16_t s_node_seen[64];
 static volatile uint8_t  s_node_state[64];
 static volatile uint32_t s_node_err[64];
 
-static uint8_t s_scan_ok;          /* the configured nodes all answered */
-
+static uint8_t s_scan_ok;         
 static volatile uint32_t s_rx_total;
-static volatile uint32_t s_rx_unknown;   /* frames from unexpected node ids  */
+static volatile uint32_t s_rx_unknown; 
 
 static volatile uint32_t s_tick_pending;
 static uint32_t s_tick;
 static uint32_t s_tx_fail;
 
-/* ------------------------------------------------------------------ */
-
 static int joint_from_node(uint32_t node)
 {
     for (int j = 0; j < JOINT_COUNT; j++)
     {
-        if (s_node_id[j] == node)
-        {
-            return j;
-        }
+        if (s_node_id[j] == node) { return j; }
     }
+    return -1;
+}
+
+static int monitor_from_node(uint32_t node)
+{
+#if (MONITOR_COUNT > 0)
+    for (int m = 0; m < MONITOR_COUNT; m++)
+    {
+        if (s_mon_node[m] == node) { return m; }
+    }
+#else
+    (void)node;
+#endif
     return -1;
 }
 
@@ -526,22 +382,7 @@ static uint32_t le_u32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Transmit                                                           */
-/* ------------------------------------------------------------------ */
-
-/*
- * Software transmit queue.
- *
- * The hardware TX FIFO on this part is fixed at three entries, but a 1 kHz
- * tick wants to hand over four Set_Input_Pos frames at once. Pushing all four
- * straight at the hardware silently loses one - so frames go into this ring
- * and tx_pump() feeds the FIFO as space frees up.
- *
- * Producer (the tick) and consumer (tx_pump) both run in main-loop context,
- * never in an ISR, so no locking is needed.
- */
-#define TXQ_LEN   32u                  /* power of two */
+#define TXQ_LEN   32u                  
 #define TXQ_MASK  (TXQ_LEN - 1u)
 
 typedef struct
@@ -556,6 +397,7 @@ static uint8_t     s_txq_head;
 static uint8_t     s_txq_tail;
 static uint32_t    s_tx_ok;
 static uint32_t    s_txq_drop;
+static uint32_t    s_busoff_count;
 
 static void tx_enqueue(uint32_t node, uint32_t cmd, const uint8_t *data, uint32_t len)
 {
@@ -563,14 +405,6 @@ static void tx_enqueue(uint32_t node, uint32_t cmd, const uint8_t *data, uint32_
 
     if (next == s_txq_tail)
     {
-        /*
-         * Queue full - the bus is not draining. Discard the OLDEST entry, not
-         * this one: these are position setpoints, and a stale setpoint is
-         * worthless while the newest is exactly what the actuator should get.
-         * Dropping the newest instead would leave the queue full of commands
-         * from seconds ago and effectively freeze the leg once the bus
-         * recovered.
-         */
         s_txq_tail = (uint8_t)((s_txq_tail + 1u) & TXQ_MASK);
         s_txq_drop++;
     }
@@ -587,13 +421,14 @@ static uint8_t can_send(uint32_t node, uint32_t cmd, const uint8_t *data, uint32
 
 #if LEGTEST_LISTEN_ONLY
     (void)node; (void)cmd; (void)data; (void)len;
-    return 1;              /* pretend it went out; the queue must still drain */
+    return 1;              
 #else
-
     hdr.Identifier          = (node << 5) | cmd;
     hdr.IdType              = FDCAN_STANDARD_ID;
     hdr.TxFrameType         = FDCAN_DATA_FRAME;
-    hdr.DataLength          = (len == 8u) ? FDCAN_DLC_BYTES_8 : FDCAN_DLC_BYTES_4;
+    hdr.DataLength          = (len == 0u) ? FDCAN_DLC_BYTES_0 :
+                              (len == 8u) ? FDCAN_DLC_BYTES_8 :
+                                            FDCAN_DLC_BYTES_4;
     hdr.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
 #if LEGTEST_USE_CAN_FD
     hdr.BitRateSwitch       = FDCAN_BRS_ON;
@@ -615,37 +450,64 @@ static uint8_t can_send(uint32_t node, uint32_t cmd, const uint8_t *data, uint32
 #endif
 }
 
-/* Move queued frames into the hardware FIFO. Call often from the main loop. */
+static void can_busoff_poll(void)
+{
+    FDCAN_ProtocolStatusTypeDef ps;
+
+    HAL_FDCAN_GetProtocolStatus(&hfdcan1, &ps);
+
+    /*
+     * Error-passive is not bus-off, so the recovery below never fired for it.
+     * But once the drives disarm and stop ACKing, TX fills, txfifo_free hits 0
+     * and every queued frame is dropped forever - qdrop climbing by 2000/s
+     * with tx=0 and rx=0, which is what a wedged bus looks like from here.
+     * Drop the backlog so the queue is not spending the whole tick failing.
+     */
+    if (ps.ErrorPassive && (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0u))
+    {
+        s_txq_tail = s_txq_head;
+    }
+
+    if (ps.BusOff == 0u)
+    {
+        return;
+    }
+    if (READ_BIT(hfdcan1.Instance->CCCR, FDCAN_CCCR_INIT) == 0u)
+    {
+        return;                 
+    }
+
+    s_busoff_count++;
+
+    HAL_FDCAN_AbortTxRequest(&hfdcan1,
+                             FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 |
+                             FDCAN_TX_BUFFER2);
+
+    CLEAR_BIT(hfdcan1.Instance->CCCR, FDCAN_CCCR_INIT);
+}
+
 static void tx_pump(void)
 {
+    can_busoff_poll();
+
     while (s_txq_tail != s_txq_head)
     {
         if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0u)
         {
-            break;                      /* hardware full, retry next pass */
+            break;                      
         }
 
         const txq_entry_t *e = &s_txq[s_txq_tail];
 
         if (!can_send(e->identifier >> 5, e->identifier & 0x1Fu, e->data, e->len))
         {
-            break;                      /* leave it queued rather than lose it */
+            break;                      
         }
 
         s_txq_tail = (uint8_t)((s_txq_tail + 1u) & TXQ_MASK);
     }
 }
 
-/*
- * Pack a float into the int16 feedforward fields, which carry thousandths.
- *
- * Saturating rather than wrapping matters: an int16 that rolls over turns a
- * too-large forward velocity into a large REVERSE one, and hands the drive a
- * command to slam the joint backwards at full speed. Clipping merely asks for
- * less than the trajectory wanted. The trajectory never comes close to the
- * limit, which is exactly why the guard has to be here - it only ever fires
- * when something upstream has already gone wrong.
- */
 static int16_t ff_thousandths(float v)
 {
     float scaled = v * 1000.0f;
@@ -667,7 +529,6 @@ static void send_input_pos(int j, float pos, float vel_ff, float trq_ff)
     data[2] = (uint8_t)((bits >> 16) & 0xFFu);
     data[3] = (uint8_t)((bits >> 24) & 0xFFu);
 
-    /* Both fields are int16 little-endian, 0.001 units: turns/s and Nm. */
     uint16_t v = (uint16_t)ff_thousandths(vel_ff);
     uint16_t q = (uint16_t)ff_thousandths(trq_ff);
 
@@ -680,19 +541,6 @@ static void send_input_pos(int j, float pos, float vel_ff, float trq_ff)
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_POS, data, 8u);
 }
 
-/*
- * Tell the drive to actually act on positions.
- *
- * Set_Input_Pos only means something in POSITION control with PASSTHROUGH
- * input. In any other mode the drive accepts the frame, stores nothing useful,
- * and produces no torque - it sits armed and still while every counter looks
- * perfect, which is exactly what we saw: state=8, err=0, commands arriving,
- * pos unchanged and torque at 0.001 Nm.
- *
- * The mode lives in the drive's saved config, so relying on it means relying on
- * whatever odrivetool was last used to set. Sending it explicitly at arm time
- * removes the ambiguity.
- */
 #if LEGTEST_VEL_POKE
 static void send_input_vel(int j, float vel)
 {
@@ -704,7 +552,7 @@ static void send_input_vel(int j, float vel)
     data[1] = (uint8_t)((bits >> 8) & 0xFFu);
     data[2] = (uint8_t)((bits >> 16) & 0xFFu);
     data[3] = (uint8_t)((bits >> 24) & 0xFFu);
-    data[4] = 0; data[5] = 0; data[6] = 0; data[7] = 0;   /* torque_ff */
+    data[4] = 0; data[5] = 0; data[6] = 0; data[7] = 0;   
 
     s_joint[j].cmd = vel;
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_INPUT_VEL, data, 8u);
@@ -727,6 +575,51 @@ static void send_controller_mode(int j)
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_CTRL_MODE, data, 8u);
 }
 
+/* Little-endian float32 into a byte buffer, the ODrive wire convention. */
+static void put_f32(uint8_t *d, float v)
+{
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    d[0] = (uint8_t)(bits & 0xFFu);
+    d[1] = (uint8_t)((bits >> 8) & 0xFFu);
+    d[2] = (uint8_t)((bits >> 16) & 0xFFu);
+    d[3] = (uint8_t)((bits >> 24) & 0xFFu);
+}
+
+/*
+ * Set_Pos_Gain (0x01A): float32 pos_gain.
+ * Set_Vel_Gains (0x01B): float32 vel_gain, float32 vel_integrator_gain.
+ *
+ * Sent before Set_Controller_Mode so the loop is already tuned the moment the
+ * axis is energised, rather than running one arming cycle on whatever the
+ * drive had saved.
+ */
+static void send_gains(int j)
+{
+    uint8_t data[8];
+
+    if (s_pos_gain[j] >= 0.0f)
+    {
+        put_f32(&data[0], s_pos_gain[j]);
+        data[4] = 0; data[5] = 0; data[6] = 0; data[7] = 0;
+        tx_enqueue(s_node_id[j], ODRV_CMD_SET_POS_GAIN, data, 4u);
+    }
+
+    if ((s_vel_gain[j] >= 0.0f) && (s_vel_int_gain[j] >= 0.0f))
+    {
+        put_f32(&data[0], s_vel_gain[j]);
+        put_f32(&data[4], s_vel_int_gain[j]);
+        tx_enqueue(s_node_id[j], ODRV_CMD_SET_VEL_GAINS, data, 8u);
+    }
+
+    if ((s_pos_gain[j] >= 0.0f) || (s_vel_gain[j] >= 0.0f))
+    {
+        printf("  gains -> %s: pos %.2f  vel %.3f  vel_int %.2f\r\n",
+               s_joint_name[j], (double)s_pos_gain[j],
+               (double)s_vel_gain[j], (double)s_vel_int_gain[j]);
+    }
+}
+
 static void send_axis_state(int j, uint32_t state)
 {
     uint8_t data[4];
@@ -739,38 +632,15 @@ static void send_axis_state(int j, uint32_t state)
     tx_enqueue(s_node_id[j], ODRV_CMD_SET_AXIS_STATE, data, 4u);
 }
 
-/*
- * Command every axis to IDLE and stop commanding.
- *
- * Order matters. The queue is discarded BEFORE the idle commands are enqueued,
- * because whatever is already in it is position setpoints - they would go out
- * after the idle, and leave anyone reading a bus trace wondering why the test
- * kept commanding an axis it had just shut down.
- *
- * The caller sets s_stopped. That is deliberate: this function only talks to
- * the drives, so it can also be used somewhere that wants to disarm without
- * latching the test off.
- */
 static void disarm_all(void)
 {
     s_txq_tail = s_txq_head;
 
     for (int j = 0; j < JOINT_COUNT; j++)
     {
-        send_axis_state(j, ODRV_AXIS_STATE_IDLE);
+        if (s_joint_live[j]) { send_axis_state(j, ODRV_AXIS_STATE_IDLE); }
     }
 
-    /*
-     * Get them onto the wire before returning. tx_pump() otherwise only runs
-     * once per main-loop pass, so these would sit in the queue behind whatever
-     * the caller does next - and cap_dump() blocks for seconds printing the
-     * capture. An idle command that arrives after that is not a disarm.
-     *
-     * Bounded, because a bus with nothing acknowledging never drains: the FIFO
-     * stays full and this would spin forever. Inside a disarm is the worst
-     * place in the program to hang, so it gives up and lets the caller carry
-     * on - the drives are on their own watchdog for exactly that case.
-     */
     for (uint32_t spin = 0u;
          (s_txq_tail != s_txq_head) && (spin < 100000u);
          spin++)
@@ -778,10 +648,6 @@ static void disarm_all(void)
         tx_pump();
     }
 }
-
-/* ------------------------------------------------------------------ */
-/*  Receive - called from the FDCAN1 interrupt                         */
-/* ------------------------------------------------------------------ */
 
 void legtest_on_rx(void)
 {
@@ -804,16 +670,12 @@ void legtest_on_rx(void)
         {
             uint8_t next = (uint8_t)((s_trace_head + 1u) % TRACE_LEN);
 
-            /* Drop the newest when full rather than overwrite unread history:
-               the first frames after power-up are the interesting ones. */
             if (next != s_trace_tail)
             {
                 s_trace[s_trace_head].id  = hdr.Identifier;
                 s_trace[s_trace_head].len = 8u;
-                s_trace[s_trace_head].fd  =
-                    (hdr.FDFormat == FDCAN_FD_CAN) ? 1u : 0u;
-                s_trace[s_trace_head].brs =
-                    (hdr.BitRateSwitch == FDCAN_BRS_ON) ? 1u : 0u;
+                s_trace[s_trace_head].fd  = (hdr.FDFormat == FDCAN_FD_CAN) ? 1u : 0u;
+                s_trace[s_trace_head].brs = (hdr.BitRateSwitch == FDCAN_BRS_ON) ? 1u : 0u;
                 for (int b = 0; b < 8; b++)
                 {
                     s_trace[s_trace_head].data[b] = data[b];
@@ -823,8 +685,6 @@ void legtest_on_rx(void)
         }
 #endif
 
-        /* Log every node before filtering, so the scan can report drives we
-           were not configured for - the usual case on a first bring-up. */
         if (node < 64u)
         {
             if (s_node_seen[node] < 0xFFFFu)
@@ -838,33 +698,68 @@ void legtest_on_rx(void)
             }
         }
 
-        int j = joint_from_node(node);
-        if (j < 0)
+        /* replies to a setup exchange, from any node - handled before the
+           joint lookup so a monitor-only node can answer too */
+        if (cmd == ODRV_CMD_GET_VERSION)
         {
-            s_rx_unknown++;   /* a node id we were not expecting - worth seeing */
+            if (node == s_ver_node)
+            {
+                for (int b = 0; b < 8; b++) { s_ver[b] = data[b]; }
+                s_ver_got = 1u;
+            }
+            continue;
+        }
+        if (cmd == ODRV_CMD_TX_SDO)
+        {
+            uint16_t ep = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+
+            if ((node == s_sdo_node) && (ep == s_sdo_ep))
+            {
+                for (int b = 0; b < 4; b++) { s_sdo_val[b] = data[4 + b]; }
+                s_sdo_got = 1u;
+            }
             continue;
         }
 
-        s_joint[j].last_rx_tick = s_tick;
+        volatile joint_t *t = NULL;
+        int j = joint_from_node(node);
+
+        if (j >= 0)
+        {
+            t = &s_joint[j];
+        }
+#if (MONITOR_COUNT > 0)
+        else
+        {
+            int m = monitor_from_node(node);
+            if (m >= 0) { t = &s_mon[m]; }
+        }
+#endif
+        if (t == NULL)
+        {
+            s_rx_unknown++;  
+            continue;
+        }
+
+        t->last_rx_tick = s_tick;
 
         switch (cmd)
         {
         case ODRV_CMD_GET_ENCODER:
-            s_joint[j].pos = le_f32(&data[0]);
-            s_joint[j].vel = le_f32(&data[4]);
-            s_joint[j].n_encoder++;
+            t->pos = le_f32(&data[0]);
+            t->vel = le_f32(&data[4]);
+            t->n_encoder++;
             break;
 
         case ODRV_CMD_GET_TORQUES:
-            /* bytes 0-3 are the target, 4-7 the estimate */
-            s_joint[j].torque = le_f32(&data[4]);
-            s_joint[j].n_torque++;
+            t->torque = le_f32(&data[4]);
+            t->n_torque++;
             break;
 
         case ODRV_CMD_HEARTBEAT:
-            s_joint[j].axis_error = le_u32(&data[0]);
-            s_joint[j].axis_state = data[4];
-            s_joint[j].n_heartbeat++;
+            t->axis_error = le_u32(&data[0]);
+            t->axis_state = data[4];
+            t->n_heartbeat++;
             break;
 
         default:
@@ -878,32 +773,17 @@ void legtest_on_tick(void)
     s_tick_pending++;
 }
 
-/* ------------------------------------------------------------------ */
-
 static void bus_setup(void)
 {
     FDCAN_FilterTypeDef f;
 
-    /*
-     * Accept the ENTIRE standard id space. CANSimple packs id = node<<5 | cmd,
-     * so 0x000..0x7FF covers every node from 0 to 63.
-     *
-     * The obvious filter starts at node 1 and would never see node 0 - which is
-     * exactly what an ODrive ships with. A drive nobody had configured yet would
-     * simply be invisible, and look identical to a dead bus.
-     */
     f.IdType       = FDCAN_STANDARD_ID;
     f.FilterIndex  = 0;
     f.FilterType   = FDCAN_FILTER_RANGE;
     f.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-    f.FilterID1    = 0x000u;   /* node 0,  cmd 0  */
-    f.FilterID2    = 0x7FFu;   /* node 63, cmd 31 */
+    f.FilterID1    = 0x000u;   
+    f.FilterID2    = 0x7FFu;   
 
-    /*
-     * Check every one of these. A silently failed Start() looks identical from
-     * the outside to a bus with nothing on it: no TX, no RX, and a software
-     * queue filling up because the hardware FIFO never drains.
-     */
     if (HAL_FDCAN_ConfigFilter(&hfdcan1, &f) != HAL_OK)
     {
         printf("!! HAL_FDCAN_ConfigFilter FAILED\r\n");
@@ -915,28 +795,7 @@ static void bus_setup(void)
         printf("!! HAL_FDCAN_ConfigGlobalFilter FAILED\r\n");
     }
 #if LEGTEST_USE_CAN_FD
-    /*
-     * Transmitter Delay Compensation. MUST be configured BEFORE Start() -
-     * the peripheral only accepts it while still in initialisation mode.
-     *
-     * In the data phase a transmitter checks its own bits by reading them
-     * back off the bus. At 5 Mbit a bit lasts 200 ns and the sample point is
-     * at 150 ns, but the ISO1042 is isolated and its loop delay is 152 ns -
-     * so when we look, our own bit has not returned yet. We read the
-     * previous one, see a mismatch, and declare a bit error. Every FD frame
-     * fails, TEC runs to 255, and the controller goes bus-off.
-     *
-     * Classic CAN has no data phase and never does this check, which is why
-     * the bus was flawless at 1 Mbit.
-     *
-     * TDC moves the check to a Secondary Sample Point after the measured
-     * delay. The offset is in time quanta of 12.5 ns; 8 puts the SSP at
-     * 152 + 100 = 252 ns, halfway into the echoed bit. If TEC still climbs,
-     * try 11 or 12 - the right value depends on the whole path, cable and
-     * connectors included, not just the transceiver.
-     */
-    if (HAL_FDCAN_ConfigTxDelayCompensation(&hfdcan1,
-                                            LEGTEST_TDC_OFFSET, 0u) != HAL_OK)
+    if (HAL_FDCAN_ConfigTxDelayCompensation(&hfdcan1, LEGTEST_TDC_OFFSET, 0u) != HAL_OK)
     {
         printf("!! HAL_FDCAN_ConfigTxDelayCompensation FAILED\r\n");
     }
@@ -961,7 +820,6 @@ static void bus_setup(void)
 }
 
 #if LEGTEST_TRACE_RX
-/* ODrive CANSimple command names, for the ones we actually expect. */
 static const char *cmd_name(uint32_t cmd)
 {
     switch (cmd)
@@ -978,7 +836,6 @@ static const char *cmd_name(uint32_t cmd)
     }
 }
 
-/* Print whatever the RX handler captured. Main-loop context only. */
 static void trace_drain(int max_lines)
 {
     while ((s_trace_tail != s_trace_head) && (max_lines-- > 0))
@@ -988,12 +845,6 @@ static void trace_drain(int max_lines)
         uint32_t node = (t->id >> 5) & 0x3Fu;
         uint32_t cmd  = t->id & 0x1Fu;
 
-        /*
-         * The format matters more than the bytes here. If the drive sends
-         * CLASSIC frames, it is not in FD mode - and our FD frames with BRS
-         * would be rejected by it, which is one of the two things that stops
-         * a transmit path while leaving receive perfect.
-         */
         printf("  id 0x%03lX  node %-2lu cmd 0x%02lX %-17s %s%s ",
                (unsigned long)t->id, (unsigned long)node,
                (unsigned long)cmd, cmd_name(cmd),
@@ -1005,8 +856,6 @@ static void trace_drain(int max_lines)
             printf("%02X ", (unsigned)t->data[b]);
         }
 
-        /* Heartbeat is the one worth decoding inline - it is what tells you
-           the drive is alive and whether it is sitting in a fault. */
         if (cmd == 0x001u)
         {
             uint32_t err = le_u32((const uint8_t *)t->data);
@@ -1020,16 +869,189 @@ static void trace_drain(int max_lines)
 }
 #endif
 
-/*
- * Listen for ODrive heartbeats before transmitting anything.
- *
- * Every other failure mode looks the same from the outside: a drive on the
- * wrong bitrate, CANH/CANL swapped, no termination, no power, or simply a
- * different node id than we were told. Sending first makes all of those
- * indistinguishable. Listening first separates "the bus works" from
- * "the bus does not", which is the only question worth answering first.
- */
 static void can_status(void);
+
+/* ===================================================================== */
+/*  Arbitrary parameter access - runs once at boot, before the timers      */
+/* ===================================================================== */
+
+/*
+ * Blocking. Only ever called from legtest_init(), before the 1 kHz tick is
+ * started, so pumping the queue and draining RX inline here is safe.
+ */
+static uint8_t sdo_wait(volatile uint8_t *flag, uint32_t ms)
+{
+    for (uint32_t i = 0u; i < ms; i++)
+    {
+        tx_pump();
+        legtest_on_rx();
+        if (*flag) { return 1u; }
+        HAL_Delay(1);
+    }
+    return 0u;
+}
+
+/*
+ * The endpoint numbers this file hard-codes are only meaningful for one
+ * firmware/hardware pair. Ask the drive what it is and refuse to write if it
+ * disagrees - a mismatched write lands on whatever parameter happens to sit at
+ * that number, which is far worse than not writing at all.
+ */
+static uint8_t odrv_check_version(uint8_t node)
+{
+    uint8_t empty[8] = { 0 };
+
+    s_ver_node = node;
+    s_ver_got  = 0u;
+    tx_enqueue(node, ODRV_CMD_GET_VERSION, empty, 0u);
+
+    if (!sdo_wait(&s_ver_got, 250u))
+    {
+        printf("  node %u: no reply to Get_Version - skipped\r\n", (unsigned)node);
+        return 0u;
+    }
+
+    uint8_t hw_line = s_ver[1], hw_ver = s_ver[2], hw_var = s_ver[3];
+    uint8_t fw_maj  = s_ver[4], fw_min = s_ver[5], fw_rev = s_ver[6];
+
+    if ((hw_line != EP_JSON_HW_LINE) || (hw_ver != EP_JSON_HW_VER) ||
+        (hw_var != EP_JSON_HW_VAR)   || (fw_maj != EP_JSON_FW_MAJOR) ||
+        (fw_min != EP_JSON_FW_MINOR) || (fw_rev != EP_JSON_FW_REV))
+    {
+        printf("  node %u: hw %u.%u.%u fw %u.%u.%u does not match the endpoint\r\n"
+               "          table (hw %u.%u.%u fw %u.%u.%u) - NOT writing.\r\n"
+               "          Fetch that drive's own flat_endpoints.json.\r\n",
+               (unsigned)node, hw_line, hw_ver, hw_var, fw_maj, fw_min, fw_rev,
+               EP_JSON_HW_LINE, EP_JSON_HW_VER, EP_JSON_HW_VAR,
+               EP_JSON_FW_MAJOR, EP_JSON_FW_MINOR, EP_JSON_FW_REV);
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t sdo_read_f32(uint8_t node, uint16_t ep, float *out)
+{
+    uint8_t d[4];
+
+    d[0] = SDO_OP_READ;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+
+    s_sdo_node = node;
+    s_sdo_ep   = ep;
+    s_sdo_got  = 0u;
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 4u);
+
+    if (!sdo_wait(&s_sdo_got, 250u)) { return 0u; }
+
+    *out = le_f32((const uint8_t *)s_sdo_val);
+    return 1u;
+}
+
+static void sdo_write_f32(uint8_t node, uint16_t ep, float v)
+{
+    uint8_t d[8];
+
+    d[0] = SDO_OP_WRITE;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+    put_f32(&d[4], v);
+
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 8u);
+    for (uint32_t i = 0u; i < 20u; i++) { tx_pump(); HAL_Delay(1); }
+}
+
+static void sdo_call(uint8_t node, uint16_t ep)
+{
+    uint8_t d[4];
+
+    d[0] = SDO_OP_WRITE;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 4u);
+    for (uint32_t i = 0u; i < 20u; i++) { tx_pump(); HAL_Delay(1); }
+}
+
+static void spi_err_rate_one(uint8_t node, const char *name)
+{
+    float before = 0.0f, after = 0.0f;
+
+    if (s_node_seen[node] == 0u)
+    {
+        printf("  node %u %-9s : silent on the scan - skipped\r\n",
+               (unsigned)node, name);
+        return;
+    }
+    if (!odrv_check_version(node)) { return; }
+
+    if (!sdo_read_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE, &before))
+    {
+        printf("  node %u %-9s : no reply reading the endpoint - skipped\r\n",
+               (unsigned)node, name);
+        return;
+    }
+
+    sdo_write_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE,
+                  LEGTEST_SPI_MAX_ERROR_RATE);
+
+    if (!sdo_read_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE, &after))
+    {
+        printf("  node %u %-9s : wrote %.3f but could not read it back\r\n",
+               (unsigned)node, name, (double)LEGTEST_SPI_MAX_ERROR_RATE);
+        return;
+    }
+
+    float want = LEGTEST_SPI_MAX_ERROR_RATE;
+    float d    = (after > want) ? (after - want) : (want - after);
+
+    printf("  node %u %-9s : max_error_rate %.4f -> %.4f%s\r\n",
+           (unsigned)node, name, (double)before, (double)after,
+           (d < 1e-6f) ? "" : "   !! DID NOT TAKE");
+
+#if LEGTEST_SDO_SAVE
+    if (d < 1e-6f)
+    {
+        printf("  node %u %-9s : save_configuration()\r\n", (unsigned)node, name);
+        sdo_call(node, EP_SAVE_CONFIGURATION);
+        HAL_Delay(500);
+    }
+#else
+    (void)sdo_call;
+#endif
+}
+
+static void apply_encoder_config(void)
+{
+#if LEGTEST_SET_SPI_ERR_RATE
+    printf("\r\nspi_encoder0.config.max_error_rate -> %.3f  "
+           "(endpoint %u, fw %u.%u.%u / hw %u.%u.%u)\r\n",
+           (double)LEGTEST_SPI_MAX_ERROR_RATE,
+           (unsigned)EP_SPI_ENC0_MAX_ERROR_RATE,
+           EP_JSON_FW_MAJOR, EP_JSON_FW_MINOR, EP_JSON_FW_REV,
+           EP_JSON_HW_LINE, EP_JSON_HW_VER, EP_JSON_HW_VAR);
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        spi_err_rate_one(s_node_id[j], s_joint_name[j]);
+    }
+#if (MONITOR_COUNT > 0)
+    for (int m = 0; m < MONITOR_COUNT; m++)
+    {
+        spi_err_rate_one(s_mon_node[m], s_mon_name[m]);
+    }
+#endif
+
+#if !LEGTEST_SDO_SAVE
+    printf("  not saved to flash - this is a runtime write and is lost on the\r\n"
+           "  next power cycle. Set LEGTEST_SDO_SAVE 1 to persist it.\r\n");
+#endif
+    printf("\r\n");
+#endif
+}
 
 static void bus_scan(void)
 {
@@ -1039,9 +1061,9 @@ static void bus_scan(void)
     for (uint32_t i = 0; i < LEGTEST_SCAN_MS; i += 10u)
     {
         HAL_Delay(10);
-        legtest_on_rx();          /* drain, in case the ISR is not wired yet */
+        legtest_on_rx();          
 #if LEGTEST_TRACE_RX
-        trace_drain(2);           /* a couple per pass so printf never piles up */
+        trace_drain(2);           
 #endif
     }
 
@@ -1058,7 +1080,8 @@ static void bus_scan(void)
         printf("  node %-2d  %5u frames  axis_state %u  axis_error 0x%08lX%s\r\n",
                n, (unsigned)s_node_seen[n], (unsigned)s_node_state[n],
                (unsigned long)s_node_err[n],
-               (joint_from_node((uint32_t)n) >= 0) ? "   <-- configured" : "");
+               (joint_from_node((uint32_t)n) >= 0)   ? "   <-- configured" :
+               (monitor_from_node((uint32_t)n) >= 0) ? "   <-- monitored" : "");
     }
 
     can_status();
@@ -1066,25 +1089,37 @@ static void bus_scan(void)
     if (found == 0)
     {
         printf("  NOTHING ON THE BUS.\r\n");
-        printf("  The drive sends heartbeats on its own, so silence here is\r\n");
-        printf("  physical, not protocol. In rough order of likelihood:\r\n");
-        printf("    - transceiver not powered, or CANH/CANL swapped\r\n");
-        printf("    - no 120 ohm termination (you need it at BOTH ends)\r\n");
-        printf("    - ODrive on a different CAN bitrate than 1 Mbit nominal\r\n");
-        printf("    - ODrive not powered, or its CAN not enabled\r\n");
     }
 
-    /* Every configured node must have answered. Commanding a node that is not
-       there is harmless; assuming one IS there and arming is not. */
-    s_scan_ok = 1;
+    /*
+     * One silent drive used to disable closed loop for the whole leg. It no
+     * longer does: each joint stands or falls on its own, and the run goes
+     * ahead with whatever answered. Only a completely silent bus stops it.
+     */
+    int live = 0;
+
     for (int j = 0; j < JOINT_COUNT; j++)
     {
-        if (s_node_seen[s_node_id[j]] == 0u)
+        s_joint_live[j] = (s_node_seen[s_node_id[j]] != 0u) ? 1u : 0u;
+
+        if (s_joint_live[j])
         {
-            s_scan_ok = 0;
-            printf("  !! node %u (%s) never answered - closed loop DISABLED\r\n",
+            live++;
+        }
+        else
+        {
+            printf("  !! node %u (%s) never answered - that joint is SKIPPED\r\n"
+                   "     (not armed, not commanded, not captured). The rest of\r\n"
+                   "     the leg still runs.\r\n",
                    (unsigned)s_node_id[j], s_joint_name[j]);
         }
+    }
+
+    s_scan_ok = (live > 0) ? 1u : 0u;
+
+    if (!s_scan_ok)
+    {
+        printf("  !! no joint answered at all - closed loop DISABLED\r\n");
     }
 
     printf("\r\n");
@@ -1102,6 +1137,8 @@ void legtest_init(void)
     s_txq_drop     = 0;
     s_txq_head     = 0;
     s_txq_tail     = 0;
+    s_busoff_count = 0;
+    s_arm_blocked  = 0;
 
     BSP_LED_Init(LED_GREEN);
     BSP_LED_Init(LED_YELLOW);
@@ -1112,78 +1149,17 @@ void legtest_init(void)
 
 #if LEGTEST_STOP_BUTTON
     BSP_PB_Init(BUTTON_USER, BUTTON_MODE_GPIO);
-    printf("STOP: press the blue USER button at any time to command IDLE.\r\n"
-           "      It latches - reset the board to run again.\r\n"
-           "      This is not an e-stop; it goes over the same CAN bus.\r\n\r\n");
 #endif
 
     bus_scan();
+    apply_encoder_config();
 
     HAL_TIM_Base_Start(&htim2);
     HAL_TIM_Base_Start_IT(&htim6);
 
     printf("\r\n=========== CAN-FD SINGLE LEG TEST ===========\r\n");
-    printf("bus      : FDCAN1  (PB8 rx / PD1 tx)\r\n");
-#if LEGTEST_USE_CAN_FD
-    printf("framing  : CAN FD, BRS on (1 Mbit arb / 5 Mbit data)\r\n");
-#else
-    printf("framing  : classic CAN 2.0 @ 1 Mbit\r\n");
-#endif
-    printf("nodes    : ");
-    for (int j = 0; j < JOINT_COUNT; j++)
-    {
-        printf("%u=%s ", (unsigned)s_node_id[j], s_joint_name[j]);
-    }
-    printf("\r\n");
-#if LEGTEST_ENABLE_CLOSED_LOOP
-#if LEGTEST_MOTION_GAIT
-    printf("motion   : REFERENCE GAIT, %d samples, %.3f s cycle at %.2fx"
-           " speed\r\n", GAIT_SAMPLES, (double)GAIT_CYCLE_S,
-           (double)LEGTEST_GAIT_SPEED);
-    printf("closed loop: ENABLED - MOTORS WILL MOVE. %u ms ramp from the"
-           " measured pose\r\n             into the trajectory before the phase clock starts.\r\n",
-           (unsigned)LEGTEST_GAIT_ENTRY_MS);
-#else
-    printf("closed loop: ENABLED - MOTORS WILL MOVE. sine %.3f turns @ %.2f Hz\r\n",
-           (double)LEGTEST_AMPLITUDE_TURNS, (double)LEGTEST_FREQ_HZ);
-#endif
-#else
-    printf("closed loop: disabled (safe) - axes stay IDLE, motors cannot move.\r\n");
-    printf("             positions are still transmitted so TX can be verified.\r\n");
-#endif
-    /*
-     * These are a REQUIREMENT printed for the operator, not a readback - the
-     * board has no way to query the drive's config over CAN. Do not read this
-     * block as a report of what the ODrive is doing. What it is actually doing
-     * shows up in the enc=/trq=/hb= counters on the per-second status line:
-     * they are cumulative, so the increment between two lines is the rate in
-     * Hz. 10 ms here is a ceiling, not a target - faster is better and 1 ms is
-     * what the capture wants.
-     */
-    printf("\r\nSET THESE ON THE ODRIVE (this is a reminder, not a readback):\r\n");
-    printf("  axis0.config.can.encoder_msg_rate_ms   <= 10   (1 is better)\r\n");
-    printf("  axis0.config.can.torque_msg_rate_ms    <= 10   (1 is better)\r\n");
-    printf("  axis0.config.can.heartbeat_msg_rate_ms  = 100\r\n");
-    printf("  actual rates = the per-second growth of enc= trq= hb= below\r\n");
-    printf("==============================================\r\n\r\n");
 }
 
-/* ------------------------------------------------------------------ */
-
-/*
- * The CAN controller state, which is what actually explains a silent bus.
- *
- * CAN is a acknowledged protocol: EVERY transmitter needs at least one other
- * node to pull the ACK slot low. A lone node on the wire never gets that, so
- * it retries the same frame forever, its transmit error counter climbs, and at
- * 255 the controller takes itself BUS-OFF and stops entirely.
- *
- * From outside, bus-off looks exactly like a peripheral that was never started
- * - no TX, no RX, and a software queue filling because the hardware FIFO never
- * drains. The Last Error Code tells them apart, and Ack Error is the single
- * most useful value in this whole file: it means we DID transmit and nobody
- * answered.
- */
 static const char *lec_name(uint32_t lec)
 {
     switch (lec)
@@ -1217,13 +1193,13 @@ static void can_status(void)
 
     if (ps.BusOff)
     {
-        /*
-         * Recover, so a bus that comes up later is picked up instead of
-         * needing a reset. Clearing INIT restarts the 128x11 recessive-bit
-         * sequence the standard requires before rejoining.
-         */
-        printf("    -> BUS-OFF: nothing is acknowledging us. Recovering...\r\n");
-        HAL_FDCAN_Start(&hfdcan1);
+        printf("    -> BUS-OFF (event %lu): rejoining\r\n",
+               (unsigned long)s_busoff_count);
+    }
+    else if (s_busoff_count != 0u)
+    {
+        printf("    -> recovered from %lu bus-off event(s) so far\r\n",
+               (unsigned long)s_busoff_count);
     }
 }
 
@@ -1232,13 +1208,6 @@ static void report(void)
     uint32_t now = s_tick;
     int      silent = 0;
 
-    /*
-     * Estimated bus load over the last second. Frames on the wire are what
-     * matter, so count what we successfully sent plus everything received.
-     * This is the number to watch when raising rates: past roughly 50% the
-     * latency of lower-priority frames starts to degrade badly, and past 70%
-     * it becomes effectively unbounded.
-     */
     static uint32_t prev_tx_ok, prev_rx;
 
     uint32_t d_tx = s_tx_ok - prev_tx_ok;
@@ -1246,7 +1215,7 @@ static void report(void)
     prev_tx_ok = s_tx_ok;
     prev_rx    = s_rx_total;
 
-    uint32_t load_pct = ((d_tx + d_rx) * FRAME_US) / 10000u;   /* per second */
+    uint32_t load_pct = ((d_tx + d_rx) * FRAME_US) / 10000u;  
 
     printf("--- t=%lus  tx=%lu rx=%lu (unknown=%lu)  txfail=%lu qdrop=%lu  "
            "bus~%lu%% ---\r\n",
@@ -1260,8 +1229,6 @@ static void report(void)
     for (int j = 0; j < JOINT_COUNT; j++)
     {
         joint_t v;
-
-        /* The ISR writes these, so take a consistent snapshot. */
         uint32_t pm = critical_enter();
         v = *(joint_t *)&s_joint[j];
         critical_exit(pm);
@@ -1286,34 +1253,51 @@ static void report(void)
                    (unsigned)v.axis_state, (unsigned long)v.axis_error,
                    (unsigned long)v.n_heartbeat, (unsigned long)v.n_encoder,
                    (unsigned long)v.n_torque, (double)v.cmd,
-                   /* Command minus measured. A drive that is armed but not
-                      acting on positions sits here at the full command while
-                      torque stays near zero - which is not otherwise obvious. */
                    (double)(v.cmd - v.pos));
         }
     }
 
-    /* Red LED blinks once per silent node; dark when all four answer. */
+#if (MONITOR_COUNT > 0)
+    for (int m = 0; m < MONITOR_COUNT; m++)
+    {
+        joint_t v;
+        uint32_t pm = critical_enter();
+        v = *(joint_t *)&s_mon[m];
+        critical_exit(pm);
+
+        uint8_t alive = ((now - v.last_rx_tick) < NODE_SILENT_TICKS) &&
+                        ((v.n_heartbeat + v.n_encoder + v.n_torque) > 0u);
+
+        /* monitor nodes never set `silent` - they must not gate arming */
+        if (!alive)
+        {
+            printf("  node %u %s : ---- SILENT ----  (hb=%lu enc=%lu trq=%lu)"
+                   "   [monitor]\r\n",
+                   (unsigned)s_mon_node[m], s_mon_name[m],
+                   (unsigned long)v.n_heartbeat, (unsigned long)v.n_encoder,
+                   (unsigned long)v.n_torque);
+        }
+        else
+        {
+            printf("  node %u %s : pos=%+8.4f vel=%+8.3f trq=%+7.3f "
+                   "state=%u err=0x%08lX  hb=%lu enc=%lu trq=%lu   [monitor]\r\n",
+                   (unsigned)s_mon_node[m], s_mon_name[m],
+                   (double)v.pos, (double)v.vel, (double)v.torque,
+                   (unsigned)v.axis_state, (unsigned long)v.axis_error,
+                   (unsigned long)v.n_heartbeat, (unsigned long)v.n_encoder,
+                   (unsigned long)v.n_torque);
+        }
+    }
+#endif
+
     if (silent == 0)
     {
         BSP_LED_Off(LED_RED);
     }
-
     printf("\r\n");
 }
 
 #if LEGTEST_CAPTURE
-/*
- * Print the captured run as CSV, preceded by the number that usually
- * explains it.
- *
- * Peak-to-peak commanded against peak-to-peak measured is the whole tuning
- * signal. If the drive tracked, they match. If it moved a fraction of what
- * was asked, something is clipping - and the CSV shows where in the cycle it
- * stopped keeping up, which distinguishes a velocity limit (fails on the
- * fast sections) from a current limit (fails under load) from a low position
- * gain (lags everywhere, evenly).
- */
 static void cap_dump(void)
 {
     if (s_cap_dumped || (s_cap_n == 0u))
@@ -1322,46 +1306,133 @@ static void cap_dump(void)
     }
     s_cap_dumped = 1;
 
-    float cmd_lo = 1e9f, cmd_hi = -1e9f;
-    float pos_lo = 1e9f, pos_hi = -1e9f;
-    float err_max = 0.0f, trq_max = 0.0f;
-
-    for (uint16_t n = 0; n < s_cap_n; n++)
-    {
-        float c = s_cap[n].cmd, o = s_cap[n].pos;
-        float e = (c > o) ? (c - o) : (o - c);
-        float t = (s_cap[n].trq > 0.0f) ? s_cap[n].trq : -s_cap[n].trq;
-
-        if (c < cmd_lo) { cmd_lo = c; }
-        if (c > cmd_hi) { cmd_hi = c; }
-        if (o < pos_lo) { pos_lo = o; }
-        if (o > pos_hi) { pos_hi = o; }
-        if (e > err_max) { err_max = e; }
-        if (t > trq_max) { trq_max = t; }
-    }
-
-    float cmd_pp = cmd_hi - cmd_lo;
-    float pos_pp = pos_hi - pos_lo;
-
     printf("\r\n===== TRAJECTORY, %u samples at %u Hz =====\r\n",
            (unsigned)s_cap_n, (unsigned)CAPTURE_HZ);
-    printf("commanded travel : %+.4f .. %+.4f turns = %.2f deg\r\n",
-           (double)cmd_lo, (double)cmd_hi, (double)(cmd_pp * 360.0f));
-    printf("achieved  travel : %+.4f .. %+.4f turns = %.2f deg\r\n",
-           (double)pos_lo, (double)pos_hi, (double)(pos_pp * 360.0f));
-    printf("tracking         : %.0f%% of commanded motion\r\n",
-           (double)((cmd_pp > 1e-6f) ? (pos_pp / cmd_pp * 100.0f) : 0.0f));
-    printf("worst error      : %.4f turns (%.2f deg)\r\n",
-           (double)err_max, (double)(err_max * 360.0f));
-    printf("peak torque      : %.3f Nm\r\n\r\n", (double)trq_max);
 
-    printf("t_s,cmd_turns,pos_turns,vel_tps,trq_Nm\r\n");
+    /*
+     * Per-joint summary, in BOTH the drive's turns and output degrees.
+     *
+     * Turns are what went on the wire; degrees are what the leg did. They
+     * differ by s_cmd_scale, which is 47 on the hip while it runs on its
+     * motor-side encoder - so the same "1.8 turns" is 13.8 deg at the hip and
+     * would be 648 deg at the knee. Printing only one of the two is how a
+     * gear-ratio mistake hides.
+     *
+     * "tracking" is achieved travel over commanded travel. It is the single
+     * number that says whether the joint followed the trajectory or merely
+     * received it: a stalled joint still gets perfect commands.
+     */
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (!s_joint_live[j])
+        {
+            printf("  %-9s not on the bus - not commanded, nothing captured\r\n\r\n",
+                   s_joint_name[j]);
+            continue;
+        }
+
+        float cmd_lo = 1e9f, cmd_hi = -1e9f;
+        float pos_lo = 1e9f, pos_hi = -1e9f;
+        float err_max = 0.0f, trq_max = 0.0f;
+        float jump_max = 0.0f;
+        float prev = 0.0f;
+        uint16_t bad = 0, good = 0;
+
+        /*
+         * A dead encoder does not report itself as dead: it reports NaN, or a
+         * number that has jumped somewhere the joint cannot physically have
+         * gone in one millisecond. Both then poison min/max and produce a
+         * tracking figure that looks like a control problem and is not one.
+         *
+         * So: drop the NaNs, and measure the largest single-sample step. If
+         * one step exceeds the whole commanded travel, the joint did not move
+         * that far - the measurement did, and every number below is suspect.
+         */
+        for (uint16_t n = 0; n < s_cap_n; n++)
+        {
+            float c = s_cap[n].cmd[j];
+            float o = s_cap[n].pos[j];
+
+            if (isnan(c) || isnan(o)) { bad++; continue; }
+
+            float e = (c > o) ? (c - o) : (o - c);
+            float t = (s_cap[n].trq[j] > 0.0f) ? s_cap[n].trq[j]
+                                               : -s_cap[n].trq[j];
+
+            if (good != 0u)
+            {
+                float d = (o > prev) ? (o - prev) : (prev - o);
+                if (d > jump_max) { jump_max = d; }
+            }
+            prev = o;
+            good++;
+
+            if (c < cmd_lo) { cmd_lo = c; }
+            if (c > cmd_hi) { cmd_hi = c; }
+            if (o < pos_lo) { pos_lo = o; }
+            if (o > pos_hi) { pos_hi = o; }
+            if (e > err_max) { err_max = e; }
+            if (t > trq_max) { trq_max = t; }
+        }
+
+        if (good == 0u)
+        {
+            printf("  %-9s NO VALID SAMPLES - encoder never reported\r\n\r\n",
+                   s_joint_name[j]);
+            continue;
+        }
+
+        float cmd_pp = cmd_hi - cmd_lo;
+        float pos_pp = pos_hi - pos_lo;
+        float deg    = 360.0f / s_cmd_scale[j];   /* turns -> output degrees */
+        float track  = (cmd_pp > 1e-6f) ? (100.0f * pos_pp / cmd_pp) : 0.0f;
+
+        printf("  %-9s commanded %+.4f .. %+.4f = %.4f turns (%.2f deg out)\r\n",
+               s_joint_name[j], (double)cmd_lo, (double)cmd_hi,
+               (double)cmd_pp, (double)(cmd_pp * deg));
+        printf("  %-9s achieved  %+.4f .. %+.4f = %.4f turns (%.2f deg out)\r\n",
+               "", (double)pos_lo, (double)pos_hi,
+               (double)pos_pp, (double)(pos_pp * deg));
+        printf("  %-9s tracking %.0f%%   worst error %.4f turns (%.2f deg out)"
+               "   peak torque %.3f Nm\r\n",
+               "", (double)track, (double)err_max,
+               (double)(err_max * deg), (double)trq_max);
+
+        if ((bad != 0u) || (jump_max > cmd_pp))
+        {
+            printf("  %-9s !! ENCODER FAULT - %u NaN sample(s), biggest"
+                   " one-tick step %.4f turns (%.2f deg out).\r\n",
+                   "", (unsigned)bad, (double)jump_max,
+                   (double)(jump_max * deg));
+            printf("  %-9s    The joint cannot move that fast. The numbers"
+                   " above are the encoder\r\n"
+                   "  %-9s    dropping out, not the controller missing."
+                   " Fix the encoder first.\r\n",
+                   "", "");
+        }
+        printf("\r\n");
+    }
+
+    printf("t_s");
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (!s_joint_live[j]) { continue; }
+        printf(",%s_cmd,%s_pos,%s_err",
+               s_joint_name[j], s_joint_name[j], s_joint_name[j]);
+    }
+    printf("\r\n");
+
     for (uint16_t n = 0; n < s_cap_n; n++)
     {
-        printf("%.3f,%.5f,%.5f,%.4f,%.4f\r\n",
-               (double)n / (double)CAPTURE_HZ,
-               (double)s_cap[n].cmd, (double)s_cap[n].pos,
-               (double)s_cap[n].vel, (double)s_cap[n].trq);
+        printf("%.3f", (double)n / (double)CAPTURE_HZ);
+        for (int j = 0; j < JOINT_COUNT; j++)
+        {
+            if (!s_joint_live[j]) { continue; }
+            printf(",%.5f,%.5f,%.5f",
+                   (double)s_cap[n].cmd[j], (double)s_cap[n].pos[j],
+                   (double)(s_cap[n].cmd[j] - s_cap[n].pos[j]));
+        }
+        printf("\r\n");
     }
     printf("===== end =====\r\n\r\n");
 }
@@ -1377,9 +1448,6 @@ void legtest_run(void)
 
     for (;;)
     {
-        /* Keep feeding the 3-deep hardware FIFO from the software queue. This
-           runs far more often than once per tick, so a tick's worth of frames
-           reaches the wire well inside that tick. */
         tx_pump();
 
         if (s_tick_pending == 0u)
@@ -1394,53 +1462,26 @@ void legtest_run(void)
         s_tick++;
 
 #if LEGTEST_STOP_BUTTON
-        /* ACTIVE LOW. BSP_PB_Init configures the pin with GPIO_PULLUP, so it
-           reads 1 released and 0 pressed. Testing for non-zero latched the
-           stop at boot on every run - transmitting nothing, never arming, and
-           looking exactly like a dead command path. */
         if (!s_stopped && (BSP_PB_GetState(BUTTON_USER) == 0))
         {
             s_stopped = 1;
             disarm_all();
-
-            printf("\r\n*** STOPPED by user button - axes commanded"
-                   " to IDLE.\r\n    Reset the board to run again. ***\r\n\r\n");
+            printf("\r\n*** STOPPED by user button - axes commanded to IDLE. ***\r\n\r\n");
         }
 #endif
 
 #if LEGTEST_TRACE_RX
-        /* A few frames per tick after the scan. Enough to watch traffic without
-           the console becoming the thing that breaks the timing. */
         if ((s_tick % 200u) == 0u)
         {
             trace_drain(3);
         }
 #endif
 
-        /*
-         * One node per tick, round-robin. Two reasons: the hardware TX FIFO
-         * only holds three frames, and spreading the four commands across four
-         * ticks keeps the bus evenly loaded instead of bursting. Each joint
-         * still gets commanded at 250 Hz, far more than enough to watch a leg
-         * move.
-         */
         float target[JOINT_COUNT] = { 0.0f };
-
-        /*
-         * Feedforward that goes out with the position, per joint.
-         *
-         * These must be the derivative of what target[] is actually DOING,
-         * not of the trajectory in the abstract. Every branch below that sets
-         * target[] therefore sets these too, and the zero initialiser is the
-         * right answer for every branch that holds station - a stationary
-         * setpoint has zero velocity, whatever the table says at that phase.
-         */
         float target_vel[JOINT_COUNT] = { 0.0f };
         float target_trq[JOINT_COUNT] = { 0.0f };
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
-        /* Stay at zero through the arming delay so the leg does not lurch the
-           instant the axes come live. */
         if (s_tick > LEGTEST_ARM_DELAY_MS)
         {
             uint32_t since_arm = s_tick - LEGTEST_ARM_DELAY_MS;
@@ -1460,78 +1501,53 @@ void legtest_run(void)
             if (since_arm == 1u)
             {
                 /*
-                 * Capture where the leg actually is, once, at the moment of
-                 * arming. Every joint must have reported an encoder estimate;
-                 * ramping from an assumed zero towards the trajectory would
-                 * command a jump exactly as large as the assumption is wrong.
+                 * A joint that is not on the bus has no encoder count and
+                 * never will. Requiring one from every joint means a single
+                 * absent drive pins the whole leg in the hold-pose branch
+                 * forever - armed, commanded to stand still, looking healthy.
+                 * Only the joints we are actually driving get a vote.
                  */
-                s_entry_ok = 1;
+                s_entry_ok = 0;
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
+                    s_entry_from[j] = s_joint[j].pos;
+
+                    if (!s_joint_live[j]) { continue; }
+
                     if (s_joint[j].n_encoder == 0u)
                     {
+                        printf("!! %s is on the bus but has sent no encoder"
+                               " data - holding pose.\r\n", s_joint_name[j]);
                         s_entry_ok = 0;
+                        break;
                     }
-                    s_entry_from[j] = s_joint[j].pos;
+                    s_entry_ok = 1;
                 }
 
-                if (!s_entry_ok)
-                {
-                    printf("\r\n!! no encoder estimate from every"
-                           " joint - gait NOT started, holding position\r\n");
-                }
-
+#if LEGTEST_GAIT_RELATIVE
                 if (s_entry_ok)
                 {
-                    /*
-                     * Print the ramp explicitly. It is a move-to-start, not
-                     * part of the trajectory, and a large one means the
-                     * drive s zero and the gait s zero disagree - which is
-                     * the number s_zero_offset exists to absorb.
-                     */
                     float g0[GAIT_JOINTS];
                     gait_sample(0.0f, g0);
 
-                    for (int k = 0; k < JOINT_COUNT; k++)
+                    for (int j = 0; j < JOINT_COUNT; j++)
                     {
-                        float want = joint_cmd(k, g0[s_gait_col[k]]);
-
-                        printf("  %s: at %+.4f, gait starts at %+.4f"
-                               " -> ramp %+.4f turns (%+.1f deg)\r\n",
-                               s_joint_name[k], (double)s_entry_from[k],
-                               (double)want, (double)(want - s_entry_from[k]),
-                               (double)((want - s_entry_from[k]) * 360.0f));
-
-                        printf("     to play the gait around where the leg is"
-                               " now, set s_zero_offset[%d] = %+.4f\r\n",
-                               k, (double)(s_entry_from[k]
-                                           / s_cmd_scale[k]
-                                           - g0[s_gait_col[k]]));
-
-                        /* Sweep the whole cycle to find the travel. Knowing
-                           how far this joint will move BEFORE it moves is
-                           worth four hundred table lookups. */
-                        float lo = 1e9f, hi = -1e9f;
-
-                        for (int s = 0; s < GAIT_SAMPLES; s++)
-                        {
-                            float v = g_gait_turns[s][s_gait_col[k]];
-                            if (v < lo) { lo = v; }
-                            if (v > hi) { hi = v; }
-                        }
-
-                        printf("     travel %+.4f .. %+.4f turns"
-                               " = %.1f deg of output\r\n",
-                               (double)(lo + s_zero_offset[k]),
-                               (double)(hi + s_zero_offset[k]),
-                               (double)((hi - lo) * 360.0f));
+                        s_auto_offset[j] = (s_entry_from[j] / s_cmd_scale[j])
+                                           - g0[s_gait_col[j]]
+                                           - s_zero_offset[j];
                     }
+                }
+#endif
+
+                if (s_entry_ok && !limits_ok(s_entry_from))
+                {
+                    s_entry_ok   = 0;
+                    s_arm_blocked = 1;
                 }
             }
 
             if (!s_entry_ok)
             {
-                /* Hold station at the last measured position. */
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
                     target[j] = s_joint[j].pos;
@@ -1539,13 +1555,29 @@ void legtest_run(void)
             }
             else if (since_arm < LEGTEST_GAIT_ENTRY_MS)
             {
-                /* Straight-line move into the start of the trajectory. */
-                float a = (float)since_arm / (float)LEGTEST_GAIT_ENTRY_MS;
-
-                /* A straight line has one constant velocity: the whole
-                   distance over the whole ramp. The entry deserves the same
-                   feedforward as the gait - it is the move most likely to be
-                   large, and the one where the drive is coldest. */
+                /*
+                 * Straight line from the pose measured at arming to gait
+                 * sample 0.
+                 *
+                 * The setpoint is a function of TIME, deliberately, not of the
+                 * live encoder. A setpoint recomputed from the measurement
+                 * every tick can never build an error larger than one tick's
+                 * step - and error is what a position loop turns into torque,
+                 * so the drive could never be asked for enough force to move a
+                 * joint that is not already moving. It would follow the leg
+                 * around rather than drive it, and would track a droop under
+                 * gravity straight down instead of resisting it.
+                 *
+                 * Being measurement-independent is what lets the error grow
+                 * when the joint lags, which is the whole mechanism by which
+                 * the drive decides to push harder.
+                 *
+                 * A straight line has one constant velocity: the whole
+                 * distance over the whole ramp. The entry deserves the same
+                 * feedforward as the gait - it is the move most likely to be
+                 * large, and the one where the drive is coldest.
+                 */
+                float a      = (float)since_arm / (float)LEGTEST_GAIT_ENTRY_MS;
                 float ramp_s = (float)LEGTEST_GAIT_ENTRY_MS * 0.001f;
 
                 for (int j = 0; j < JOINT_COUNT; j++)
@@ -1558,19 +1590,12 @@ void legtest_run(void)
             }
             else
             {
-                /* Free-running phase clock. gait_sample wraps it, so this can
-                   count up forever without special-casing the seam. */
                 float t = (float)(since_arm - LEGTEST_GAIT_ENTRY_MS) * 0.001f;
 
-                s_gait_running = 1;      /* entry ramp is over; capture now */
+                s_gait_running = 1;      
                 s_gait_phase = (t * LEGTEST_GAIT_SPEED) / GAIT_CYCLE_S;
 
 #if (LEGTEST_GAIT_CYCLES > 0u)
-                /*
-                 * Stop after the requested cycles and hold. Freezing the PHASE
-                 * rather than the output means the hold pose is a real point on
-                 * the trajectory, so resuming later would not step.
-                 */
                 if (s_gait_phase >= (float)LEGTEST_GAIT_CYCLES)
                 {
                     s_gait_phase = (float)LEGTEST_GAIT_CYCLES;
@@ -1580,27 +1605,9 @@ void legtest_run(void)
                         s_gait_done = 1;
 
 #if LEGTEST_GAIT_IDLE_AFTER
-                        /* Disarm BEFORE dumping. cap_dump() prints ~1600 lines
-                           over a 115200 baud console, which takes long enough
-                           that leaving the motor servoing through it would add
-                           two minutes of pointless creeping and heating to
-                           every run. */
                         s_stopped = 1;
                         disarm_all();
-
-                        printf("\r\ngait: %u cycle(s) complete -"
-                               " axes commanded to IDLE\r\n"
-                               "      (motor is now unpowered and the joint is"
-                               " free; reset to run again)\r\n",
-                               (unsigned)LEGTEST_GAIT_CYCLES);
-#else
-                        printf("\r\ngait: %u cycle(s) complete -"
-                               " holding final pose\r\n"
-                               "      (still servoing: it will creep against"
-                               " stiction until reset)\r\n",
-                               (unsigned)LEGTEST_GAIT_CYCLES);
 #endif
-
 #if LEGTEST_CAPTURE
                         cap_dump();
 #endif
@@ -1609,74 +1616,76 @@ void legtest_run(void)
 #endif
 
                 float all_vel[GAIT_JOINTS];
+                float safe_phase;
 
-                gait_sample_vel(s_gait_phase, all, all_vel);
+                if (s_gait_done) {
+                    safe_phase = 1.0f; // Hold the last frame when finished
+                } else {
+                    safe_phase = fmodf(s_gait_phase, 1.0f); // Cleanly loop 0.0 -> 1.0
+                }
 
-                /*
-                 * Two scalings, and both are mandatory.
-                 *
-                 * LEGTEST_GAIT_SPEED, because the phase clock is turning at
-                 * that fraction of nominal and the velocity has to agree with
-                 * the position it accompanies. Feeding unscaled velocity at
-                 * quarter speed would ask for four times the motion the
-                 * setpoint is making, and the drive would run away from a
-                 * setpoint it is simultaneously being told to track.
-                 *
-                 * Zero once the cycles are done, because holding the final
-                 * pose freezes the PHASE, not the table. The trajectory still
-                 * has a velocity at that phase; the command no longer does.
-                 * Sending the table's value there would drive the joint off
-                 * a stationary setpoint for as long as the test is left
-                 * running - a slow push with nothing to stop it.
-                 */
+                gait_sample_vel(safe_phase, all, all_vel);
                 float vscale = s_gait_done ? 0.0f : LEGTEST_GAIT_SPEED;
 
                 for (int j = 0; j < JOINT_COUNT; j++)
                 {
+                    /*
+                     * The trajectory's POSITION, not an integral of its
+                     * velocity seeded from the encoder.
+                     *
+                     * Commanding measured_position + one tick of velocity has
+                     * no absolute reference anywhere in it: the setpoint is a
+                     * function of the measurement with unity gain, so every
+                     * overshoot and every bit of telemetry noise is folded
+                     * straight back into the next command and kept. There is
+                     * no term that pulls it back to where the trajectory says
+                     * the joint should be, so it walks away and never returns.
+                     * The hip, whose delta is multiplied by its 47:1 scaling,
+                     * integrated itself to 64 motor turns against a gait that
+                     * only spans 1.8.
+                     *
+                     * joint_cmd() carries the absolute answer: gait position,
+                     * re-centred once at arming, scaled to the drive's shaft.
+                     */
                     target[j]     = joint_cmd(j, all[s_gait_col[j]]);
                     target_vel[j] = all_vel[s_gait_col[j]] * vscale
                                     * s_cmd_scale[j];
                 }
             }
 #else
+            /* INCREMENTAL MODIFICATION FOR SINE WAVE FALLBACK */
             float t     = (float)since_arm * 0.001f;
             float w     = 2.0f * 3.14159265f * LEGTEST_FREQ_HZ;
             float phase = w * t;
-            float v     = LEGTEST_AMPLITUDE_TURNS * sinf(phase);
             float dv    = LEGTEST_AMPLITUDE_TURNS * w * cosf(phase);
 
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                target[j]     = v;
                 target_vel[j] = dv;
+                float delta_pos = dv * 0.001f;
+
+                target[j]     = s_joint[j].pos + delta_pos; // RELATIVE TO CURRENT
             }
 #endif
         }
 #endif
 
-        /* Once stopped, send nothing further. Commanding IDLE and then
-           continuing to stream positions would leave the drive one stray
-           re-arm away from moving again. */
         if (!s_stopped && ((s_tick % LEGTEST_TX_DIV) == 0u))
         {
 #if (LEGTEST_TX_DIV == 1u)
-            /* Full rate: command every joint on every tick. */
             for (int j = 0; j < JOINT_COUNT; j++)
             {
+                if (!s_joint_live[j]) { continue; }
 #if LEGTEST_VEL_POKE
                 send_input_vel(j, (s_tick > LEGTEST_ARM_DELAY_MS)
                                       ? LEGTEST_VEL_POKE_TURNS_S : 0.0f);
 #else
-                /* The toggles fold at compile time; keeping them here rather
-                   than in the branches above means every regime gets the same
-                   treatment and none can be forgotten when one is added. */
                 send_input_pos(j, target[j],
                                LEGTEST_GAIT_VEL_FF    ? target_vel[j] : 0.0f,
                                LEGTEST_GAIT_TORQUE_FF ? target_trq[j] : 0.0f);
 #endif
             }
 #else
-            /* Reduced rate: one joint per tick, round-robin. */
 #if LEGTEST_VEL_POKE
             send_input_vel(tx_slot, (s_tick > LEGTEST_ARM_DELAY_MS)
                                         ? LEGTEST_VEL_POKE_TURNS_S : 0.0f);
@@ -1690,68 +1699,38 @@ void legtest_run(void)
         }
 
 #if LEGTEST_CAPTURE
-        /* Sample joint 0 at CAPTURE_HZ. Only while the axis is live - before
-           arming there is nothing to compare. */
-        /*
-         * Only while the GAIT is playing. Capturing the entry ramp too made
-         * the summary meaningless: it compared the measured travel of
-         * ramp+gait against the commanded range of the gait alone, and
-         * reported "249% tracking" for a leg that was following properly.
-         */
         if ((s_cap_n < CAPTURE_MAX) && s_gait_running &&
             (s_joint[0].axis_state == ODRV_AXIS_STATE_CLOSED_LOOP) &&
             ((s_tick % (1000u / CAPTURE_HZ)) == 0u))
         {
-            s_cap[s_cap_n].cmd = s_joint[0].cmd;
-            s_cap[s_cap_n].pos = s_joint[0].pos;
-            s_cap[s_cap_n].vel = s_joint[0].vel;
-            s_cap[s_cap_n].trq = s_joint[0].torque;
+            for (int j = 0; j < JOINT_COUNT; j++)
+            {
+                s_cap[s_cap_n].cmd[j] = s_joint[j].cmd;
+                s_cap[s_cap_n].pos[j] = s_joint[j].pos;
+                s_cap[s_cap_n].trq[j] = s_joint[j].torque;
+            }
             s_cap_n++;
         }
 #endif
 
-
 #if LEGTEST_ENABLE_CLOSED_LOOP
-        /* Countdown, so a reset never energises motors without warning. */
         if ((s_tick <= LEGTEST_ARM_DELAY_MS) && ((s_tick % 1000u) == 0u))
         {
             printf("*** ARMING in %lu s - motors will become live ***\r\n",
                    (unsigned long)((LEGTEST_ARM_DELAY_MS - s_tick) / 1000u));
         }
 
-        /*
-         * Re-assert closed loop every 2 s. An ODrive that trips into IDLE on a
-         * fault would otherwise sit there silently ignoring position commands,
-         * and the leg would look "dead" for no visible reason.
-         *
-         * Only re-arm an axis reporting no error: repeatedly forcing a faulted
-         * axis back into closed loop fights whatever protection tripped it,
-         * which is exactly the wrong response to a real fault.
-         */
-        /* s_scan_ok gates this. If a configured node never answered during the
-           scan, the bus is not what we think it is, and arming a drive we
-           cannot hear back from is the one thing not worth risking. */
-        if (!s_stopped && s_scan_ok && (s_tick > LEGTEST_ARM_DELAY_MS) &&
-            ((s_tick % 2000u) == 500u))
+        if (!s_stopped && s_scan_ok && !s_arm_blocked &&
+            (s_tick > LEGTEST_ARM_DELAY_MS) && ((s_tick % 2000u) == 500u))
         {
             for (int j = 0; j < JOINT_COUNT; j++)
             {
-                if ((s_joint[j].axis_state != ODRV_AXIS_STATE_CLOSED_LOOP) &&
+                if (s_joint_live[j] &&
+                    (s_joint[j].axis_state != ODRV_AXIS_STATE_CLOSED_LOOP) &&
                     (s_joint[j].axis_error == 0u) &&
                     (s_joint[j].n_heartbeat > 0u))
                 {
-                    printf("arming node %u (%s): position control,"
-                           " passthrough, then closed loop\r\n",
-                           (unsigned)s_node_id[j], s_joint_name[j]);
-
-                    /*
-                     * Mode BEFORE state. Set_Input_Pos only means anything
-                     * in POSITION control with PASSTHROUGH input; in any
-                     * other mode the drive accepts every frame, produces no
-                     * torque, and sits armed and still while all the
-                     * counters look perfect. Arming first would energise it
-                     * into whatever odrivetool last saved.
-                     */
+                    send_gains(j);
                     send_controller_mode(j);
                     send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                 }
@@ -1759,7 +1738,6 @@ void legtest_run(void)
         }
 #endif
 
-        /* Green heartbeat at 1 Hz - proves the loop itself is alive. */
         if (++beat >= 500u)
         {
             beat = 0;
@@ -1771,8 +1749,6 @@ void legtest_run(void)
             report_tick = 0;
             report();
 
-            /* The report blocks for several ms on the UART; drop the tick
-               backlog it created rather than letting it skew the next cycle. */
             pm = critical_enter();
             s_tick_pending = 0;
             critical_exit(pm);
