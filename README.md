@@ -206,6 +206,11 @@ covers today:
 | `test_fusion` | the sensor-to-filter bridge |
 | `test_robot_config` | spring deflection, sensor-zero wrap-around, calibration flag |
 | `test_watchdog` | start, refresh, and the stopped-clock case |
+| `test_lie_group` | rotations stay rotations, and the Gamma coefficients against a double-precision reference |
+| `test_kinematics` | leg geometry, reach limits, and that the Jacobian predicts what the FK actually does |
+| `test_health` | fault thresholds, which subsystem is blamed, latching, and the blink code |
+| `test_gait_ref` | phase wrap, interpolation, the seam, and the two documented table steps |
+| `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
 | `check_proto.py` | that `link_proto.h` and `nexus_proto.py` agree byte for byte |
 
 The App sources are built against a stub HAL in `tools/hosttest/stub/`, so a
@@ -223,7 +228,20 @@ They disagree. GCC rejects a packed-member access that clang accepts silently,
 and on macOS `gcc` is Apple clang under another name - so a green local run
 there says less than it appears to. CI runs both.
 
-Not covered yet: `inekf`, `lie_group`, `kinematics`, `gait_ref`, `health`.
+Not covered yet: `act_odrive`, `app`, `enc_as5048a`, `imu_bno085`, `link_usb` -
+all of which talk to hardware, so testing them on a host means building a stub
+for the peripheral first, as `tools/hosttest/stub/` does for the HAL.
+
+**When a test fails, work out which of the two is wrong before changing
+either.** Several of these suites failed on their first run and the code turned
+out to be right - a mask that was `0xFF` where the code wanted `0x0F`, a
+tolerance coarser than the effect it was meant to catch, an assertion that the
+documentation was right when it was not. A test bent until it passes is worse
+than no test.
+
+**Check a mutation actually built.** Breaking a line often leaves a variable
+unused, which fails under `-Werror`; a harness that counts only failed
+assertions reads that as "the mutation survived".
 
 ---
 
