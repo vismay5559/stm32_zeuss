@@ -223,9 +223,17 @@ void lg_gamma3(inekf_real_t *G, const inekf_real_t *phi)
         blend(G, S, S2, 1.0f / 6.0f, 1.0f / 24.0f, 1.0f / 120.0f);
         return;
     }
+    /*
+     * The S^2 coefficient is (sin - th + th^3/6), not (th - sin - th^3/6):
+     * both are th^5/120 in magnitude, but only the first has the sign the
+     * series Gamma_m = sum_n S^n/(n+m)! requires. Written the other way it
+     * agreed with the small-angle branch in size and opposed it in sign, so
+     * the S^2 term was subtracted instead of added for every rotation above
+     * the cutoff - which is every rotation the robot actually makes.
+     */
     blend(G, S, S2, 1.0f / 6.0f,
           (th2 * 0.5f - 1.0f + cosf(th)) / (th2 * th2),
-          (th - sinf(th) - th2 * th / 6.0f) / (th2 * th2 * th));
+          (sinf(th) - th + th2 * th / 6.0f) / (th2 * th2 * th));
 }
 
 /* --------------------------------------------------------------------- */
