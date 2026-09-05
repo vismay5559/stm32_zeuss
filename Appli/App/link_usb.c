@@ -1,4 +1,5 @@
 #include "link_usb.h"
+#include "dma_buffer.h"
 #include "critical.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
@@ -10,22 +11,9 @@ extern USBD_HandleTypeDef hUsbDeviceHS;
 
 /*
  * The OTG_HS core has its own DMA master, so every buffer it touches must live
- * outside the D-cache. The generated CDC buffers are in normal cached RAM, so
- * both directions are redirected here instead.
+ * outside the D-cache - see dma_buffer.h. The generated CDC buffers are in
+ * normal cached RAM, so both directions are redirected here instead.
  */
-/*
- * The section placement is a property of THIS linker script, and a host
- * compiler has no such section - mach-o rejects the name outright. The
- * alignment is kept either way, so the host build lays the buffers out the
- * same; only the placement, which exists for the board's cache, is dropped.
- * The target branch below is unchanged.
- */
-#ifdef NEXUS_HOSTTEST
-#define NEXUS_DMA_BUFFER  __attribute__((aligned(32)))
-#else
-#define NEXUS_DMA_BUFFER  __attribute__((section("noncacheable_buffer"), aligned(32)))
-#endif
-
 static uint8_t s_rx_dma[LINK_RX_DMA_SIZE] NEXUS_DMA_BUFFER;
 static uint8_t s_tx_dma[sizeof(nexus_state_t)] NEXUS_DMA_BUFFER;
 

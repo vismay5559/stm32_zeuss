@@ -213,6 +213,7 @@ covers today:
 | `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
 | `test_link_usb` | frame reassembly across any split, checksum rejection, and the busy-cable drop |
 | `test_act_odrive` | the interpolated ramp, the speed-hint clamp, arm and stop, a blocked wire, and where a reply is filed |
+| `test_enc_as5048a` | the check digit over every bit position, a sensor's own error flag, and a read that never comes back |
 | `check_proto.py` | that `link_proto.h` and `nexus_proto.py` agree byte for byte |
 
 The App sources are built against a stub HAL in `tools/hosttest/stub/`, so a
@@ -240,9 +241,12 @@ It has caught things a local run could not - a `?:` whose branches are `unsigned
 int`, narrowed to a `uint8_t` on return, which GCC rejects and clang does not
 mention.
 
-Not covered yet: `app`, `enc_as5048a`, `imu_bno085` - all of which talk to
-hardware, so testing them on a host means building a stub for the peripheral
-first, as `tools/hosttest/stub/` does for the HAL, USB and CAN.
+Not covered yet: `imu_bno085`, which needs a stub for its UART, and `app`,
+whose loop body sits inside a `for (;;)` and cannot be run one pass at a time
+without restructuring it - a bigger change than a test should make on its own.
+
+The other peripherals are stubbed in `tools/hosttest/stub/`: the HAL, USB, CAN
+and SPI.
 
 Note the host build adds `-Wconversion`, which the firmware build does not, so
 a file compiled here is held to a slightly stricter standard than one that only
