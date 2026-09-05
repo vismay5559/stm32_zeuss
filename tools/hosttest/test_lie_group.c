@@ -129,75 +129,139 @@ static void test_quarter_turn_about_z(void)
 
 /* ---- the two branches must meet ------------------------------------ */
 
-static void test_small_angle_branches_agree(void)
+/*
+ * For phi along z the three coefficients can be read straight back out of the
+ * matrix: G = a I + b S + c S^2, and with phi = (0,0,th) that gives
+ * G[8] = a, G[1] = -b*th, G[0] = a - c*th^2.
+ */
+static void split_coeffs(void (*fn)(inekf_real_t *, const inekf_real_t *),
+                         inekf_real_t th,
+                         inekf_real_t *a_out, inekf_real_t *b_out, inekf_real_t *c_out)
 {
-    printf("the small-angle and general forms agree either side of the cutoff\n");
+    const inekf_real_t phi[3] = { 0.0f, 0.0f, th };
+    inekf_real_t G[9];
+    fn(G, phi);
+    *a_out = G[8];
+    *b_out = -G[1] / th;
+    *c_out = (G[8] - G[0]) / (th * th);
+}
+
+static void test_branches_agree_at_the_crossover(void)
+{
+    printf("the series and closed-form branches agree where they meet\n");
 
     /*
-     * LG_EPS is 1e-4f. Straddle it: just under takes the small-angle branch,
-     * just over takes the general one, and the two must describe the same
-     * rotation or the result jumps as the robot slows.
-     *
-     * gamma3 is deliberately NOT checked here. Its general form is not usable
-     * anywhere near this cutoff in single precision - see
-     * test_gamma3_general_form_is_unusable_near_the_cutoff below - so
-     * asserting agreement would be asserting something false. gamma0, gamma1
-     * and gamma2 do meet cleanly, and this pins that.
+     * LG_SERIES_MAX is 1.0f: just under takes the series, just over the closed
+     * form. Compare the COEFFICIENTS rather than the matrices - the matrices
+     * also differ because the rotation itself is 0.002 rad larger on one side,
+     * which would swamp the thing being measured.
      */
-    const inekf_real_t below = 9.0e-5f;
-    const inekf_real_t above = 1.1e-4f;
-
-    inekf_real_t lo[3] = { 0.0f, 0.0f, below };
-    inekf_real_t hi[3] = { 0.0f, 0.0f, above };
-
     struct { const char *name; void (*fn)(inekf_real_t *, const inekf_real_t *); }
-    gammas[3] = {
-        { "gamma0", lg_gamma0 },
-        { "gamma1", lg_gamma1 },
-        { "gamma2", lg_gamma2 },
+    gammas[4] = {
+        { "gamma0", lg_gamma0 }, { "gamma1", lg_gamma1 },
+        { "gamma2", lg_gamma2 }, { "gamma3", lg_gamma3 },
     };
 
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
     {
-        inekf_real_t A[9], B[9];
-        gammas[i].fn(A, lo);
-        gammas[i].fn(B, hi);
-        CHECK(mats_close(A, B, LOOSE),
-              "%s jumps across the small-angle cutoff", gammas[i].name);
+        inekf_real_t a_lo, b_lo, c_lo, a_hi, b_hi, c_hi;
+        split_coeffs(gammas[i].fn, 0.999f, &a_lo, &b_lo, &c_lo);
+        split_coeffs(gammas[i].fn, 1.001f, &a_hi, &b_hi, &c_hi);
+
+        CHECK(close_to(b_lo, b_hi, 1e-3f),
+              "%s S term steps at the crossover: %f -> %f",
+              gammas[i].name, (double)b_lo, (double)b_hi);
+        CHECK(close_to(c_lo, c_hi, 1e-3f),
+              "%s S^2 term steps at the crossover: %f -> %f",
+              gammas[i].name, (double)c_lo, (double)c_hi);
     }
 }
 
-static void test_gamma3_general_form_is_unusable_near_the_cutoff(void)
+static void test_coefficients_match_a_high_precision_reference(void)
 {
-    printf("gamma3's general form is still wrong just above the cutoff (known)\n");
+    printf("the coefficients match a double-precision reference, both sides\n");
 
     /*
-     * A KNOWN DEFECT, PINNED HERE ON PURPOSE.
+     * Reference values computed in double at two rotations: 0.5 rad exercises
+     * the series branch, 1.5 rad the closed form. Both are far enough from
+     * zero that the double closed form is itself trustworthy - below about
+     * 1e-3 even double cancels, which is why no reference is quoted there.
      *
-     * gamma3's S^2 coefficient is (sin th - th + th^3/6) / th^5. Every term in
-     * that numerator very nearly cancels, and what survives is divided by
-     * th^5, so in single precision the answer is meaningless until th is
-     * around a tenth of a radian. Just above the 1e-4 cutoff it is out by
-     * roughly nine orders of magnitude.
-     *
-     * The robot never turns that fast. phi is the turn taken in one tick, so
-     * even 10 rad/s gives 0.01 rad - still far inside the broken range. The
-     * general branch is therefore the one used in normal operation, and it is
-     * the branch that does not work.
-     *
-     * This test asserts the defect rather than the fix, so it will FAIL - and
-     * demand attention - the moment someone raises the cutoff or reformulates
-     * the coefficient. Delete it then.
+     * These are the numbers the whole file exists to produce. Before the
+     * series was widened, gamma3's c at 0.5 rad came out of the f32 closed
+     * form as -0.0035 against a true 0.008284 - wrong sign, wrong size.
      */
-    const inekf_real_t phi[3] = { 0.0f, 0.0f, 1.1e-4f };
-    inekf_real_t G[9];
-    lg_gamma3(G, phi);
+    struct { inekf_real_t th; const char *name;
+             void (*fn)(inekf_real_t *, const inekf_real_t *);
+             inekf_real_t a, b, c; } cases[8] = {
+        { 0.5f, "gamma0", lg_gamma0, 1.0f,        0.958851077f, 0.489669752f },
+        { 0.5f, "gamma1", lg_gamma1, 1.0f,        0.489669752f, 0.164595691f },
+        { 0.5f, "gamma2", lg_gamma2, 0.5f,        0.164595691f, 0.041320990f },
+        { 0.5f, "gamma3", lg_gamma3, 1.0f / 6.0f, 0.041320990f, 0.008283902f },
+        { 1.5f, "gamma0", lg_gamma0, 1.0f,        0.664996658f, 0.413005688f },
+        { 1.5f, "gamma1", lg_gamma1, 1.0f,        0.413005688f, 0.148890374f },
+        { 1.5f, "gamma2", lg_gamma2, 0.5f,        0.148890374f, 0.038664139f },
+        { 1.5f, "gamma3", lg_gamma3, 1.0f / 6.0f, 0.038664139f, 0.007900574f },
+    };
 
-    /* The true value of the S^2 coefficient is 1/120, so a correct gamma3
-       would leave the diagonal at 1/6 and the off-diagonal terms tiny. */
-    CHECK(!close_to(G[0], 1.0f / 6.0f, 1e-2f),
-          "gamma3 near the cutoff now looks correct (%f) - if the cutoff was "
-          "fixed, delete this test", (double)G[0]);
+    for (int i = 0; i < 8; i++)
+    {
+        inekf_real_t a, b, c;
+        split_coeffs(cases[i].fn, cases[i].th, &a, &b, &c);
+
+        CHECK(close_to(a, cases[i].a, 1e-5f),
+              "%s at %.1f: constant term %f, expected %f",
+              cases[i].name, (double)cases[i].th, (double)a, (double)cases[i].a);
+        CHECK(close_to(b, cases[i].b, 1e-4f),
+              "%s at %.1f: S term %f, expected %f",
+              cases[i].name, (double)cases[i].th, (double)b, (double)cases[i].b);
+        CHECK(close_to(c, cases[i].c, 1e-4f),
+              "%s at %.1f: S^2 term %f, expected %f",
+              cases[i].name, (double)cases[i].th, (double)c, (double)cases[i].c);
+    }
+}
+
+static void test_coefficients_hold_across_the_working_range(void)
+{
+    printf("the S^2 terms stay right across the turn rates that can be probed\n");
+
+    /*
+     * phi is the rotation taken in ONE tick, so at 1 kHz these span roughly
+     * 50 to 500 rad/s. This is the range that used to be served by the
+     * closed-form branch, where gamma3's S^2 term was out by orders of
+     * magnitude.
+     *
+     * The range does not go lower because it cannot be measured from here,
+     * not because it is untested. The S^2 term contributes c * th^2 to the
+     * matrix; below about 6e-3 rad that is smaller than one ulp of the
+     * constant term, so it cannot be read back out - and by the same token it
+     * cannot affect the result either. The reference test above pins the
+     * formula itself, which is what carries the correctness down to zero.
+     */
+    const inekf_real_t ths[4] = { 0.05f, 0.1f, 0.3f, 0.5f };
+
+    struct { const char *name; void (*fn)(inekf_real_t *, const inekf_real_t *);
+             inekf_real_t c0; } cases[3] = {
+        { "gamma1", lg_gamma1, 1.0f / 6.0f   },
+        { "gamma2", lg_gamma2, 1.0f / 24.0f  },
+        { "gamma3", lg_gamma3, 1.0f / 120.0f },
+    };
+
+    for (int i = 0; i < 4; i++)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            inekf_real_t a, b, c;
+            split_coeffs(cases[k].fn, ths[i], &a, &b, &c);
+
+            /* The S^2 term falls away from its zero-rotation value slowly -
+               by th^2/(something) - so a few percent at half a radian is
+               expected. Orders of magnitude are not. */
+            CHECK(c > cases[k].c0 * 0.9f && c < cases[k].c0 * 1.05f,
+                  "%s S^2 at th=%g is %f, expected near %f",
+                  cases[k].name, (double)ths[i], (double)c, (double)cases[k].c0);
+        }
+    }
 }
 
 static void test_zero_rotation_is_identity(void)
@@ -343,8 +407,9 @@ int main(void)
 
     test_rotation_is_a_rotation();
     test_quarter_turn_about_z();
-    test_small_angle_branches_agree();
-    test_gamma3_general_form_is_unusable_near_the_cutoff();
+    test_branches_agree_at_the_crossover();
+    test_coefficients_match_a_high_precision_reference();
+    test_coefficients_hold_across_the_working_range();
     test_zero_rotation_is_identity();
     test_skew_is_cross_product();
     test_transpose_and_multiply_variants();

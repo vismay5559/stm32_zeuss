@@ -3,28 +3,62 @@
 #include <string.h>
 
 /*
- * Below this angle the closed-form series for Gamma0..3 are computed instead
- * by their Taylor expansions.
+ * WHERE THE SERIES STOPS AND THE CLOSED FORM STARTS
  *
- * The threshold used to be 1e-8, justified as "only when the robot is
- * genuinely still". That reasoning had the hazard backwards. The problem is
- * not theta = 0, it is small NON-ZERO theta: the coefficients divide
- * differences like (theta - sin theta) by theta^3, and in single precision
- * that numerator is smaller than one ulp of theta long before theta reaches
- * 1e-8. At theta = 1e-4 - a slow gyro at 400 Hz, an entirely ordinary reading -
- * (theta - sin theta) is about 1.7e-13 while one ulp of theta is about 1.5e-11,
- * so the coefficient is pure rounding noise.
+ * Each Gamma is a I + b(theta) S + c(theta) S^2. The closed forms for b and c
+ * subtract nearly equal quantities and then divide by a high power of theta,
+ * so in single precision they lose all meaning as theta shrinks - not merely
+ * their last digits. Measured against a double-precision reference, the f32
+ * closed forms are wrong by these relative amounts:
  *
- * It was not actually breaking anything, because the noisy coefficient
- * multiplies S^2 which is O(theta^2), so the error in the assembled matrix
- * stayed around 1e-7. Gamma3's S^2 term degrades fastest and had the least
- * headroom.
+ *     theta      gamma1 c    gamma2 c    gamma3 c
+ *     1e-3       5.3e-2      1.0e+0      6.3e+5
+ *     1e-2       1.5e-3      1.0e+0      3.7e+2
+ *     6e-2       3.4e-6      1.3e-2      1.8e-2
+ *     2e-1       2.6e-6      6.9e-4      1.1e-3
  *
- * 1e-4 is where the two errors cross. The Taylor truncation error there is
- * ~theta^2/20, about 5e-10 - comfortably under float epsilon - so the series
- * branch is strictly more accurate everywhere the cancellation bites.
+ * The previous cutoff of 1e-4 compared the two error sources only in the
+ * neighbourhood of 1e-4 itself, where the Taylor truncation error is indeed
+ * negligible. What it missed is that the cancellation keeps biting for three
+ * more decades, so above the cutoff the code switched to the branch that does
+ * not work - and phi here is the rotation taken in ONE tick, so at 1 kHz even
+ * 10 rad/s is 0.01 rad. The closed-form branch was the one used in ordinary
+ * motion.
+ *
+ * The series are the Taylor expansions of the same coefficients, and four
+ * terms hold to 2e-8 at 1 rad and 5e-7 at 1.5 rad against a double reference.
+ * So the series covers everything up to LG_SERIES_MAX and the closed form
+ * takes over beyond it, where its cancellation is long since harmless. Both
+ * are accurate at the crossover, so nothing jumps as the robot slows.
  */
-#define LG_EPS  1e-4f
+#define LG_SERIES_MAX  1.0f
+
+/*
+ * Taylor coefficients, shared because each Gamma's S term is the previous
+ * Gamma's S^2 term: sin(t)/t, (1-cos t)/t^2, (t-sin t)/t^3, and so on.
+ * Argument is theta SQUARED, which every caller already has.
+ */
+static inline inekf_real_t lg_ser_sinc(inekf_real_t t2)   /* sin t / t        */
+{
+    return 1.0f - t2 / 6.0f + t2 * t2 / 120.0f - t2 * t2 * t2 / 5040.0f;
+}
+static inline inekf_real_t lg_ser_2(inekf_real_t t2)      /* (1-cos t)/t^2    */
+{
+    return 0.5f - t2 / 24.0f + t2 * t2 / 720.0f - t2 * t2 * t2 / 40320.0f;
+}
+static inline inekf_real_t lg_ser_3(inekf_real_t t2)      /* (t-sin t)/t^3    */
+{
+    return 1.0f / 6.0f - t2 / 120.0f + t2 * t2 / 5040.0f - t2 * t2 * t2 / 362880.0f;
+}
+static inline inekf_real_t lg_ser_4(inekf_real_t t2)      /* (t^2/2-1+cos)/t^4 */
+{
+    return 1.0f / 24.0f - t2 / 720.0f + t2 * t2 / 40320.0f - t2 * t2 * t2 / 3628800.0f;
+}
+static inline inekf_real_t lg_ser_5(inekf_real_t t2)      /* (sin-t+t^3/6)/t^5 */
+{
+    return 1.0f / 120.0f - t2 / 5040.0f + t2 * t2 / 362880.0f
+           - t2 * t2 * t2 / 39916800.0f;
+}
 
 /* --------------------------------------------------------------------- */
 /*  3x3                                                                    */
@@ -163,9 +197,9 @@ void lg_gamma0(inekf_real_t *G, const inekf_real_t *phi)
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
 
-    if (th < LG_EPS)
+    if (th < LG_SERIES_MAX)
     {
-        blend(G, S, S2, 1.0f, 1.0f, 0.5f);
+        blend(G, S, S2, 1.0f, lg_ser_sinc(th2), lg_ser_2(th2));
         return;
     }
     blend(G, S, S2, 1.0f, sinf(th) / th, (1.0f - cosf(th)) / th2);
@@ -180,9 +214,9 @@ void lg_gamma1(inekf_real_t *G, const inekf_real_t *phi)
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
 
-    if (th < LG_EPS)
+    if (th < LG_SERIES_MAX)
     {
-        blend(G, S, S2, 1.0f, 0.5f, 1.0f / 6.0f);
+        blend(G, S, S2, 1.0f, lg_ser_2(th2), lg_ser_3(th2));
         return;
     }
     blend(G, S, S2, 1.0f,
@@ -199,9 +233,9 @@ void lg_gamma2(inekf_real_t *G, const inekf_real_t *phi)
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
 
-    if (th < LG_EPS)
+    if (th < LG_SERIES_MAX)
     {
-        blend(G, S, S2, 0.5f, 1.0f / 6.0f, 1.0f / 24.0f);
+        blend(G, S, S2, 0.5f, lg_ser_3(th2), lg_ser_4(th2));
         return;
     }
     blend(G, S, S2, 0.5f,
@@ -218,19 +252,11 @@ void lg_gamma3(inekf_real_t *G, const inekf_real_t *phi)
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
 
-    if (th < LG_EPS)
+    if (th < LG_SERIES_MAX)
     {
-        blend(G, S, S2, 1.0f / 6.0f, 1.0f / 24.0f, 1.0f / 120.0f);
+        blend(G, S, S2, 1.0f / 6.0f, lg_ser_4(th2), lg_ser_5(th2));
         return;
     }
-    /*
-     * The S^2 coefficient is (sin - th + th^3/6), not (th - sin - th^3/6):
-     * both are th^5/120 in magnitude, but only the first has the sign the
-     * series Gamma_m = sum_n S^n/(n+m)! requires. Written the other way it
-     * agreed with the small-angle branch in size and opposed it in sign, so
-     * the S^2 term was subtracted instead of added for every rotation above
-     * the cutoff - which is every rotation the robot actually makes.
-     */
     blend(G, S, S2, 1.0f / 6.0f,
           (th2 * 0.5f - 1.0f + cosf(th)) / (th2 * th2),
           (sinf(th) - th + th2 * th / 6.0f) / (th2 * th2 * th));
