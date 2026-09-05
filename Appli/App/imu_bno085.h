@@ -33,6 +33,7 @@ typedef struct
     uint32_t quat_seq;
 } imu_sample_t;
 
+/* Start the movement sensor up. Call once at startup. */
 void imu_init(void);
 
 /*
@@ -60,10 +61,24 @@ void imu_init(void);
  *
  * Returns 1 while a recovery is in progress, 0 when idle or finished.
  */
+/*
+ * Nudge a jammed movement sensor one step closer to working again. Call
+ * repeatedly while the robot is NOT moving; returns 1 once the sensor is back.
+ *
+ * The full wake-up takes the best part of a second, which is far too long to
+ * do in one go - the robot would miss hundreds of heartbeats and reset
+ * itself. So it is broken into small steps spread across many heartbeats.
+ * Only done while the motors are off, because it is not work to be doing
+ * while the robot is standing.
+ */
 uint8_t imu_recover_step(void);
 
 /* Recovery sequences started since boot. Non-zero means the sensor has been
    wedging in flight, which is worth knowing even after it comes back. */
+/*
+ * How many times the sensor has had to be revived. Should be zero. Climbing
+ * means the sensor keeps jamming, which is a hardware or wiring problem.
+ */
 uint32_t imu_recoveries(void);
 
 /*
@@ -75,6 +90,7 @@ uint32_t imu_recoveries(void);
  * forever, which looks exactly like a wiring fault. Calling this periodically
  * while no samples are arriving removes boot order from the list of suspects.
  */
+/* Ask the sensor to start sending readings, and how often. */
 void imu_request_reports(void);
 
 /*
@@ -83,6 +99,7 @@ void imu_request_reports(void);
  * corrupts everything: if even this is rejected, the contents were never the
  * problem.
  */
+/* Ask the sensor to identify itself - a simple "are you there?" check. */
 void imu_request_product_id(void);
 
 /*
@@ -93,6 +110,7 @@ void imu_request_product_id(void);
  * does in firmware what pulling the RST pin low does in hardware, so no extra
  * wire is needed. imu_init() calls it at startup.
  */
+/* Ask the sensor to restart itself, without cutting its power. */
 void imu_soft_reset(void);
 
 /*
@@ -104,15 +122,44 @@ void imu_soft_reset(void);
  * would fix it. A run of delimiters closes the phantom frame. Harmless if the
  * parser was already idle.
  */
+/*
+ * Recover from being out of step with the sensor's messages.
+ *
+ * The sensor sends a continuous stream, and if the board loses its place in
+ * it, everything after that reads as nonsense. This finds the start of a
+ * message again.
+ */
 void imu_resync(void);
+/*
+ * Deal with anything the sensor has sent. Call often - much more than once
+ * per heartbeat - so readings are picked up promptly rather than piling up.
+ */
 void imu_service(void);
+/*
+ * Copy out the newest reading: turning rate, acceleration, and the sensor's
+ * own opinion of which way up it is.
+ *
+ * Each part carries a number that counts up every time it is refreshed. If
+ * that number has not moved since last time, this is the same reading you
+ * already had - not a new one that happens to look similar. The estimator
+ * relies on that to avoid counting one measurement twice.
+ */
 void imu_get(imu_sample_t *out);
+/*
+ * The hardware calls this by itself when bytes arrive from the sensor.
+ * Nothing else should call it.
+ */
 void imu_on_rx_event(uint16_t size);
+/* How many times data has arrived from the sensor. Stops climbing if the
+   sensor goes silent. */
 uint32_t imu_rx_events(void);
 
 /* Diagnostics: raw bytes off the UART, and valid SHTP frames parsed out of
    them. Together they separate a wiring fault from a protocol fault. */
+/* How much data has arrived from the sensor in total. */
 uint32_t imu_rx_bytes(void);
+/* How many complete, well-formed messages have been decoded. Data arriving
+   while this stays flat means the stream is arriving but unreadable. */
 uint32_t imu_frames(void);
 
 /*
@@ -131,10 +178,13 @@ typedef struct
     uint32_t errors;        /* UART errors recovered from                       */
 } imu_diag_t;
 
+/* Copy out a bundle of internal counters, for diagnosing a sensor that is
+   behaving oddly. */
 void imu_diag(imu_diag_t *out);
 
 /* UART errors seen and recovered from. A steady rate here means the bytes are
    arriving corrupted - wrong baud, or a link that cannot carry 3 Mbaud. */
+/* How many communication errors have happened. */
 uint32_t imu_errors(void);
 
 /*
@@ -144,6 +194,11 @@ uint32_t imu_errors(void);
  *   AA AA ...   UART-RVC, the sensor is in the wrong mode
  *   noise       baud mismatch - nothing downstream can ever parse it
  */
+/*
+ * Copy out the raw bytes most recently received, exactly as they arrived.
+ * For when a message will not decode and you need to see what actually came
+ * in rather than what was expected. Returns how many bytes were copied.
+ */
 uint16_t imu_snapshot(uint8_t *out, uint16_t max);
 
 /*
@@ -151,11 +206,18 @@ uint16_t imu_snapshot(uint8_t *out, uint16_t max);
  * 2 control, 3 input reports. Channel 2 traffic proves SET_FEATURE was heard;
  * channel 3 is the sensor data itself.
  */
+/*
+ * How many messages have arrived on one of the sensor's separate streams.
+ * The sensor keeps readings, replies and status notices apart, so this shows
+ * which kinds are flowing and which are not.
+ */
 uint16_t imu_channel_frames(uint8_t ch);
 
 /* Report ID of the last control-channel reply. 0xF8 = Product ID response,
    0xFC = Get Feature response. Either proves a command was understood, not
    merely received. */
+/* What the sensor last answered to a request - did it accept the setting or
+   refuse it. */
 uint8_t imu_last_control_response(void);
 
 /* The sensor sends an advertisement on channel 0 once after every reset. It is
@@ -163,35 +225,63 @@ uint8_t imu_last_control_response(void);
    discarded with no error, which looks exactly like a dead sensor. */
 /* Reports actually decoded, per type. The frame count sums three separate
    streams and so overstates every one of them; these are the real rates. */
+/*
+ * How many readings of each kind have arrived: orientation, acceleration and
+ * turning rate, counted separately.
+ *
+ * These should climb together. One of them stuck while the others move means
+ * the sensor has stopped producing that particular measurement, which is a
+ * different fault from the sensor being silent altogether.
+ */
 void imu_report_counts(uint32_t *rv, uint32_t *accel, uint32_t *gyro);
 
+/* Whether the sensor has introduced itself, which it does once after
+   starting up. Its absence means the sensor never came up at all. */
 uint8_t imu_saw_advertisement(void);
 
 /* A reset-complete notice arrived on the executable channel. */
+/* Whether the sensor has announced that it restarted. Seeing this
+   unexpectedly mid-run means the sensor rebooted on its own. */
 uint8_t imu_saw_reset(void);
 
 /* The full payload of the last control-channel reply. A Get Feature Response
    (0xFC) carries the report ID and the interval actually in force - an interval
    of zero means the report is disabled, which Set Feature never tells us. */
+/* Copy out the last reply the sensor sent to a request, for inspection when
+   a setting will not take. Returns how many bytes were copied. */
 uint16_t imu_control_payload(uint8_t *out, uint16_t max);
 
 /* Ask what the sensor did with a Set Feature. Reply is a Get Feature Response
    on channel 2. */
+/* Ask the sensor to report how one of its measurements is configured -
+   whether it is switched on, and how often it is being sent. */
 void imu_request_feature_status(uint8_t report_id);
 
 /* The first frame we transmitted, verbatim. The receive path can be checked
    against bytes on the wire; this is the only way to check the other half. */
+/* Copy out the raw bytes most recently SENT to the sensor. The companion to
+   imu_snapshot(), for checking whether a request went out as intended.
+   Returns how many bytes were copied. */
 uint16_t imu_tx_snapshot(uint8_t *out, uint16_t max);
 
 /* Transmit a byte pattern on the IMU UART. Only used by the loopback test:
    with PA9 jumpered to PA10 the bytes come straight back, which proves the
    STM32 side works without the sensor being involved at all. */
+/* Send a known pattern of bytes to the sensor, as a wiring test. */
 void imu_tx_test_pattern(void);
 
 /* Compare the received snapshot against the transmitted pattern. Returns the
    number of corrupted bytes and, via out_total, how many were checked. A byte
    count alone cannot see corruption - the right number of wrong bytes looks
    identical to success. */
+/*
+ * Check whether what was sent to the sensor comes back correctly, to tell a
+ * broken connection apart from a broken sensor.
+ *
+ * Returns how many bytes did not match, and puts the number checked into
+ * `out_total`. Zero mismatches means the wiring is sound and the problem lies
+ * elsewhere.
+ */
 uint32_t imu_loopback_check(uint32_t *out_total);
 
 #endif /* IMU_BNO085_H */
