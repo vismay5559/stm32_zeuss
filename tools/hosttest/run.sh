@@ -77,6 +77,12 @@ run_suite() {
     echo
 }
 
+run_suite test_enc_as5048a \
+    "$HERE/test_enc_as5048a.c" \
+    "$HERE/stub/hal_stub.c" \
+    "$HERE/stub/spi_stub.c" \
+    "$APP/enc_as5048a.c"
+
 run_suite test_act_odrive \
     "$HERE/test_act_odrive.c" \
     "$HERE/stub/fdcan_stub.c" \

@@ -1,5 +1,6 @@
 #include "enc_as5048a.h"
 #include "critical.h"
+#include "dma_buffer.h"
 #include "main.h"
 #include <string.h>
 
@@ -9,8 +10,9 @@ extern SPI_HandleTypeDef hspi1;
 #define AS5048A_ERROR_FLAG      0x4000u
 #define AS5048A_ANGLE_MASK      0x3FFFu
 
-static uint16_t s_tx[NEXUS_NUM_ENCODERS] __attribute__((section("noncacheable_buffer"), aligned(32)));
-static uint16_t s_rx[NEXUS_NUM_ENCODERS] __attribute__((section("noncacheable_buffer"), aligned(32)));
+/* Where such a buffer has to live, and why, is in dma_buffer.h. */
+static uint16_t s_tx[NEXUS_NUM_ENCODERS] NEXUS_DMA_BUFFER;
+static uint16_t s_rx[NEXUS_NUM_ENCODERS] NEXUS_DMA_BUFFER;
 
 static uint16_t s_angle[NEXUS_NUM_ENCODERS];
 static uint8_t  s_valid;
