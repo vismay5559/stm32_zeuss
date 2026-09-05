@@ -1,0 +1,93 @@
+# CI for stm32_zeuss.
+#
+# Two jobs, answering two different questions:
+#
+#   host-tests  - is the logic right?    Builds and runs tools/hosttest/run.sh
+#                                        on a normal compiler. Seconds.
+#   firmware    - does it still build?   Cross-compiles for the STM32H7RS with
+#                                        arm-none-eabi-gcc. Nothing else checks
+#                                        this: a change can pass every host test
+#                                        and still fail to compile for the board,
+#                                        because the host tests build App sources
+#                                        against a stub HAL, not the real one.
+#
+# Both run on pushes to main and on every pull request.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Host tests (logic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # run.sh shells out to python3 for the C-vs-Python protocol layout check.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run host tests
+        run: tools/hosttest/run.sh
+
+  firmware:
+    name: Firmware build (arm-none-eabi)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arm-none-eabi toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@0f385a70bcadabde2f265a69444380eae89f5d31 # v1
+        with:
+          release: '13.2.Rel1'
+
+      - name: Install CMake and Ninja
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      # The size of the image is worth seeing in the log: a change that
+      # quietly costs 40 KB of flash is easier to notice here than on a
+      # board that has stopped fitting.
+      #
+      # mx-generated.cmake builds Boot and Appli as ExternalProjects with
+      # BINARY_DIR inside the source tree, so the images land in Boot/build
+      # and Appli/build rather than under build/<preset>.
+      - name: Report image size
+        run: arm-none-eabi-size Boot/build/*.elf Appli/build/*.elf
+
+      # The .hex is the one to flash: the ELF carries two zero-length LOAD
+      # segments (DTCM stack/heap, non-cacheable buffers) that make
+      # STM32CubeProgrammer abort against the external loader. Appli/CMakeLists
+      # says so at the objcopy step, so both are uploaded and named for it.
+      - name: Upload firmware images
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus_first-${{ matrix.preset }}
+          path: |
+            Appli/build/nexus_first_Appli.elf
+            Appli/build/nexus_first_Appli.hex
+            Boot/build/nexus_first_Boot.elf
+            Boot/build/nexus_first_Boot.hex
+          if-no-files-found: error
