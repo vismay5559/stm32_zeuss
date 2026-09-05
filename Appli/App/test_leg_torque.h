@@ -19,9 +19,33 @@
  * gravity unless a feedforward term supplies it.
  */
 
+/*
+ * A BENCH TEST PROGRAM, NOT PART OF THE ROBOT
+ *
+ * This is a standalone program for trying out one leg's motors in force mode rather than position mode - checking the leg pushes with the strength asked for, instead of moving to a place.
+ * It replaces the normal robot program: you build it, run it, watch the
+ * output, and it never hands control back.
+ *
+ * It exists so a problem can be narrowed down to one part, away from
+ * everything else that might also be wrong.
+ */
+
+/* Get the test ready. Call once, before legtorque_run(). */
 void legtorque_init(void);
-void legtorque_on_tick(void);   /* from the TIM6 1 kHz interrupt */
-void legtorque_on_rx(void);     /* from the FDCAN1 rx interrupt  */
-void legtorque_run(void);       /* never returns */
+/*
+ * The timer calls this 1000 times a second while the test runs. Nothing else
+ * should call it.
+ */
+void legtorque_on_tick(void);
+/*
+ * The hardware calls this by itself whenever the motors send a reply.
+ * Nothing else should call it.
+ */
+void legtorque_on_rx(void);
+/*
+ * Run the test. Never returns - it keeps going until the power is cut or the
+ * board is reset.
+ */
+void legtorque_run(void);
 
 #endif /* TEST_LEG_TORQUE_H */

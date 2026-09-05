@@ -37,10 +37,21 @@
  */
 uint8_t wdg_start(void);
 
-/* Reload the counter. Call once per completed control cycle. */
+/*
+ * Reload the counter so the board is not reset. Call once per COMPLETED
+ * control cycle, from the tick path only.
+ *
+ * Never call this from the idle loop: a watchdog fed there keeps the board
+ * alive while the control loop is stalled, which is the one failure it exists
+ * to catch.
+ */
 void wdg_refresh(void);
 
-/* Nominal timeout in milliseconds, for logging. */
+/*
+ * The configured timeout in milliseconds - how long the loop may go without a
+ * wdg_refresh() before the board resets. For logging; the value is nominal,
+ * since the LSI that clocks the IWDG is not trimmed.
+ */
 uint32_t wdg_timeout_ms(void);
 
 /*
@@ -50,7 +61,17 @@ uint32_t wdg_timeout_ms(void);
  * anything clears the flags. A robot that silently reboots mid-run and comes
  * back looking healthy is the worst possible outcome; this makes it loud.
  */
+/*
+ * Latch the reset cause from RCC_RSR and clear the flags. Call once, as early
+ * in startup as possible - anything that clears RCC_RSR first destroys the
+ * evidence.
+ */
 void    wdg_init_reset_cause(void);
+
+/*
+ * Returns 1 if the last reset was the watchdog firing, 0 otherwise. Only
+ * meaningful after wdg_init_reset_cause() has run.
+ */
 uint8_t wdg_reset_was_watchdog(void);
 
 #endif /* WATCHDOG_H */

@@ -19,6 +19,11 @@
  * 600 MHz M7. That is far shorter than one CAN bit time, so nothing is at
  * risk of being missed.
  */
+/*
+ * Block interrupts and return the previous PRIMASK, which must be handed back
+ * to critical_exit(). Safe to nest and safe to call from inside an ISR,
+ * because it restores what it found rather than blindly re-enabling.
+ */
 static inline uint32_t critical_enter(void)
 {
     uint32_t primask = __get_PRIMASK();
@@ -26,6 +31,11 @@ static inline uint32_t critical_enter(void)
     return primask;
 }
 
+/*
+ * Restore the interrupt state that critical_enter() returned. Pass the value
+ * from the matching critical_enter() - not 0 - or a nested section will
+ * re-enable interrupts that an outer one meant to keep blocked.
+ */
 static inline void critical_exit(uint32_t primask)
 {
     __set_PRIMASK(primask);

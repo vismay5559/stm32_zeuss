@@ -80,15 +80,43 @@ typedef struct
 } inekf_t;
 
 /* Sensible defaults, matching the Python InEKFParams. */
+/*
+ * Fill in sensible starting settings - chiefly how noisy each sensor is
+ * assumed to be. Those numbers are how the estimator decides which sensor to
+ * believe when two of them disagree, which they constantly do.
+ */
 void inekf_default_params(inekf_params_t *p);
 
+/*
+ * Set the estimator up. Call once before anything else here.
+ *
+ * It starts out knowing nothing: the robot is assumed upright and still, and
+ * the estimator records that it is very unsure about that. Those doubts
+ * shrink as real sensor readings arrive.
+ */
 void inekf_init(inekf_t *f, const inekf_params_t *params);
+/*
+ * Throw away the current estimate and start over, keeping the settings.
+ *
+ * For when the estimate has become nonsense - better to admit knowing
+ * nothing than to keep building on a wrong answer.
+ */
 void inekf_reset(inekf_t *f);
 
 /*
  * Propagate with one IMU sample.
  *   omega, accel  raw body-frame gyro (rad/s) and accelerometer (m/s^2)
  *   dt            seconds since the previous call
+ */
+/*
+ * Move the estimate forward in time using the movement sensor. Call once per
+ * heartbeat.
+ *
+ * This is dead reckoning: turning and acceleration are added up to work out
+ * where the robot must have got to. It is quick and works anywhere, but small
+ * errors accumulate, so an estimate fed only by this drifts away from the
+ * truth. The estimator tracks how unsure it is getting, and that uncertainty
+ * grows every time this is called without a correction.
  */
 void inekf_predict(inekf_t *f, const inekf_real_t *omega,
                    const inekf_real_t *accel, inekf_real_t dt);
@@ -97,19 +125,67 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
  * Contact management. B_p_BC is the contact position in the body frame from
  * forward kinematics; J_p is its 3x4 Jacobian w.r.t. that leg's joint angles.
  */
+/*
+ * Tell the estimator a foot has just landed, and roughly where it is.
+ *
+ * From this moment the estimator treats that point on the ground as fixed.
+ * That is the anchor everything else is corrected against, so this must only
+ * be called when the foot really is planted.
+ */
 void inekf_add_contact(inekf_t *f, int slot,
                        const inekf_real_t *B_p_BC, const inekf_real_t *J_p);
+/*
+ * Tell the estimator a foot has lifted. It stops being an anchor, and the
+ * estimator no longer has that particular fixed point to correct against.
+ */
 void inekf_remove_contact(inekf_t *f, int slot);
 
 /* Forward-kinematic measurement update for one active contact. */
+/*
+ * Correct the estimate using a planted foot. Call once per heartbeat for each
+ * foot on the ground.
+ *
+ * The logic is this: the leg's own joint sensors say where the foot should be
+ * relative to the body. The foot has not moved, because it is on the ground.
+ * So any disagreement between those two must be error in the estimate of
+ * where the BODY is - and it can be corrected.
+ *
+ * This is what stops the drift that dead reckoning alone produces. A robot
+ * with no foot on the ground has nothing to correct against, which is why an
+ * estimate degrades while it is in the air.
+ */
 void inekf_update_contact(inekf_t *f, int slot,
                           const inekf_real_t *B_p_BC, const inekf_real_t *J_p);
 
 /* --- accessors --- */
-inekf_real_t inekf_height(const inekf_t *f);                 /* world z, m   */
+/* How high the robot's body is above the floor, in metres. */
+inekf_real_t inekf_height(const inekf_t *f);
+/*
+ * How fast the robot is travelling, measured against the room: north, east
+ * and up, in metres per second. This does not change meaning when the robot
+ * turns on the spot.
+ */
 void inekf_velocity_world(const inekf_t *f, inekf_real_t *v3);
+/*
+ * How fast the robot is travelling from its own point of view: forwards,
+ * sideways and up, in metres per second. Turn the robot around and "forwards"
+ * turns with it. This is usually what a walking controller wants.
+ */
 void inekf_velocity_body(const inekf_t *f, inekf_real_t *v3);
-void inekf_quaternion(const inekf_t *f, inekf_real_t *q4);   /* w,x,y,z      */
+/*
+ * Which way the robot is facing and how it is tilted, as four numbers.
+ *
+ * Four numbers rather than the three you might expect (roll, pitch, yaw)
+ * because three has a well-known flaw: at certain angles two of them stop
+ * being distinguishable and the description falls apart. Four numbers avoid
+ * that entirely, at the cost of not being readable by eye.
+ */
+void inekf_quaternion(const inekf_t *f, inekf_real_t *q4);
+/*
+ * How many feet the estimator is currently treating as planted. Zero means it
+ * has nothing fixed to correct against and is drifting on dead reckoning
+ * alone.
+ */
 int  inekf_num_contacts(const inekf_t *f);
 
 #endif /* INEKF_H */

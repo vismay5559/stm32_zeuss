@@ -40,6 +40,16 @@ extern const float g_gait_turns[GAIT_SAMPLES][GAIT_JOINTS];
  * Linearly interpolates between the 250 Hz samples, so a 1 kHz caller
  * gets a smooth ramp rather than a staircase.
  */
+/*
+ * Where every joint should be at one moment in a walking stride.
+ *
+ * `phase` is how far through a single stride the robot is: 0.0 at the start,
+ * 1.0 at the end, and back to 0.0 to begin the next one. Feed it a steadily
+ * rising phase and it walks out one full step cycle.
+ *
+ * `turns_out` receives one target per joint, measured in turns of the motor
+ * shaft.
+ */
 void gait_sample(float phase, float *turns_out);
 
 /*
@@ -58,6 +68,14 @@ void gait_sample(float phase, float *turns_out);
  * of that underlying curve, not of its linear reconstruction.
  *
  * turns_out or tps_out may be NULL if only one is wanted.
+ */
+/*
+ * The same as gait_sample(), and additionally how fast each joint should be
+ * moving at that instant - `tps_out`, in turns per second.
+ *
+ * Telling a motor where to go AND how fast it should be travelling when it
+ * gets there produces noticeably smoother movement than position alone,
+ * because the motor is not left guessing between one target and the next.
  */
 void gait_sample_vel(float phase, float *turns_out, float *tps_out);
 
