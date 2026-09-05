@@ -131,6 +131,34 @@ cmake --preset Debug
 cmake --build build/Debug
 ```
 
+`--preset Debug` is for bring-up. **Flight firmware is `--preset Release`** —
+this loop has a 1 ms budget and the estimator's predict step alone is two 21x21
+matrix products, so an unoptimised build is not a slower robot, it is a
+different one.
+
+```bash
+cmake --preset Release
+cmake --build build/Release
+```
+
+Either preset builds the **robot loop** by default. A test-mode binary looks
+exactly like a dead link from the Pi's side, so selecting one is deliberate and
+goes through the environment rather than an edit to `nexus_mode.h`:
+
+```bash
+NEXUS_MODE=NEXUS_MODE_LEG_CAN cmake --preset Debug
+cmake --build build/Debug
+```
+
+(An environment variable rather than `-D` because the top-level project
+configures `Appli/` through `ExternalProject_Add`, whose arguments live in the
+CubeMX-generated `mx-generated.cmake`. A `-D` on the outer command never
+reaches the inner project; the environment does. `-D` works when configuring
+`Appli/` on its own.)
+
+The configure step prints the mode and warns when it is not `NEXUS_MODE_ROBOT`,
+and the board prints it again on the serial console at boot.
+
 Outputs, per context:
 
 ```
@@ -798,6 +826,58 @@ quaternion entirely to test whether the fusion engine is what costs the
 accelerometer its budget; the Pi still gets `quat` from our own estimator, which
 is fused with leg kinematics and is the better estimate anyway.
 
+## Arming, faults and the failsafe
+
+The firmware does not simply do as it is told. Between the Pi and the
+actuators sits a small state machine (`Appli/App/safety.c`):
+
+```
+BOOT  ---- everything being watched is healthy ---->  IDLE
+                                                       |  command with
+                                                       |  CMD_ENABLE set
+                                                       v
+FAULT <--------- HEALTH_LINK or HEALTH_TIMING ------ ARMED
+  |                                                    ^
+  +---- faults clear ----> IDLE ---- re-arm handshake --+
+```
+
+**What the Pi has to do**
+
+| | |
+|---|---|
+| Set `CMD_ENABLE` | `link.send_command(...)` does this by default. Without the flag nothing reaches the actuators. |
+| Advance `seq` | Replayed or out-of-order frames are refused. `NexusLink` handles this. |
+| Stand down cleanly | `link.stand_down()` at the end of a run, so the axes idle instead of holding torque. |
+| Re-arm after a fault | A latched fault clears only after a command with `CMD_ENABLE` **off**, then one with it on. `stand_down()` then `send_command()`. |
+
+**What the firmware does on its own**
+
+- **Commands stop for 200 ms** → `HEALTH_LINK` → FAULT → every axis is asked to
+  go `IDLE`, and the request is repeated every 100 ms while the fault stands.
+  The last target is *not* held indefinitely any more.
+- **A tick is missed** → `HEALTH_TIMING` → the same.
+- **A command fails validation** — NaN, outside `SAFETY_POS_*_TURNS`, or a jump
+  larger than `SAFETY_MAX_STEP_TURNS` — it is refused and counted. Ten in a row
+  faults the link.
+- **The loop stops completing cycles** → the independent watchdog resets the
+  board after 100 ms. It is refreshed only by a tick that ran to completion,
+  never from the idle loop.
+- **A hard fault, or `Error_Handler()`** → `Set_Axis_State(IDLE)` goes out on
+  both CAN buses before anything spins forever.
+
+A watchdog reset is announced on the serial console at the next boot. Do not
+ignore it: it means the loop stopped, and the board came back looking healthy.
+
+> **Bring-up note.** `safety.c` will not arm until every subsystem in
+> `HEALTH_EXPECTED_MASK` is healthy, and that defaults to the whole robot — a
+> failsafe that is not watching the Pi link is not a failsafe. On a partially
+> wired bench, narrow it at configure time rather than editing the header:
+> `HEALTH_EXPECTED_MASK='(HEALTH_TIMING|HEALTH_IMU)' cmake --preset Debug`.
+> The configure step warns whenever it is narrowed, because subsystems outside
+> the mask cannot fault and the failsafe therefore cannot act on them.
+
+---
+
 ## What the Pi receives
 
 One **422-byte packet every millisecond** (422 KB/s, well under 1% of USB HS).
@@ -839,12 +919,18 @@ Four things worth understanding:
 - **`spring_angle` is deflection, not a joint angle.** The encoder sits *after*
   the series spring, so it reads how far the spring has wound up. Torque is
   deflection × spring constant, computed on the Pi where the constant is tunable.
+  It is a **signed** value in ±π, referenced to a mechanical zero in
+  `robot_config.h` — not the raw 0..2π angle it used to be, which stepped by a
+  full turn for any joint resting near the wrap point. The estimator does **not**
+  use it: forward kinematics takes all four joint angles per leg from the drives.
 - **`vel_hdg` is in the heading frame, not the world.** Forward means where the
   robot faces. Yaw is the one part of the pose the filter cannot observe, so it
   drifts — but the same drifting yaw defines both the velocity and the frame, so
   the error cancels.
 - **`foot_z` is computed every tick, including during swing.** A gait policy
-  cares most about the foot that is off the ground.
+  cares most about the foot that is off the ground. A foot whose leg cannot be
+  read is sent as **NaN** with its `fk_valid` bit clear — never as 0.0, which
+  reads as "resting exactly on the ground".
 - **`ref_angle` and `phase` read zero** until the gait library runs on the
   STM32. The Pi can tell because `phase` never advances.
 
@@ -857,17 +943,34 @@ does: `imu_quat` (the sensor's own 9-axis fusion, independent of ours),
 estimated IMU biases, `contact_ticks`, and `health` — the same bitmask the red
 LED blinks.
 
+Two more that are worth wiring into any policy loop:
+
+| Field | Meaning |
+|---|---|
+| `fk_valid` | bit 0 = `foot_z[0]` (right) is a real measurement, bit 1 = `foot_z[1]` (left). An invalid entry is also sent as NaN. Use `pkt.foot_z_right` / `pkt.foot_z_left`, which return `None` rather than a number you should not trust. |
+| `safety_state` | `BOOT` / `IDLE` / `ARMED` / `FAULT` — whether the board is driving the actuators, and whether it has taken them away from you. `pkt.armed` and `pkt.faulted`. |
+| `stream_flags` | `STREAM_GAIT_LIVE` says `ref_angle` and `phase` are real. Check `pkt.gait_live` rather than watching `phase` for movement — a gait parked at phase 0 looks identical to one that does not exist. |
+
+And a **diagnostics block**: `loop_us_max` (worst control cycle since the last
+packet, so a live signal rather than a since-boot high-water mark), `overruns`,
+`usb_dropped`, `can_dropped`, `can_bus_off` and `enc_stalls`. These used to go
+only to the serial console, in a line that cost ~9.5 ms of a 1 ms loop every two
+seconds — a diagnostic causing nine of the missed ticks it reported. Watch
+`overruns` for *change* rather than for zero; it is cumulative.
+
 And **`fused_valid`**, which matters more than the rest:
 
 | Value | Meaning |
 |---|---|
 | `INVALID` | no contact, IMU stale, or the filter diverged |
 | `CONVERGING` | running, uncertainty still large |
-| `OK` | velocity uncertainty low for 500 consecutive ticks |
+| `OK` | velocity uncertainty low for 500 consecutive ticks **and** the robot has been measured (`ROBOT_CONFIG_CALIBRATED`) |
 
 **Check `fusion_usable` before using height or velocity.** The filter starts
 with 30° of orientation uncertainty and 1 m/s of velocity uncertainty; for the
-first ~2 seconds those numbers are meaningless.
+first ~2 seconds those numbers are meaningless. It also stays `CONVERGING`
+forever while `robot_config.h` says the robot has not been measured — converged
+is not the same as correct, and the covariance cannot tell the difference.
 
 ### Rates
 
@@ -933,9 +1036,10 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **The policy block is contiguous and its offset is checked.**
   `tools/check_proto.py` fails if the block moves or gains a gap, because the
   zero-copy slice above would then read the wrong bytes silently.
-- **Protocol version is 3.** v1 sent raw encoder counts; v2 added the health
-  byte and alignment; v3 added the policy block and split the contacts. Mismatched
-  versions reject each other rather than silently misparsing.
+- **Protocol version is 5.** v1 sent raw encoder counts; v2 added the health
+  byte and alignment; v3 added the policy block and split the contacts; v4 added
+  `fk_valid` and `safety_state`; v5 added the diagnostics block. 422 → 424 → 444
+  bytes. Mismatched versions reject each other rather than silently misparsing.
 
 ## Watching it live — Rerun
 
@@ -1150,17 +1254,28 @@ and ODrives, neither of which has produced real data yet.
 Open it at **115200 8N1, no flow control**. Boot prints its external-memory
 init trace; the Appli prints a status line every 2 seconds:
 
+**Off by default.** Every counter it carried now ships in the state packet at
+1 kHz instead. Turn it on only when there is no Pi attached — it blocks the
+control loop for ~9.5 ms each time it prints:
+
+```bash
+NEXUS_LOOP_STATS=1 cmake --preset Debug
 ```
-loop max 234 us | overruns 0 | can drop 0/0 | health 0x01 watching 0x21 blink 1
+
+```
+ARMED | loop max 234 us | overruns 0 | can drop 0/0 | usb drop 0 | rej 0 | health 0x00 watching 0x3F blink 0
 ```
 
 | Field | Meaning |
 |---|---|
+| state | `BOOT` / `IDLE` / `ARMED` / `FAULT` — see the failsafe section |
 | `loop max` | Longest single cycle, of a 1000 µs budget |
 | `overruns` | Ticks missed because a cycle ran long. Should stay 0 |
 | `can drop` | Frames dropped per bus because the bus could not keep up |
+| `usb drop` | State packets skipped because the host was not draining the endpoint |
+| `rej` | Commands refused by validation since boot. Non-zero means the Pi is sending something wrong |
 | `health` | Bitmask of faulted subsystems — see below |
-| `watching` | Which subsystems are armed (`HEALTH_EXPECTED_NOW`) |
+| `watching` | Which subsystems are armed (`HEALTH_EXPECTED_MASK`) |
 | `blink` | What the red LED is currently blinking |
 
 ### LEDs
@@ -1181,9 +1296,12 @@ Red also goes solid from `Error_Handler()` or a hard fault.
 
 **"Healthy" means data is flowing, not that the peripheral initialised.** Every
 peripheral initialises fine with nothing plugged in, which tells you nothing —
-so an unconnected sensor is deliberately a fault. `HEALTH_EXPECTED_NOW` in
-`Appli/App/health.h` gates which subsystems may complain; add each flag as you
-wire that hardware, and red going dark is your proof it works.
+so an unconnected sensor is deliberately a fault. `HEALTH_EXPECTED_MASK` in
+`Appli/App/health.h` gates which subsystems may complain; it defaults to the
+whole robot, and red going dark is your proof each one works. During bring-up,
+narrow it at configure time (see the failsafe section) rather than editing the
+header — health now decides whether the robot may arm, not just which LED
+blinks.
 
 ---
 
@@ -1194,8 +1312,11 @@ wire that hardware, and red going dark is your proof it works.
 | Boot chain, XIP execution | ✅ working |
 | 1 kHz loop | ✅ ~230 µs of a 1000 µs budget, zero overruns |
 | Health LEDs, serial console | ✅ working |
+| Failsafe, watchdog, command validation | ✅ host-tested, ⚠️ never exercised on a real fault |
 | **IMU (BNO085)** | ✅ **working on hardware** — quaternions, gravity, gyro |
-| Pi link, protocol v3 | ✅ C/Python verified, 1 kHz proven in test |
+| Pi link, protocol v5 | ✅ C/Python verified, 1 kHz proven in test |
+| Peripheral fault recovery | ✅ SPI stall, CAN bus-off, IMU error paths implemented |
+| Drive lifecycle (arm / clear / idle) | ✅ implemented, ⚠️ never run against real ODrives |
 | State estimator | ✅ wired in, ⚠️ never run on real sensor data |
 | Encoders (SPI) | ⚠️ initialises, no hardware attached |
 | CAN / ODrive | ⚠️ initialises, no hardware attached |
@@ -1238,10 +1359,41 @@ requesting 800 Hz to exploit the `≤ 2.1 × requested` rule, and the Game Rotat
 Vector (`0x08`, 6-axis, much cheaper — and better on a robot full of motor
 magnets). 158 Hz is usable but below where it should be.
 
-**Estimator calibration constants are placeholders.** The `sign` and `offset`
-per joint in `fusion.c` are `+1` and `0`. Until they are measured on the real
-leg, forward kinematics is offset by however wrong they are — **and the filter
-will trust it completely.** This is the main thing hardware unblocks.
+**A latched timing fault is cleared by the re-arm handshake.** `HEALTH_TIMING`
+still latches — a missed deadline matters after the tick that missed it — but it
+is now latched against an *acknowledged* overrun count rather than against zero.
+Comparing to zero meant one missed tick locked the robot out for the rest of the
+session, which also made the `FAULT → IDLE` recovery path dead code for the most
+likely fault there is. `link.stand_down()` acknowledges it.
+
+**The failsafe has never fired on hardware.** `safety.c` and `watchdog.c` are
+covered by host tests (`tools/hosttest/run.sh`), which is not the same thing as
+having watched a robot go limp when the USB cable was pulled. Before anything
+walks: pull the cable mid-run and confirm the axes idle; stall the loop
+deliberately and confirm the board resets and says so at the next boot.
+
+**The command envelope is a placeholder.** `SAFETY_POS_MIN/MAX_TURNS` and
+`SAFETY_MAX_STEP_TURNS` in `safety.h` are loose bounds chosen to catch garbage,
+not this machine's real joint travel. They need measuring on the robot — a
+limit that is wrong in the loose direction only fails to stop a sick robot,
+which is why they start there rather than tight.
+
+**The robot has never been measured.** Link lengths, hip offsets, per-joint
+signs and offsets, and the encoder zeros are all placeholders, now gathered in
+`Appli/App/robot_config.h`. Until they are measured, forward kinematics is
+wrong by however wrong they are.
+
+The filter no longer trusts it blindly: while `ROBOT_CONFIG_CALIBRATED` is `0`
+the estimator reports `CONVERGING` forever and never `OK`, however well its
+covariance settles. A converged filter built on guessed geometry is
+confidently wrong, and the covariance cannot tell you that. Measure the robot,
+set the flag, and `fusion_usable` starts meaning something.
+
+**The joint map is not confirmed.** `gait_ref.h` (generated from the drive
+configuration) and the old map in `fusion.c` disagreed about which node is
+`hip_roll` and which is `hip_pitch`. `robot_config.c` follows `gait_ref.h`
+because it is generated rather than hand-written, but one of them is wrong and
+only the robot can say which. Same gate applies.
 
 **`ref_angle` and `phase` read zero.** The gait library does not run on the
 STM32 yet; only the leg test plays the trajectory. Space is reserved in the

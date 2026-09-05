@@ -9,4 +9,11 @@ void enc_start_read(void);
 void enc_on_dma_complete(void);
 void enc_get(uint16_t angle[NEXUS_NUM_ENCODERS], uint8_t *valid_mask);
 
+/* Transfers abandoned because the DMA never completed. Non-zero means the SPI
+   link is unreliable, not that a reading was merely bad. */
+uint32_t enc_stalls(void);
+
+/* SPI errors recovered from. */
+uint32_t enc_errors(void);
+
 #endif /* ENC_AS5048A_H */

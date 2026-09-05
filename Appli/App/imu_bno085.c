@@ -325,6 +325,7 @@ static void parse_reports(const uint8_t *p, uint16_t n)
             s_sample.quat[0] = q_to_float(&p[i + 10], 14);
             i += 14u;
             s_n_rv++;
+            s_sample.quat_seq++;
             updated = 1;
         }
         else if ((id == SH2_ACCELEROMETER) && ((i + 10u) <= n))
@@ -334,6 +335,7 @@ static void parse_reports(const uint8_t *p, uint16_t n)
             s_sample.accel[2] = q_to_float(&p[i + 8], 8);
             i += 10u;
             s_n_accel++;
+            s_sample.accel_seq++;
             updated = 1;
         }
         else if ((id == SH2_GYRO) && ((i + 10u) <= n))
@@ -343,6 +345,7 @@ static void parse_reports(const uint8_t *p, uint16_t n)
             s_sample.gyro[2] = q_to_float(&p[i + 8], 9);
             i += 10u;
             s_n_gyro++;
+            s_sample.gyro_seq++;
             updated = 1;
         }
         else
@@ -869,6 +872,107 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 uint32_t imu_errors(void)
 {
     return s_errors;
+}
+
+/* ------------------------------------------------------------------ *
+ *  In-flight recovery
+ * ------------------------------------------------------------------ */
+
+/*
+ * The same sequence imu_init() runs, spread across ticks.
+ *
+ * imu_init() can afford HAL_Delay because nothing else is running yet. Here
+ * the 1 kHz loop is, so the waits become tick counts and each call does at
+ * most one transmitting step. The step that blocks longest is the resync
+ * burst - 64 bytes at 120 us apart, about 8 ms - which fits inside the
+ * watchdog period with room to spare.
+ */
+enum {
+    REC_IDLE = 0,
+    REC_RESYNC,
+    REC_WAIT_RESYNC,
+    REC_RESET,
+    REC_WAIT_RESET,
+    REC_REQUEST,
+    REC_SETTLE
+};
+
+#define REC_RESYNC_WAIT_TICKS    50u    /* 50 ms, as imu_init's HAL_Delay(50)  */
+#define REC_RESET_WAIT_TICKS    500u    /* boot, self-test, advertisement      */
+#define REC_SETTLE_TICKS        200u    /* give reports a chance before retry  */
+
+static uint8_t  s_rec_state;
+static uint32_t s_rec_wait;
+static uint32_t s_recoveries;
+
+uint32_t imu_recoveries(void)
+{
+    return s_recoveries;
+}
+
+uint8_t imu_recover_step(void)
+{
+    switch (s_rec_state)
+    {
+    case REC_IDLE:
+        s_recoveries++;
+        s_rec_state = REC_RESYNC;
+        return 1u;
+
+    case REC_RESYNC:
+        /* A parser stuck mid-frame swallows the reset command itself, which is
+           precisely the deadlock seen on hardware - so flush it first. */
+        imu_resync();
+        s_rec_wait  = REC_RESYNC_WAIT_TICKS;
+        s_rec_state = REC_WAIT_RESYNC;
+        return 1u;
+
+    case REC_WAIT_RESYNC:
+        if (s_rec_wait-- == 0u)
+        {
+            s_rec_state = REC_RESET;
+        }
+        return 1u;
+
+    case REC_RESET:
+        imu_soft_reset();
+        s_rec_wait  = REC_RESET_WAIT_TICKS;
+        s_rec_state = REC_WAIT_RESET;
+        return 1u;
+
+    case REC_WAIT_RESET:
+        if (s_rec_wait-- == 0u)
+        {
+            s_rec_state = REC_REQUEST;
+        }
+        return 1u;
+
+    case REC_REQUEST:
+        /*
+         * imu_request_reports() spaces its three SET_FEATURE frames with
+         * HAL_Delay(5) - 15 ms of blocking in total, plus the frames
+         * themselves. Acceptable here: this only runs while the actuators are
+         * disarmed, and the watchdog period is 100 ms.
+         */
+        imu_request_reports();
+        s_rec_wait  = REC_SETTLE_TICKS;
+        s_rec_state = REC_SETTLE;
+        return 1u;
+
+    case REC_SETTLE:
+        if (s_rec_wait-- == 0u)
+        {
+            /* Back to IDLE. If the sensor is still silent the caller will
+               call again and the whole sequence repeats. */
+            s_rec_state = REC_IDLE;
+            return 0u;
+        }
+        return 1u;
+
+    default:
+        s_rec_state = REC_IDLE;
+        return 0u;
+    }
 }
 
 void imu_diag(imu_diag_t *out)

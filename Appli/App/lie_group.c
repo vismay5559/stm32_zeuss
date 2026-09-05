@@ -3,12 +3,28 @@
 #include <string.h>
 
 /*
- * Below this angle the closed-form series for Gamma0..3 divide by theta^n and
- * lose all precision, so the Taylor expansions are used instead. At 400 Hz a
- * 1e-8 rad step corresponds to ~4e-6 rad/s, far below any real gyro noise, so
- * this branch is taken only when the robot is genuinely still.
+ * Below this angle the closed-form series for Gamma0..3 are computed instead
+ * by their Taylor expansions.
+ *
+ * The threshold used to be 1e-8, justified as "only when the robot is
+ * genuinely still". That reasoning had the hazard backwards. The problem is
+ * not theta = 0, it is small NON-ZERO theta: the coefficients divide
+ * differences like (theta - sin theta) by theta^3, and in single precision
+ * that numerator is smaller than one ulp of theta long before theta reaches
+ * 1e-8. At theta = 1e-4 - a slow gyro at 400 Hz, an entirely ordinary reading -
+ * (theta - sin theta) is about 1.7e-13 while one ulp of theta is about 1.5e-11,
+ * so the coefficient is pure rounding noise.
+ *
+ * It was not actually breaking anything, because the noisy coefficient
+ * multiplies S^2 which is O(theta^2), so the error in the assembled matrix
+ * stayed around 1e-7. Gamma3's S^2 term degrades fastest and had the least
+ * headroom.
+ *
+ * 1e-4 is where the two errors cross. The Taylor truncation error there is
+ * ~theta^2/20, about 5e-10 - comfortably under float epsilon - so the series
+ * branch is strictly more accurate everywhere the cancellation bites.
  */
-#define LG_EPS  1e-8f
+#define LG_EPS  1e-4f
 
 /* --------------------------------------------------------------------- */
 /*  3x3                                                                    */

@@ -29,6 +29,7 @@ static uint32_t s_faults;
 static uint32_t s_prev_imu_seq;
 static uint32_t s_prev_can_rx[2];
 static uint32_t s_prev_link_cmds;
+static uint32_t s_ack_overruns;
 
 static uint16_t s_idle_imu;
 static uint16_t s_idle_can[2];
@@ -64,6 +65,7 @@ void health_init(uint32_t expected_mask)
     s_prev_can_rx[0] = 0;
     s_prev_can_rx[1] = 0;
     s_prev_link_cmds = 0;
+    s_ack_overruns   = 0;
     s_idle_imu       = 0;
     s_idle_can[0]    = 0;
     s_idle_can[1]    = 0;
@@ -81,15 +83,16 @@ uint32_t health_expected(void)
     return s_expected;
 }
 
-void health_tick(void)
+void health_tick(const imu_sample_t *imu, uint8_t enc_valid)
 {
     /* --- IMU: does the sample sequence number keep advancing? ------------ */
-    imu_sample_t imu;
-    imu_get(&imu);
 
-    if (imu.seq != s_prev_imu_seq)
+    /* The shared counter, deliberately: this asks "is the sensor alive at
+       all", not "did a particular report update". The estimator's prediction
+       gate is the one that needs the per-report counters. */
+    if (imu->seq != s_prev_imu_seq)
     {
-        s_prev_imu_seq = imu.seq;
+        s_prev_imu_seq = imu->seq;
         s_idle_imu     = 0;
     }
     else
@@ -99,11 +102,7 @@ void health_tick(void)
     set_fault(HEALTH_IMU, (s_idle_imu > STALE_IMU_TICKS) ? 1u : 0u);
 
     /* --- Encoders: are all of them returning parity-clean angles? -------- */
-    uint16_t angle[NEXUS_NUM_ENCODERS];
-    uint8_t  valid;
-    enc_get(angle, &valid);
-
-    if (valid == ENC_ALL_VALID)
+    if (enc_valid == ENC_ALL_VALID)
     {
         s_bad_enc = 0;
     }
@@ -146,10 +145,30 @@ void health_tick(void)
     set_fault(HEALTH_LINK, (s_idle_link > STALE_LINK_TICKS) ? 1u : 0u);
 
     /* --- Timing: latched, because a single missed tick still matters ----- */
-    if (app_overruns() != 0u)
+
+    /*
+     * Latched against an ACKNOWLEDGED count, not against zero.
+     *
+     * Comparing to zero meant one missed tick at any point latched the fault
+     * for the rest of the run - and now that safety.c acts on it, that
+     * permanently prevented the robot from ever arming again short of a power
+     * cycle. It also made the FAULT -> IDLE recovery path dead code for the
+     * most likely fault there is.
+     *
+     * The fault still latches and still has to be cleared deliberately; it is
+     * just that clearing it is now possible, via the same ENABLE-off handshake
+     * the Pi already performs to take the robot back.
+     */
+    if (app_overruns() != s_ack_overruns)
     {
         s_faults |= HEALTH_TIMING;
     }
+}
+
+void health_clear_latched(void)
+{
+    s_ack_overruns = app_overruns();
+    s_faults &= ~(uint32_t)HEALTH_TIMING;
 }
 
 uint32_t health_faults(void)

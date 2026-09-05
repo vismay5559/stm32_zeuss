@@ -22,6 +22,7 @@
 #include "stm32h7rsxx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "act_odrive.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,6 +32,18 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/*
+ * Every one of the fault handlers below is an infinite loop, and each one is
+ * reachable while ten actuators are holding a commanded position. Whatever
+ * else a fault means, it means this board has stopped controlling the robot -
+ * so the drives are asked to idle before anything spins forever.
+ *
+ * Best-effort by nature: the state that got us here may be arbitrarily
+ * corrupt. act_emergency_idle() therefore touches no module state, uses
+ * bounded spins only, and returns immediately if CAN was never started.
+ */
+#define NEXUS_FAULT_DISARM()  do { act_emergency_idle(); } while (0)
 
 /* USER CODE END PD */
 
@@ -95,7 +108,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  NEXUS_FAULT_DISARM();
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -110,7 +123,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  NEXUS_FAULT_DISARM();
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -125,7 +138,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  NEXUS_FAULT_DISARM();
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -140,7 +153,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  NEXUS_FAULT_DISARM();
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

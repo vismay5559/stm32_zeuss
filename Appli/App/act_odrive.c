@@ -1,6 +1,7 @@
 #include "act_odrive.h"
 #include "critical.h"
 #include "main.h"
+#include <math.h>
 #include <string.h>
 
 extern FDCAN_HandleTypeDef hfdcan1;
@@ -8,9 +9,21 @@ extern FDCAN_HandleTypeDef hfdcan2;
 
 /* ODrive CANSimple: arbitration id is (node_id << 5) | cmd_id. */
 #define ODRV_CMD_HEARTBEAT        0x001u
+#define ODRV_CMD_ESTOP            0x002u
+#define ODRV_CMD_SET_AXIS_STATE   0x007u
+#define ODRV_CMD_CLEAR_ERRORS     0x018u
 #define ODRV_CMD_GET_ENCODER      0x009u
 #define ODRV_CMD_SET_INPUT_POS    0x00Cu
 #define ODRV_CMD_GET_TORQUES      0x01Cu
+
+/* How often a standing disarm request is repeated while faulted, in ticks.
+   Once is not enough - the frame can be lost, or a drive can reboot into
+   closed loop - and 1 kHz would flood a bus that may already be struggling. */
+#define ODRV_DISARM_REPEAT_TICKS  100u
+
+/* How often an outstanding arm request is repeated while axes are still not
+   in closed loop. Same reasoning as the disarm repeat, opposite direction. */
+#define ODRV_ARM_REPEAT_TICKS     100u
 
 #define ODRV_NODES_PER_BUS        5
 #define ODRV_FILTER_ID_LOW        0x020u   /* node 1, cmd 0  */
@@ -75,6 +88,27 @@ static float    s_out[NEXUS_NUM_JOINTS];
 static float    s_prev_out[NEXUS_NUM_JOINTS];
 static uint32_t s_seg_tick;
 static uint8_t  s_have_target;
+
+/* Ticks since each joint last reported a position. Written from the FDCAN
+   ISRs and from the tick, so every access is inside a critical section. */
+static volatile uint16_t s_pos_age[NEXUS_NUM_JOINTS];
+
+/* Non-zero while a disarm is standing, with a countdown to the next repeat. */
+static uint8_t  s_disarmed;
+static uint32_t s_disarm_repeat;
+
+/* Set once both FDCAN peripherals are started. Guards the fault-path disarm,
+   which can be reached before act_init() has ever run. */
+static volatile uint8_t s_can_ready;
+
+/* Non-zero while an arm request is outstanding, with its repeat countdown. */
+static uint8_t  s_arming;
+static uint32_t s_arm_repeat;
+
+/* Bus health. Bus-off is the one that matters: the peripheral stops
+   transmitting entirely and never restarts on its own. */
+static uint32_t s_bus_off_count[2];
+static uint8_t  s_tx_err_count[2];
 
 static FDCAN_HandleTypeDef *bus_handle(uint8_t bus)
 {
@@ -202,8 +236,25 @@ void act_init(void)
     s_seg_tick    = CMD_SEGMENT_TICKS;
     s_have_target = 0;
 
+    /* Start every joint at maximum age. Nothing has been heard from any drive
+       yet, and "unknown" must read as stale, not as fresh zeros. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_pos_age[j] = 0xFFFFu;
+    }
+
+    s_disarmed      = 0;
+    s_disarm_repeat = 0;
+    s_arming        = 0;
+    s_arm_repeat    = 0;
+
+    memset(s_bus_off_count, 0, sizeof(s_bus_off_count));
+    memset(s_tx_err_count, 0, sizeof(s_tx_err_count));
+
     bus_setup(&hfdcan1);
     bus_setup(&hfdcan2);
+
+    s_can_ready = 1;
 }
 
 void act_on_rx(uint8_t bus_index)
@@ -237,6 +288,7 @@ void act_on_rx(uint8_t bus_index)
             s_telem.pos[j] = le_f32(&data[0]);
             s_telem.vel[j] = le_f32(&data[4]);
             s_telem.flags[j] |= NEXUS_ACT_TELEM_FRESH;
+            s_pos_age[j] = 0u;      /* this is the one that means "trustworthy" */
             break;
 
         case ODRV_CMD_GET_TORQUES:
@@ -256,14 +308,262 @@ void act_on_rx(uint8_t bus_index)
     }
 }
 
+static void send_axis_state(uint8_t bus, uint32_t node, uint32_t state)
+{
+    uint8_t data[8] = { 0 };
+
+    data[0] = (uint8_t)(state & 0xFFu);
+    data[1] = (uint8_t)((state >> 8) & 0xFFu);
+    data[2] = (uint8_t)((state >> 16) & 0xFFu);
+    data[3] = (uint8_t)((state >> 24) & 0xFFu);
+
+    tx_enqueue(bus, (node << 5) | ODRV_CMD_SET_AXIS_STATE, data);
+}
+
+static void request_all_idle(void)
+{
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
+        uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
+
+        send_axis_state(bus, node, ODRV_AXIS_STATE_IDLE);
+    }
+    act_tx_pump();
+}
+
+void act_disarm(void)
+{
+    /*
+     * Stop the interpolator dead rather than letting it finish its segment.
+     * Clearing s_have_target is what actually silences act_tick_1khz(); the
+     * IDLE request on top of it is what makes the drives stop holding torque
+     * even if this board goes on to do something worse.
+     */
+    s_have_target = 0;
+    s_seg_tick    = CMD_SEGMENT_TICKS;
+    s_arming      = 0;
+
+    if (!s_disarmed)
+    {
+        s_disarmed      = 1;
+        s_disarm_repeat = 0;
+        request_all_idle();
+    }
+}
+
+uint8_t act_is_armed(void)
+{
+    return s_have_target;
+}
+
+static void request_all_closed_loop(void)
+{
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
+        uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
+
+        /*
+         * Only nudge axes that are not already there. Re-commanding an axis
+         * that is happily in closed loop is not free - the drive processes the
+         * state request - and it would fight a drive that is mid-transition.
+         */
+        if (s_telem.axis_state[j] != ODRV_AXIS_STATE_CLOSED_LOOP_CONTROL)
+        {
+            send_axis_state(bus, node, ODRV_AXIS_STATE_CLOSED_LOOP_CONTROL);
+        }
+    }
+    act_tx_pump();
+}
+
+void act_request_arm(void)
+{
+    uint8_t data[8] = { 0 };
+
+    s_disarmed   = 0;
+    s_arming     = 1;
+    s_arm_repeat = 0;
+
+    /*
+     * Clear latched errors first, once, on this explicit request. An axis that
+     * has tripped will refuse to enter closed loop until its error is cleared,
+     * and doing it here - rather than automatically whenever an error appears -
+     * keeps "something went wrong" visible in act_error until a human, or the
+     * Pi, decides to move on from it.
+     */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
+        uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
+
+        if (s_telem.axis_error[j] != 0u)
+        {
+            tx_enqueue(bus, (node << 5) | ODRV_CMD_CLEAR_ERRORS, data);
+        }
+    }
+
+    request_all_closed_loop();
+}
+
+uint16_t act_not_closed_loop_mask(void)
+{
+    uint16_t mask = 0;
+
+    uint32_t primask = critical_enter();
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        if (s_telem.axis_state[j] != ODRV_AXIS_STATE_CLOSED_LOOP_CONTROL)
+        {
+            mask |= (uint16_t)(1u << j);
+        }
+    }
+    critical_exit(primask);
+
+    return mask;
+}
+
+uint8_t act_all_closed_loop(void)
+{
+    return (act_not_closed_loop_mask() == 0u) ? 1u : 0u;
+}
+
+uint32_t act_bus_off_count(uint8_t bus)
+{
+    return (bus < 2u) ? s_bus_off_count[bus] : 0u;
+}
+
+uint8_t act_tx_error_count(uint8_t bus)
+{
+    return (bus < 2u) ? s_tx_err_count[bus] : 0u;
+}
+
+void act_bus_service(void)
+{
+    if (!s_can_ready)
+    {
+        return;
+    }
+
+    for (uint8_t bus = 0; bus < 2u; bus++)
+    {
+        FDCAN_HandleTypeDef        *h = bus_handle(bus);
+        FDCAN_ProtocolStatusTypeDef ps;
+
+        if (HAL_FDCAN_GetProtocolStatus(h, &ps) != HAL_OK)
+        {
+            continue;
+        }
+
+        s_tx_err_count[bus] = (uint8_t)ps.TxErrorCnt;
+
+        if (ps.BusOff)
+        {
+            /*
+             * Bus-off is terminal without intervention: the peripheral has
+             * given up transmitting and will not come back on its own. The
+             * driver's own comment records that an FD/classic mismatch drives
+             * the TEC straight here while reception still looks perfect - so
+             * this is a failure that has already been observed on hardware,
+             * and until now the only symptom was act_rx_count() going flat.
+             *
+             * Restarting clears CCCR.INIT and begins the recovery sequence the
+             * CAN spec requires (128 occurrences of 11 recessive bits).
+             */
+            s_bus_off_count[bus]++;
+            (void)HAL_FDCAN_Start(h);
+        }
+    }
+}
+
+void act_emergency_idle(void)
+{
+    /*
+     * Error_Handler() can fire long before act_init() - a failed clock or BSP
+     * init reaches it while the FDCAN handles are still zeroed, and touching
+     * h->Instance then turns a reported error into a hard fault inside the
+     * error handler.
+     */
+    if (!s_can_ready)
+    {
+        return;
+    }
+
+    /*
+     * Deliberately does not touch the software queue or any module state:
+     * this runs from fault handlers, where the queue's indices may be exactly
+     * what is corrupt. Straight into the hardware FIFO, bounded spins only.
+     */
+    FDCAN_TxHeaderTypeDef hdr;
+
+    hdr.IdType              = FDCAN_STANDARD_ID;
+    hdr.TxFrameType         = FDCAN_DATA_FRAME;
+    hdr.DataLength          = FDCAN_DLC_BYTES_8;
+    hdr.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    hdr.BitRateSwitch       = ODRV_TX_BRS;
+    hdr.FDFormat            = ODRV_TX_FORMAT;
+    hdr.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+    hdr.MessageMarker       = 0;
+
+    uint8_t data[8] = { (uint8_t)ODRV_AXIS_STATE_IDLE, 0, 0, 0, 0, 0, 0, 0 };
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        uint8_t              bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
+        uint32_t             node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
+        FDCAN_HandleTypeDef *h    = bus_handle(bus);
+
+        hdr.Identifier = (node << 5) | ODRV_CMD_SET_AXIS_STATE;
+
+        /* Wait for room, but never forever - a bus-off peripheral never
+           frees a slot, and hanging here would strand the other bus too. */
+        for (uint32_t spin = 0; spin < 100000u; spin++)
+        {
+            if (HAL_FDCAN_GetTxFifoFreeLevel(h) != 0u)
+            {
+                break;
+            }
+        }
+
+        (void)HAL_FDCAN_AddMessageToTxFifoQ(h, &hdr, data);
+    }
+}
+
 void act_set_targets(const float target_pos[NEXUS_NUM_JOINTS])
 {
+    s_disarmed = 0;
+
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
         if (!s_have_target)
         {
-            s_out[j]      = target_pos[j];
-            s_prev_out[j] = target_pos[j];
+            /*
+             * First target after a disarm: start the ramp from where the leg
+             * ACTUALLY is, not from where the Pi wants it.
+             *
+             * Seeding from the commanded value makes the first frame a step
+             * input - the drive is told to be somewhere else immediately and
+             * gets there as fast as it can. Seeding from the measured
+             * position turns the same command into the first millisecond of a
+             * normal interpolated move.
+             *
+             * Only when the measurement can be trusted. A joint that has not
+             * reported recently would seed from a stale or zero value, which
+             * is the step input again, only with a worse starting point.
+             *
+             * Read without a critical section, unlike act_get(): both loads
+             * are single aligned words, so neither can tear, and the worst an
+             * FDCAN interrupt landing between them can do is pair an age with
+             * a position one frame newer. For a starting point that is not a
+             * difference worth disabling interrupts for.
+             */
+            float seed = ((s_pos_age[j] <= ACT_POS_STALE_TICKS) &&
+                          isfinite(s_telem.pos[j]))
+                             ? s_telem.pos[j]
+                             : target_pos[j];
+
+            s_out[j]      = seed;
+            s_prev_out[j] = seed;
         }
         /* Anchor each segment at where output actually is, so late or jittery
            command frames do not accumulate position error. */
@@ -315,6 +615,44 @@ static void send_input_pos(uint8_t bus, uint32_t node, float pos, float vel_ff)
 
 void act_tick_1khz(void)
 {
+    /* Age every joint's position, armed or not - the estimator has to know
+       how old a value is even while nothing is being commanded. */
+    uint32_t primask = critical_enter();
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        if (s_pos_age[j] < 0xFFFFu)
+        {
+            s_pos_age[j]++;
+        }
+    }
+    critical_exit(primask);
+
+    /* Keep a standing disarm standing. A single frame can be lost, and a
+       drive that reboots comes back in whatever state it was configured for. */
+    if (s_disarmed)
+    {
+        if (++s_disarm_repeat >= ODRV_DISARM_REPEAT_TICKS)
+        {
+            s_disarm_repeat = 0;
+            request_all_idle();
+        }
+    }
+
+    /* Likewise for an arm that has not completed: keep asking the stragglers
+       until every axis reports closed loop, then stop. */
+    if (s_arming)
+    {
+        if (act_all_closed_loop())
+        {
+            s_arming = 0;
+        }
+        else if (++s_arm_repeat >= ODRV_ARM_REPEAT_TICKS)
+        {
+            s_arm_repeat = 0;
+            request_all_closed_loop();
+        }
+    }
+
     if (!s_have_target)
     {
         return;
@@ -356,6 +694,7 @@ void act_get(act_telemetry_t *out)
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
+        out->pos_age[j]  = s_pos_age[j];
         s_telem.flags[j] = 0;
     }
 

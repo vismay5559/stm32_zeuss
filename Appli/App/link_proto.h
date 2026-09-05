@@ -31,7 +31,7 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     3u      /* v3: policy block, 4 contacts        */
+#define NEXUS_PROTO_VERSION     5u      /* v5: diagnostics block               */
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
@@ -69,6 +69,28 @@
 
 /* cmd flags bits. */
 #define NEXUS_CMD_ENABLE        (1u << 0)
+
+/* safety_state values - see safety.h. */
+#define NEXUS_SAFETY_BOOT       0u
+#define NEXUS_SAFETY_IDLE       1u
+#define NEXUS_SAFETY_ARMED      2u
+#define NEXUS_SAFETY_FAULT      3u
+
+/* fk_valid bits, matching foot_z's order. */
+#define NEXUS_FK_RIGHT_VALID    (1u << 0)
+#define NEXUS_FK_LEFT_VALID     (1u << 1)
+
+/*
+ * stream_flags - which optional parts of the packet are actually being
+ * produced.
+ *
+ * ref_angle and phase are reserved space that the STM32 fills with zeros
+ * because the gait library does not run here yet. The old comment said the Pi
+ * could detect this "because phase never advances", which is
+ * indistinguishable from a gait legitimately parked at phase 0. A bit that
+ * says so is not a guess.
+ */
+#define NEXUS_STREAM_GAIT_LIVE  (1u << 0)   /* ref_angle and phase are real */
 
 typedef struct __attribute__((packed))
 {
@@ -135,19 +157,50 @@ typedef struct __attribute__((packed))
     float    fused_gyro_bias[3];             /* 368 rad/s, estimated            */
     float    fused_accel_bias[3];            /* 380 m/s^2, estimated            */
 
-    /* ---- 2-byte fields ---------------------------------------- 392 */
-    uint16_t contact_ticks[2];               /* 392 ticks each foot held state  */
+    /* ---- diagnostics ------------------------------------------ 392 *
+     *
+     * These used to go out only on the serial console, in a line that cost
+     * ~9.5 ms of a 1 ms control loop every two seconds - a diagnostic that
+     * caused nine of the missed ticks it was reporting. The Pi is already
+     * reading this packet at 1 kHz, so they belong here, where they can be
+     * plotted against everything else that happened at the same moment.
+     */
+    uint32_t overruns;                       /* 392 ticks missed, cumulative    */
+    uint32_t usb_dropped;                    /* 396 state packets skipped       */
+    uint16_t can_dropped[2];                 /* 400 TX frames dropped, per bus  */
+    uint16_t loop_us_max;                    /* 404 worst cycle since last sent */
+    uint16_t enc_stalls;                     /* 406 SPI transfers abandoned     */
+    uint8_t  can_bus_off[2];                 /* 408 bus-off events, saturating  */
+    uint8_t  stream_flags;                   /* 410 NEXUS_STREAM_*              */
+    uint8_t  reserved0;                      /* 411 keeps the next field even   */
+
+    /* ---- 2-byte fields ---------------------------------------- 412 */
+    uint16_t contact_ticks[2];               /* 412 ticks each foot held state  */
 
     /* ---- 1-byte fields ---------------------------------------- 396 */
-    uint8_t  act_state[NEXUS_NUM_JOINTS];    /* 396 raw ODrive axis_state       */
-    uint8_t  act_flags[NEXUS_NUM_JOINTS];    /* 406 per-joint freshness         */
-    uint8_t  enc_valid;                      /* 416 bit per encoder             */
-    uint8_t  contacts;                       /* 417 switch + derived foot bits  */
-    uint8_t  fused_valid;                    /* 418 NEXUS_FUSION_*              */
-    uint8_t  health;                         /* 419 health.h bitmask            */
+    uint8_t  act_state[NEXUS_NUM_JOINTS];    /* 416 raw ODrive axis_state       */
+    uint8_t  act_flags[NEXUS_NUM_JOINTS];    /* 426 per-joint freshness         */
+    uint8_t  enc_valid;                      /* 436 bit per encoder             */
+    uint8_t  contacts;                       /* 437 switch + derived foot bits  */
+    uint8_t  fused_valid;                    /* 438 NEXUS_FUSION_*              */
+    uint8_t  health;                         /* 439 health.h bitmask            */
 
-    uint16_t crc;                            /* 420 CRC16-CCITT over 0..419     */
-} nexus_state_t;                             /* 422 total                       */
+    /*
+     * Which foot_z entries are real measurements: bit 0 = foot_z[0] (right),
+     * bit 1 = foot_z[1] (left). An invalid entry is sent as NaN as well, so a
+     * reader can use either signal - but never treat a foot_z as a height
+     * without checking one of them. It used to be sent as 0.0, which reads as
+     * "exactly on the ground".
+     */
+    uint8_t  fk_valid;                       /* 440 bit per foot                */
+
+    /* NEXUS_SAFETY_* - whether the board is allowed to be driving, and why
+       not. Lets the Pi see a fault it caused, and see that a stand-down or a
+       re-arm handshake was actually acted on. */
+    uint8_t  safety_state;                   /* 441                             */
+
+    uint16_t crc;                            /* 442 CRC16-CCITT over 0..441     */
+} nexus_state_t;                             /* 444 total                       */
 
 typedef struct __attribute__((packed))
 {

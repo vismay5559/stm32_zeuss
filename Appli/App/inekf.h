@@ -50,7 +50,6 @@ typedef struct
     inekf_real_t init_orientation;
     inekf_real_t init_velocity;
     inekf_real_t init_position;
-    inekf_real_t init_contact;
     inekf_real_t init_gyro_bias;
     inekf_real_t init_accel_bias;
 

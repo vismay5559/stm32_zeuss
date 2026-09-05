@@ -10,8 +10,25 @@
  * as lift-off; conversely a false "in contact" corrupts an InEKF velocity
  * estimate badly, so landing is only declared once the switch has settled.
  */
+/*
+ * Overridable at configure time. These are exactly the numbers you want to
+ * trim against a real gait - a foot that chatters as it rolls, a heel strike
+ * that bounces - and having to edit and reflash to try a value discourages
+ * trying any.
+ *
+ *     CONTACT_MAKE_TICKS=4 CONTACT_BREAK_TICKS=12 cmake --preset Debug
+ */
+#ifndef CONTACT_MAKE_TICKS
 #define CONTACT_MAKE_TICKS   3u
+#endif
+#ifndef CONTACT_BREAK_TICKS
 #define CONTACT_BREAK_TICKS  8u
+#endif
+
+/* Break must outlast make, or a planted foot that chatters reads as lift-off -
+   which is the failure this asymmetry exists to prevent. */
+_Static_assert(CONTACT_BREAK_TICKS > CONTACT_MAKE_TICKS,
+               "contact break confirmation must be longer than make");
 
 #define STABLE_TICKS_MAX     0xFFFFu
 
@@ -19,7 +36,7 @@ typedef struct
 {
     GPIO_TypeDef *port;
     uint16_t      pin;
-    uint8_t       mask;
+    uint8_t       mask;      /* a NEXUS_CONTACT_*_BIT, never an index */
     uint16_t      counter;
     uint8_t       stable;
 } contact_ch_t;
@@ -29,12 +46,43 @@ static uint8_t      s_switches;
 static uint8_t      s_feet;
 static uint16_t     s_foot_ticks[2];
 
+/*
+ * link_proto.h names each contact TWICE - once as an array index for
+ * contact[] in the policy block, and once as a bit for the `contacts`
+ * bitmask:
+ *
+ *     NEXUS_CONTACT_L_TOE       0          <- index into contact[]
+ *     NEXUS_CONTACT_L_TOE_BIT   (1u << 0)  <- bit in the mask
+ *
+ * The two families differ by four characters and the index one is a perfectly
+ * valid uint8_t, so writing an index into `mask` compiles silently and yields
+ * a mask table of {0,1,2,3}: the left toe sets nothing at all, the right toe
+ * reports as the left heel, and the right heel sets two bits. Every downstream
+ * consumer - the policy's contact[], contact_feet(), and the InEKF's choice of
+ * which foot to anchor - then works from switches that are not the ones being
+ * pressed.
+ *
+ * The assertions below make that substitution a build error rather than a
+ * robot that cannot estimate its own velocity.
+ */
+_Static_assert(NEXUS_CONTACT_L_TOE_BIT  == (1u << NEXUS_CONTACT_L_TOE),
+               "L_TOE bit must sit at the L_TOE index");
+_Static_assert(NEXUS_CONTACT_L_HEEL_BIT == (1u << NEXUS_CONTACT_L_HEEL),
+               "L_HEEL bit must sit at the L_HEEL index");
+_Static_assert(NEXUS_CONTACT_R_TOE_BIT  == (1u << NEXUS_CONTACT_R_TOE),
+               "R_TOE bit must sit at the R_TOE index");
+_Static_assert(NEXUS_CONTACT_R_HEEL_BIT == (1u << NEXUS_CONTACT_R_HEEL),
+               "R_HEEL bit must sit at the R_HEEL index");
+
 void contact_init(void)
 {
-    s_ch[0] = (contact_ch_t){ L_TOE_GPIO_Port,  L_TOE_Pin,  NEXUS_CONTACT_L_TOE,  0, 0 };
-    s_ch[1] = (contact_ch_t){ L_HEEL_GPIO_Port, L_HEEL_Pin, NEXUS_CONTACT_L_HEEL, 0, 0 };
-    s_ch[2] = (contact_ch_t){ R_TOE_GPIO_Port,  R_TOE_Pin,  NEXUS_CONTACT_R_TOE,  0, 0 };
-    s_ch[3] = (contact_ch_t){ R_HEEL_GPIO_Port, R_HEEL_Pin, NEXUS_CONTACT_R_HEEL, 0, 0 };
+    s_ch[0] = (contact_ch_t){ L_TOE_GPIO_Port,  L_TOE_Pin,  NEXUS_CONTACT_L_TOE_BIT,  0, 0 };
+    s_ch[1] = (contact_ch_t){ L_HEEL_GPIO_Port, L_HEEL_Pin, NEXUS_CONTACT_L_HEEL_BIT, 0, 0 };
+    s_ch[2] = (contact_ch_t){ R_TOE_GPIO_Port,  R_TOE_Pin,  NEXUS_CONTACT_R_TOE_BIT,  0, 0 };
+    s_ch[3] = (contact_ch_t){ R_HEEL_GPIO_Port, R_HEEL_Pin, NEXUS_CONTACT_R_HEEL_BIT, 0, 0 };
+
+    /* Each channel must own exactly one bit, and no two may share one. */
+    _Static_assert(NEXUS_NUM_CONTACTS == 4, "the channel table assumes four switches");
 
     s_switches      = 0;
     s_feet          = 0;
@@ -76,11 +124,11 @@ void contact_poll(void)
     /* Either contact point planted means that foot is loaded. */
     uint8_t feet = 0;
 
-    if (sw & (NEXUS_CONTACT_L_TOE | NEXUS_CONTACT_L_HEEL))
+    if (sw & (NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_HEEL_BIT))
     {
         feet |= NEXUS_CONTACT_L_FOOT;
     }
-    if (sw & (NEXUS_CONTACT_R_TOE | NEXUS_CONTACT_R_HEEL))
+    if (sw & (NEXUS_CONTACT_R_TOE_BIT | NEXUS_CONTACT_R_HEEL_BIT))
     {
         feet |= NEXUS_CONTACT_R_FOOT;
     }

@@ -22,7 +22,6 @@ void inekf_default_params(inekf_params_t *p)
     p->init_orientation  = 0.5236f;   /* 30 deg */
     p->init_velocity     = 1.0f;
     p->init_position     = 0.1f;
-    p->init_contact      = 0.1f;
     p->init_gyro_bias    = 0.005f;
     p->init_accel_bias   = 0.05f;
 
@@ -52,7 +51,15 @@ void inekf_reset(inekf_t *f)
         f->P[IDX(INEKF_IDX_BG  + i, INEKF_IDX_BG  + i)] = q->init_gyro_bias   * q->init_gyro_bias;
         f->P[IDX(INEKF_IDX_BA  + i, INEKF_IDX_BA  + i)] = q->init_accel_bias  * q->init_accel_bias;
     }
-    /* Inactive contact blocks stay at zero until the foot lands. */
+    /*
+     * Inactive contact blocks stay at zero until the foot lands.
+     *
+     * There is deliberately no init_contact parameter. A new contact does not
+     * start from a fixed prior - inekf_add_contact() gives it the position
+     * block's covariance plus the encoder noise through the leg Jacobian,
+     * which is what equation 32 says. The parameter that used to sit here was
+     * never read by anything.
+     */
 }
 
 void inekf_init(inekf_t *f, const inekf_params_t *params)
@@ -269,13 +276,16 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
 
     const inekf_real_t sg2 = q->noise_gyro * q->noise_gyro;
 
-    for (int a = 0; a < nrow; a++)
+    /* ra/rb, not a/b: `a` is the bias-corrected accelerometer a few dozen
+       lines up, and shadowing it in the middle of the covariance assembly is
+       the kind of thing that reads correctly right up until it isn't. */
+    for (int ra = 0; ra < nrow; ra++)
     {
-        for (int b = 0; b < nrow; b++)
+        for (int rb = 0; rb < nrow; rb++)
         {
             inekf_real_t blk3[9];
-            lg_mat3_mul_bt(blk3, pre[a], pre[b]);      /* Pa * Pb^T */
-            lg_matn_set_block3_scaled(Qb, row[a], row[b], blk3, sg2);
+            lg_mat3_mul_bt(blk3, pre[ra], pre[rb]);    /* Pa * Pb^T */
+            lg_matn_set_block3_scaled(Qb, row[ra], row[rb], blk3, sg2);
         }
     }
 

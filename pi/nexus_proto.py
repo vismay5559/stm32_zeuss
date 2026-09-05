@@ -100,6 +100,26 @@ FUSION_INVALID = 0
 FUSION_CONVERGING = 1
 FUSION_OK = 2
 
+# safety_state - what the board is allowing itself to do
+SAFETY_BOOT = 0
+SAFETY_IDLE = 1
+SAFETY_ARMED = 2
+SAFETY_FAULT = 3
+
+SAFETY_NAMES = {
+    SAFETY_BOOT: "BOOT",
+    SAFETY_IDLE: "IDLE",
+    SAFETY_ARMED: "ARMED",
+    SAFETY_FAULT: "FAULT",
+}
+
+# fk_valid bits, matching foot_z's order
+FK_RIGHT_VALID = 1 << 0
+FK_LEFT_VALID = 1 << 1
+
+# stream_flags - which optional parts of the packet are really being produced
+STREAM_GAIT_LIVE = 1 << 0
+
 ACT_TELEM_FRESH = 1 << 0
 ACT_HB_FRESH = 1 << 1
 
@@ -162,6 +182,15 @@ STATE_FORMAT = (
     "3f"     # fused_vel       m/s world, before heading rotation
     "3f"     # fused_gyro_bias
     "3f"     # fused_accel_bias
+    # ---------------- diagnostics ----------------
+    "I"      # overruns        ticks missed, cumulative
+    "I"      # usb_dropped     state packets skipped
+    "2H"     # can_dropped     TX frames dropped per bus
+    "H"      # loop_us_max     worst cycle since the last packet
+    "H"      # enc_stalls      SPI transfers abandoned
+    "2B"     # can_bus_off     bus-off events per bus, saturating
+    "B"      # stream_flags    STREAM_*
+    "B"      # reserved0
     "2H"     # contact_ticks
     "10B"    # act_state
     "10B"    # act_flags
@@ -169,6 +198,8 @@ STATE_FORMAT = (
     "B"      # contacts
     "B"      # fused_valid
     "B"      # health
+    "B"      # fk_valid        bit per foot_z entry
+    "B"      # safety_state    SAFETY_*
     "H"      # crc
 )
 STATE_SIZE = struct.calcsize(STATE_FORMAT)
@@ -246,6 +277,14 @@ class NexusState:
     fused_gyro_bias: List[float]
     fused_accel_bias: List[float]
 
+    overruns: int                # 1 kHz ticks the firmware missed, cumulative
+    usb_dropped: int             # state packets it could not hand to USB
+    can_dropped: List[int]       # TX frames dropped, per bus
+    loop_us_max: int             # worst control cycle since the last packet, us
+    enc_stalls: int              # encoder SPI transfers abandoned
+    can_bus_off: List[int]       # bus-off events per bus, saturating at 255
+    stream_flags: int            # STREAM_*
+    reserved0: int
     contact_ticks: List[int]
     act_state: List[int]
     act_flags: List[int]
@@ -253,6 +292,8 @@ class NexusState:
     contacts: int
     fused_valid: int
     health: int
+    fk_valid: int                # bit per foot_z entry; see foot_z_right/left
+    safety_state: int            # SAFETY_*
 
     # ---- convenience ----------------------------------------------------
 
@@ -283,10 +324,63 @@ class NexusState:
         return bool(self.contact[CONTACT_R_TOE] or self.contact[CONTACT_R_HEEL])
 
     @property
+    def foot_z_right(self) -> Optional[float]:
+        """Right foot height above the stance ground, or None if the leg's
+        joint angles were unreadable when this packet was built.
+
+        Do not read foot_z[0] directly without checking. An unusable entry is
+        sent as NaN (and flagged here), because the value it used to carry was
+        0.0 - indistinguishable from a foot resting exactly on the ground."""
+        return self.foot_z[0] if (self.fk_valid & FK_RIGHT_VALID) else None
+
+    @property
+    def foot_z_left(self) -> Optional[float]:
+        """Left foot height, or None. See foot_z_right."""
+        return self.foot_z[1] if (self.fk_valid & FK_LEFT_VALID) else None
+
+    @property
+    def gait_live(self) -> bool:
+        """True when ref_angle and phase are real.
+
+        They are reserved space filled with zeros until the gait library runs
+        on the STM32. Check this rather than watching phase for movement - a
+        gait parked at phase 0 looks identical to one that does not exist."""
+        return bool(self.stream_flags & STREAM_GAIT_LIVE)
+
+    @property
+    def loop_healthy(self) -> bool:
+        """True while the control loop is meeting its 1 ms deadline.
+
+        overruns is cumulative, so watch it for CHANGE rather than for zero -
+        a board that missed a tick during boot has a non-zero count forever."""
+        return self.loop_us_max < 1000
+
+    @property
+    def armed(self) -> bool:
+        """True when the board is actually driving the actuators."""
+        return self.safety_state == SAFETY_ARMED
+
+    @property
+    def faulted(self) -> bool:
+        """True when the board has taken the actuators away from you.
+
+        Recovering needs a stand_down() followed by an enabled command - see
+        NexusLink.stand_down()."""
+        return self.safety_state == SAFETY_FAULT
+
+    @property
+    def safety_state_name(self) -> str:
+        return SAFETY_NAMES.get(self.safety_state, "?")
+
+    @property
     def fusion_usable(self) -> bool:
         """True only once the estimator reports it has converged. Treat height
         and velocity as meaningless before this - the filter starts with a
-        30 degree orientation and 1 m/s velocity uncertainty."""
+        30 degree orientation and 1 m/s velocity uncertainty.
+
+        This also stays False while the firmware's robot_config.h has not been
+        marked calibrated: a filter can converge beautifully onto geometry that
+        does not match the robot, and converged is not the same as correct."""
         return self.fused_valid == FUSION_OK
 
     def faults(self) -> List[str]:
@@ -361,6 +455,14 @@ class NexusState:
             fused_vel=take(3),
             fused_gyro_bias=take(3),
             fused_accel_bias=take(3),
+            overruns=take(1)[0],
+            usb_dropped=take(1)[0],
+            can_dropped=take(2),
+            loop_us_max=take(1)[0],
+            enc_stalls=take(1)[0],
+            can_bus_off=take(2),
+            stream_flags=take(1)[0],
+            reserved0=take(1)[0],
             contact_ticks=take(2),
             act_state=take(NUM_JOINTS),
             act_flags=take(NUM_JOINTS),
@@ -368,6 +470,8 @@ class NexusState:
             contacts=take(1)[0],
             fused_valid=take(1)[0],
             health=take(1)[0],
+            fk_valid=take(1)[0],
+            safety_state=take(1)[0],
         )
 
     @classmethod

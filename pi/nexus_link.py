@@ -37,7 +37,8 @@ from typing import Callable, Deque, List, Optional, Sequence
 
 import serial
 
-from nexus_proto import NexusCommand, NexusState, STATE_SIZE
+from nexus_proto import (CMD_ENABLE, NUM_JOINTS, NexusCommand, NexusState,
+                         STATE_SIZE)
 
 
 class LinkStats:
@@ -242,20 +243,47 @@ class NexusLink:
 
     # ---- writing --------------------------------------------------------
 
-    def send_command(self, target_pos: Sequence[float], flags: int = 0) -> None:
+    def send_command(self, target_pos: Sequence[float],
+                     enable: bool = True, flags: int = 0) -> None:
         """Send a position command, in turns, one per joint.
 
         Send these at ~250 Hz. The STM32 interpolates between consecutive
         commands across its 1 kHz ticks, so sending faster gains nothing and
-        sending slower makes each ramp longer. If commands stop, the last
-        target is held rather than extrapolated."""
+        sending slower makes each ramp longer.
+
+        `enable` sets CMD_ENABLE, which is what actually authorises the board
+        to drive the actuators. It defaults to True because that is what a
+        policy loop wants on every call - but see stand_down() for the other
+        half of the contract.
+
+        If commands stop arriving the firmware does NOT hold the last target:
+        after 200 ms it faults, idles every axis, and requires an explicit
+        stand_down() / send_command() handshake before it will move again."""
         if self._ser is None:
             raise RuntimeError("link not started")
+
+        if enable:
+            flags |= CMD_ENABLE
 
         with self._tx_lock:
             cmd = NexusCommand(seq=self._cmd_seq, target_pos=list(target_pos), flags=flags)
             self._cmd_seq = (self._cmd_seq + 1) & 0xFFFFFFFF
             self._ser.write(cmd.pack())
+
+    def stand_down(self, target_pos: Optional[Sequence[float]] = None) -> None:
+        """Hand the actuators back: send a command with CMD_ENABLE clear.
+
+        Two reasons to call this. Ending a run cleanly is the obvious one -
+        the firmware idles the axes rather than holding torque until someone
+        pulls the power.
+
+        The other is recovery. A fault latches on the firmware side, and it
+        will not accept an enabled command again until it has seen a disabled
+        one. That is deliberate: without the handshake, a link that dropped
+        for 300 ms would hand control straight back to a policy that has no
+        idea it ever lost it, mid-stride."""
+        self.send_command(target_pos if target_pos is not None else [0.0] * NUM_JOINTS,
+                          enable=False)
 
 
 # --------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 #define HEALTH_H
 
 #include <stdint.h>
+#include "imu_bno085.h"
 
 /*
  * Subsystem health tracking.
@@ -46,12 +47,58 @@
  */
 #define HEALTH_EXPECTED_NOW  (HEALTH_TIMING | HEALTH_IMU)
 
+/* Everything the finished robot has plugged in. */
+#define HEALTH_EXPECTED_ROBOT  (HEALTH_TIMING | HEALTH_IMU | HEALTH_ENC | \
+                                HEALTH_CAN1   | HEALTH_CAN2 | HEALTH_LINK)
+
+/*
+ * What app_init() actually watches.
+ *
+ * This defaults to the full set, because safety.c will not arm the actuators
+ * until everything being watched is healthy - and a failsafe that is not
+ * watching the Pi link is not a failsafe. A partially wired bench therefore
+ * sits in BOOT and refuses to arm, which is the correct answer to "half the
+ * robot is missing", not an obstacle to work around.
+ *
+ * During bring-up, narrow it at configure time rather than by editing here:
+ *
+ *     HEALTH_EXPECTED_MASK='(HEALTH_TIMING|HEALTH_IMU)' cmake --preset Debug
+ *
+ * (An environment variable, not -D: the top-level project configures Appli/
+ * through ExternalProject_Add and does not forward -D arguments. See
+ * Appli/CMakeLists.txt.)
+ */
+#ifndef HEALTH_EXPECTED_MASK
+#define HEALTH_EXPECTED_MASK  HEALTH_EXPECTED_ROBOT
+#endif
+
 void     health_init(uint32_t expected_mask);
 void     health_set_expected(uint32_t mask);
 uint32_t health_expected(void);
 
-/* Call once per 1 kHz tick, after the subsystems have been serviced. */
-void     health_tick(void);
+/*
+ * Call once per 1 kHz tick, after the subsystems have been serviced.
+ *
+ * Takes the sensor readings the caller has ALREADY fetched this tick rather
+ * than fetching its own. It used to call imu_get() and enc_get() again for
+ * data app.c had read microseconds earlier - two more critical sections and a
+ * struct copy every millisecond, and worse, a second sample that could differ
+ * from the one that went into the packet.
+ */
+void     health_tick(const imu_sample_t *imu, uint8_t enc_valid);
+
+/*
+ * Acknowledge the latched timing fault.
+ *
+ * Every other check clears itself the moment data flows again. HEALTH_TIMING
+ * deliberately does not - a missed deadline matters after the tick that missed
+ * it - so something has to be able to say "I have seen that, carry on", or the
+ * first overrun of a session locks the robot out permanently.
+ *
+ * Called by safety.c on the explicit re-arm handshake, so acknowledging is
+ * always a deliberate act by whoever is flying the robot.
+ */
+void     health_clear_latched(void);
 
 /* Currently-faulted subsystems, already masked by "expected". 0 = all good. */
 uint32_t health_faults(void);

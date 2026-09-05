@@ -1,59 +1,25 @@
 #include "fusion.h"
 #include "kinematics.h"
+#include "robot_config.h"
 #include <math.h>
 #include <string.h>
 
 /* ===================================================================== */
-/*  ROBOT WIRING - joint angles come from two different subsystems         */
+/*  ROBOT WIRING                                                          */
 /* ===================================================================== */
 
 /*
- * Forward kinematics wants four angles per leg, in chain order:
+ * Which drive is which joint, the link lengths, and the encoder zeros all
+ * live in robot_config.h now. They used to be spread across this file and
+ * kinematics.c as placeholders that the estimator then believed completely.
  *
- *     [ hip_pitch, hip_roll, knee_pitch, ankle_pitch ]
- *
- * On Zeus those four come from two different places (matching the joint map
- * in zeus_26's kinematics.py):
- *
- *   SEA joints  0, 2, 5, 7  <- AS5048A encoders, already radians
- *   QDD joints  1, 3, 6, 8  <- ODrive act_pos, in TURNS
- *
- * So per leg: hip_pitch and knee come off the springs, hip_roll and ankle come
- * off CAN. Getting this table wrong produces a foot position that is confidently
- * wrong, which the filter will then trust - so it is written explicitly rather
- * than computed.
+ * The important change is not where they live but what they are: forward
+ * kinematics now takes ALL FOUR joint angles per leg from the ODrives.
+ * hip_pitch and knee used to come from the AS5048A encoders, which sit after
+ * the series springs and measure DEFLECTION - a small signed wind-up, not an
+ * absolute joint angle. Both the README and app.c say so explicitly; only
+ * this file disagreed, and it was the one feeding the filter.
  */
-
-#define SRC_ENCODER   0
-#define SRC_ACTUATOR  1
-
-typedef struct
-{
-    uint8_t source;   /* SRC_ENCODER or SRC_ACTUATOR */
-    uint8_t index;    /* encoder index, or joint index into act_pos           */
-    float   sign;     /* +1 or -1, to match the FK sign convention            */
-    float   offset;   /* radians added after scaling: the zero of that joint  */
-} joint_src_t;
-
-/*
- * offset and sign CANNOT be determined without the hardware. They are the
- * calibration: put the leg in a known pose, read the raw values, and solve for
- * them. Until that is done the FK output is offset by however wrong these are,
- * and the filter will happily believe it.
- */
-static const joint_src_t s_left[KIN_LEG_JOINTS] = {
-    /* hip_pitch   */ { SRC_ENCODER,  0, 1.0f, 0.0f },   /* SEA joint 0 */
-    /* hip_roll    */ { SRC_ACTUATOR, 1, 1.0f, 0.0f },   /* QDD joint 1 */
-    /* knee_pitch  */ { SRC_ENCODER,  1, 1.0f, 0.0f },   /* SEA joint 2 */
-    /* ankle_pitch */ { SRC_ACTUATOR, 3, 1.0f, 0.0f },   /* QDD joint 3 */
-};
-
-static const joint_src_t s_right[KIN_LEG_JOINTS] = {
-    /* hip_pitch   */ { SRC_ENCODER,  2, 1.0f, 0.0f },   /* SEA joint 5 */
-    /* hip_roll    */ { SRC_ACTUATOR, 6, 1.0f, 0.0f },   /* QDD joint 6 */
-    /* knee_pitch  */ { SRC_ENCODER,  3, 1.0f, 0.0f },   /* SEA joint 7 */
-    /* ankle_pitch */ { SRC_ACTUATOR, 8, 1.0f, 0.0f },   /* QDD joint 8 */
-};
 
 #define TURNS_TO_RAD   6.28318531f
 
@@ -96,7 +62,8 @@ static const joint_src_t s_right[KIN_LEG_JOINTS] = {
 static inekf_t      s_f;
 static kin_params_t s_kin;
 
-static uint32_t s_prev_imu_seq;
+static uint32_t s_prev_accel_seq;
+static uint32_t s_prev_gyro_seq;
 static uint32_t s_last_imu_us;
 static uint16_t s_imu_idle;
 static uint8_t  s_have_imu_time;
@@ -113,7 +80,8 @@ void fusion_init(void)
     inekf_init(&s_f, NULL);
     kin_defaults(&s_kin);
 
-    s_prev_imu_seq    = 0;
+    s_prev_accel_seq  = 0;
+    s_prev_gyro_seq   = 0;
     s_last_imu_us     = 0;
     s_imu_idle        = 0;
     s_have_imu_time   = 0;
@@ -144,52 +112,72 @@ static void anchor_ground(const inekf_real_t *p_body)
     s_ground_anchored = 1;
 }
 
-/* Gather one leg's four joint angles from wherever they actually live. */
+/* Gather one leg's four joint angles from the drives. */
 static void leg_angles(const joint_src_t *map,
-                       const float *enc_rad,
                        const act_telemetry_t *act,
                        float *q_out)
 {
     for (int j = 0; j < KIN_LEG_JOINTS; j++)
     {
-        float raw;
-
-        if (map[j].source == SRC_ENCODER)
-        {
-            raw = enc_rad[map[j].index];            /* already radians */
-        }
-        else
-        {
-            raw = act->pos[map[j].index] * TURNS_TO_RAD;
-        }
+        float raw = act->pos[map[j].act_index] * TURNS_TO_RAD;
 
         q_out[j] = map[j].sign * raw + map[j].offset;
     }
 }
 
-/* Are all four angles for this leg coming from working sensors? */
-static uint8_t leg_sources_ok(const joint_src_t *map, uint8_t enc_valid,
-                              const act_telemetry_t *act)
+/* Are all four angles for this leg coming from working, talking drives? */
+static uint8_t leg_sources_ok(const joint_src_t *map, const act_telemetry_t *act)
 {
     for (int j = 0; j < KIN_LEG_JOINTS; j++)
     {
-        if (map[j].source == SRC_ENCODER)
+        uint8_t idx = map[j].act_index;
+
+        /* An axis in a fault state is not reporting a trustworthy angle. */
+        if (act->axis_error[idx] != 0u)
         {
-            if ((enc_valid & (1u << map[j].index)) == 0u)
-            {
-                return 0;
-            }
+            return 0;
         }
-        else
+
+        /*
+         * Nor is one that has stopped reporting at all. When a bus goes quiet
+         * act->pos simply stops changing: the last value persists and
+         * axis_error stays 0, so without this the FK produces a confident foot
+         * position from angles that are seconds old.
+         */
+        if (act->pos_age[idx] > ACT_POS_STALE_TICKS)
         {
-            /* An axis in a fault state is not reporting a trustworthy angle. */
-            if (act->axis_error[map[j].index] != 0u)
-            {
-                return 0;
-            }
+            return 0;
         }
     }
     return 1;
+}
+
+/*
+ * Did any of this leg's joints report a NEW position since the last tick?
+ *
+ * The contact update used to run every tick at 1 kHz while the underlying
+ * joint angles only change at the drives' telemetry rate. Feeding the same
+ * measurement into a Kalman update over and over, each time with independent
+ * noise, shrinks the covariance far faster than the information justifies -
+ * and an over-tight P makes the convergence gate in update_status() pass early
+ * and stay passed, which is the wrong direction for a gate whose whole job is
+ * to say "you may trust this now".
+ *
+ * pos_age is zeroed in the FDCAN ISR and aged once per tick in
+ * act_tick_1khz(), which runs before this, so zero means "arrived since the
+ * last tick" - exactly the "is this a new measurement" question.
+ */
+static uint8_t leg_has_new_measurement(const joint_src_t *map,
+                                       const act_telemetry_t *act)
+{
+    for (int j = 0; j < KIN_LEG_JOINTS; j++)
+    {
+        if (act->pos_age[map[j].act_index] == 0u)
+        {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Foot position in the body frame, refreshed every tick for foot_z. */
@@ -207,11 +195,63 @@ static void update_status(void)
                       (inekf_num_contacts(&s_f) > 0);
 
     /*
-     * A NaN anywhere means the filter has diverged. Comparing a NaN against
-     * anything is false, so the check below rejects it naturally - but say so
-     * explicitly, because a diverged filter must never report OK.
+     * A NaN anywhere means the filter has diverged, and a diverged filter must
+     * never report OK.
+     *
+     * This used to check vvar, p[2] and v[0] - three numbers out of a state
+     * that is a rotation matrix, three vectors, two contact positions and a
+     * 21x21 covariance. A NaN in the rotation or in a contact position
+     * survived all three checks and went out in the packet. Sweeping the whole
+     * thing is 40-odd comparisons on a tick that already does tens of
+     * thousands of multiply-accumulates.
      */
-    uint8_t sane = !(isnan((float)vvar) || isnan(s_f.p[2]) || isnan(s_f.v[0]));
+    uint8_t sane = 1;
+
+    for (int i = 0; i < 9; i++)
+    {
+        if (isnan((float)s_f.R[i])) { sane = 0; }
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        if (isnan((float)s_f.v[i]) || isnan((float)s_f.p[i]) ||
+            isnan((float)s_f.bg[i]) || isnan((float)s_f.ba[i]))
+        {
+            sane = 0;
+        }
+    }
+    for (int k = 0; k < INEKF_MAX_CONTACTS; k++)
+    {
+        if (!s_f.active[k])
+        {
+            continue;
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            if (isnan((float)s_f.d[k][i])) { sane = 0; }
+        }
+    }
+
+    /*
+     * The covariance diagonal too. A negative variance is not a NaN but is
+     * just as impossible, and it is the first visible sign of the covariance
+     * losing positive-definiteness - which is what the Joseph form and the
+     * explicit symmetrisation exist to prevent, and worth catching if they
+     * ever fail to.
+     */
+    for (int i = 0; i < INEKF_ERR_MAX; i++)
+    {
+        inekf_real_t d = s_f.P[IDX(i, i)];
+
+        if (isnan((float)d) || (d < 0.0f))
+        {
+            sane = 0;
+        }
+    }
+
+    if (isnan((float)vvar))
+    {
+        sane = 0;
+    }
 
     if (!sane)
     {
@@ -243,21 +283,52 @@ static void update_status(void)
         s_converged_ticks = 0;
     }
 
-    s_status = (s_converged_ticks >= CONV_HOLD_TICKS) ? NEXUS_FUSION_OK
-                                                      : NEXUS_FUSION_CONVERGING;
+    if (s_converged_ticks < CONV_HOLD_TICKS)
+    {
+        s_status = NEXUS_FUSION_CONVERGING;
+        return;
+    }
+
+    /*
+     * Converged is not the same as correct.
+     *
+     * The covariance says how well the filter agrees with ITSELF. It says
+     * nothing about whether the leg geometry it is agreeing about matches the
+     * robot. With placeholder link lengths, an unverified joint map and no
+     * joint zeros, the filter converges beautifully onto a foot position that
+     * does not exist - and the Pi has no way to tell that apart from a good
+     * estimate.
+     *
+     * So OK requires someone to have measured the machine and said so in
+     * robot_config.h. Until then the Pi sees CONVERGING forever, which is the
+     * honest answer: running, plausible, not to be trusted.
+     */
+    s_status = robot_config_is_calibrated() ? NEXUS_FUSION_OK
+                                            : NEXUS_FUSION_CONVERGING;
 }
 
 void fusion_tick(const imu_sample_t *imu,
-                 const float *enc_rad, uint8_t enc_valid,
                  const act_telemetry_t *act,
                  uint8_t contacts,
                  uint32_t now_us)
 {
-    /* ---- 1. predict, but only on a genuinely new IMU sample ---------- */
-    if (imu->seq != s_prev_imu_seq)
+    /* ---- 1. predict, but only on a genuinely new INERTIAL sample ----- */
+
+    /*
+     * Both the accelerometer and the gyro must have moved on. The shared
+     * imu->seq advances on any of the three reports, and the rotation vector
+     * runs at 100 Hz independently of the two that matter here - so keying off
+     * it propagated ~100 times a second over a fresh dt using gyro and
+     * accelerometer readings that had already been integrated once.
+     */
+    uint8_t inertial_new = (imu->accel_seq != s_prev_accel_seq) &&
+                           (imu->gyro_seq  != s_prev_gyro_seq);
+
+    if (inertial_new)
     {
-        s_prev_imu_seq = imu->seq;
-        s_imu_idle     = 0;
+        s_prev_accel_seq = imu->accel_seq;
+        s_prev_gyro_seq  = imu->gyro_seq;
+        s_imu_idle       = 0;
 
         if (s_have_imu_time)
         {
@@ -285,13 +356,13 @@ void fusion_tick(const imu_sample_t *imu,
 
     /* ---- 2. contact events and updates ------------------------------- */
     const uint8_t foot_mask[2] = { NEXUS_CONTACT_L_FOOT, NEXUS_CONTACT_R_FOOT };
-    const joint_src_t *maps[2] = { s_left, s_right };
+    const joint_src_t *maps[2] = { g_leg_joints[0], g_leg_joints[1] };
     const inekf_real_t *hips[2] = { s_kin.left_hip_offset, s_kin.right_hip_offset };
 
     for (int leg = 0; leg < 2; leg++)
     {
         uint8_t down = (contacts & foot_mask[leg]) ? 1u : 0u;
-        uint8_t ok   = leg_sources_ok(maps[leg], enc_valid, act);
+        uint8_t ok   = leg_sources_ok(maps[leg], act);
 
         /*
          * A foot with unreadable joint angles is treated as lifted. Anchoring
@@ -313,8 +384,16 @@ void fusion_tick(const imu_sample_t *imu,
          * leg leaves the ground would be worse than useless to a gait policy,
          * which cares most about the swing foot.
          */
-        leg_angles(maps[leg], enc_rad, act, q);
-        kin_foot(&s_kin, hips[leg], q, p_body, J);
+        leg_angles(maps[leg], act, q);
+
+        /*
+         * The Jacobian is only wanted when this foot is planted, and it costs
+         * eight extra FK evaluations - more than the position. A swing foot is
+         * evaluated purely for foot_z, so it asks for the position alone.
+         */
+        uint8_t want_jacobian = down;
+
+        kin_foot(&s_kin, hips[leg], q, p_body, want_jacobian ? J : NULL);
 
         s_foot_body[leg][0] = p_body[0];
         s_foot_body[leg][1] = p_body[1];
@@ -338,8 +417,10 @@ void fusion_tick(const imu_sample_t *imu,
             inekf_remove_contact(&s_f, leg);
             s_foot_down[leg] = 0;
         }
-        else if (down)
+        else if (down && leg_has_new_measurement(maps[leg], act))
         {
+            /* Only on a genuinely new measurement - see the note on
+               leg_has_new_measurement(). */
             inekf_update_contact(&s_f, leg, p_body, J);
         }
     }
@@ -402,15 +483,37 @@ void fusion_fill_state(nexus_state_t *st)
         const inekf_real_t *R = s_f.R;
         const int leg_of[2] = { 1, 0 };      /* foot_z[0]=right, [1]=left */
 
+        st->fk_valid = 0u;
+
         for (int i = 0; i < 2; i++)
         {
             int leg = leg_of[i];
             const inekf_real_t *b = s_foot_body[leg];
 
-            /* Third row of R times the body-frame offset. */
-            st->foot_z[i] = s_foot_ok[leg]
-                ? (float)(s_f.p[2] + R[6] * b[0] + R[7] * b[1] + R[8] * b[2])
-                : 0.0f;
+            if (s_foot_ok[leg])
+            {
+                /* Third row of R times the body-frame offset. */
+                st->foot_z[i] = (float)(s_f.p[2] +
+                                        R[6] * b[0] + R[7] * b[1] + R[8] * b[2]);
+                st->fk_valid |= (uint8_t)(1u << i);
+            }
+            else
+            {
+                /*
+                 * NaN, not 0.0.
+                 *
+                 * Zero is the single most misleading value available here: to
+                 * a gait policy it reads as "this foot is exactly on the
+                 * ground", which is precisely the wrong conclusion to draw
+                 * from a leg whose joint angles are unreadable. A NaN survives
+                 * the CRC, propagates visibly through any arithmetic, and
+                 * cannot be mistaken for a measurement.
+                 *
+                 * fk_valid carries the same information as a bit, for callers
+                 * that would rather branch than test for NaN.
+                 */
+                st->foot_z[i] = NAN;
+            }
         }
     }
 }
