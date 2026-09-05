@@ -30,8 +30,16 @@ permissions:
 
 jobs:
   host-tests:
-    name: Host tests (logic)
+    # Both compilers, because one compiler's silence is not evidence. GCC
+    # rejected a packed-member access in fusion.c that clang accepts without a
+    # word, and it sat there through green local runs on a Mac - where `gcc`
+    # is Apple clang under another name - until CI built it with real GCC.
+    name: Host tests (${{ matrix.cc }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
 
@@ -41,6 +49,8 @@ jobs:
           python-version: '3.12'
 
       - name: Run host tests
+        env:
+          CC: ${{ matrix.cc }}
         run: tools/hosttest/run.sh
 
   firmware:

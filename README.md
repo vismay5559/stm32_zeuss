@@ -90,8 +90,17 @@ Appli/App/            ← the actual robot code
    fusion.c/.h          bridges sensors <-> filter; fills the policy block
    gait_ref.c/.h        reference trajectory (GENERATED - see tools/gen_gait.py)
 
+   safety.c/.h          arm/idle/fault state machine - the failsafe
+   watchdog.c/.h        IWDG; resets the board if a tick never completes
+   robot_config.c/.h    per-robot measured values (spring rates, sensor zeros)
+
    test_leg_can.c       NEXUS_MODE_LEG_CAN
+   test_leg_torque.c    NEXUS_MODE_LEG_TORQUE
    test_imu.c           NEXUS_MODE_IMU
+
+   README.md            plain-language guide to this folder - start here if
+                        you do not program. Explains tick, interrupt, DMA,
+                        checksum, arming, and the order things run in.
 
 pi/                              the Raspberry Pi side, drop into zeus_26
    nexus_proto.py         wire format - must match link_proto.h byte for byte
@@ -99,6 +108,7 @@ pi/                              the Raspberry Pi side, drop into zeus_26
    zeus_viz.py            live Rerun view - plots, 3D, sim comparison
 
 tools/
+   hosttest/run.sh        builds and runs the host tests (see Testing below)
    check_proto.py         proves the C and Python layouts agree
    test_pi_link.py        proves the Pi side sustains 1 kHz, no hardware needed
    gen_gait.py            spreadsheet -> gait_ref.c
@@ -173,6 +183,72 @@ stale (it was created by CubeIDE). Wipe and reconfigure:
 rm -rf build Appli/build Boot/build
 cmake --preset Debug && cmake --build build/Debug
 ```
+
+---
+
+## Testing
+
+Much of `Appli/App` is ordinary logic - bit maps, debouncing, command
+validation, the Lie-group maths - and none of it needs a board. Those parts
+build and run on a workstation in about a second:
+
+```bash
+tools/hosttest/run.sh
+```
+
+It exits non-zero if anything fails, so it works as a pre-commit check. What it
+covers today:
+
+| Suite | What it pins down |
+| --- | --- |
+| `test_contact` | switch debouncing, and that each switch owns the right bit |
+| `test_safety` | the arm/idle/fault transitions and every command-rejection rule |
+| `test_fusion` | the sensor-to-filter bridge |
+| `test_robot_config` | spring deflection, sensor-zero wrap-around, calibration flag |
+| `test_watchdog` | start, refresh, and the stopped-clock case |
+| `check_proto.py` | that `link_proto.h` and `nexus_proto.py` agree byte for byte |
+
+The App sources are built against a stub HAL in `tools/hosttest/stub/`, so a
+change can pass every one of these and still fail to compile for the board.
+That is what the firmware build in CI is for.
+
+`CC` selects the compiler, and it is worth using:
+
+```bash
+CC=gcc   tools/hosttest/run.sh
+CC=clang tools/hosttest/run.sh
+```
+
+They disagree. GCC rejects a packed-member access that clang accepts silently,
+and on macOS `gcc` is Apple clang under another name - so a green local run
+there says less than it appears to. CI runs both.
+
+Not covered yet: `inekf`, `lie_group`, `kinematics`, `gait_ref`, `health`.
+
+---
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request.
+Two jobs, answering two different questions:
+
+| Job | Question | What it does |
+| --- | --- | --- |
+| `host-tests` | Is the logic right? | `tools/hosttest/run.sh` under GCC and clang |
+| `firmware` | Does it still build? | cross-compiles Boot and Appli, Debug and Release |
+
+The firmware job is the one more host tests cannot replace, and it earned its
+place immediately: its first run found `act_odrive.c` reading `TxErrorCnt` off
+`FDCAN_ProtocolStatusTypeDef`, which has no such member. The code had been
+merged without ever being compiled for the target, and the next person to try
+to flash a robot would have found it instead.
+
+Image sizes are printed to the log, so a change that quietly costs flash is
+visible before a board stops fitting. The `.elf` and the `.hex` are uploaded as
+artifacts on every run - **flash the `.hex`**, for the reason given under
+Flashing below.
+
+The ARM toolchain action is pinned to a commit rather than a moving tag.
 
 ---
 
