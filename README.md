@@ -533,12 +533,30 @@ distortion a correspondingly smaller fraction. The bus has run clean since:
 
 Timing at 80 MHz PLL2P, `DataPrescaler = 1`:
 
-| | 5 Mbit (was) | 2 Mbit (now) |
-|---|---|---|
-| `DataTimeSeg1` | 11 | 29 |
-| `DataTimeSeg2` | 4 | 10 |
-| `DataSyncJumpWidth` | 4 | 10 |
-| total | 16 tq | 40 tq |
+| | 5 Mbit (failed) | 2 Mbit (first fix) | 2 Mbit (now) |
+|---|---|---|---|
+| `DataTimeSeg1` | 11 | 29 | **32** |
+| `DataTimeSeg2` | 4 | 10 | **7** |
+| `DataSyncJumpWidth` | 4 | 10 | **7** |
+| total | 16 tq | 40 tq | 40 tq |
+| data sample point | 75% | 75% | **82.5%** |
+| `TdcOffset` (SSP) | 20 tq = 250 ns | 20 tq = 250 ns | **33 tq = 412.5 ns** |
+| SSP as % of bit | **125%** | 50% | **82.5%** |
+
+Nominal timing changed with it: `NominalTimeSeg1 = 69`, `NominalTimeSeg2 = 10`
+(was 63 / 16), still 80 tq and 1 Mbit, but the sample point moves from 80% to
+**87.5%** to match what the ODrive S1 uses.
+
+The sample points are the point. The S1s sample at 87.5%; we were sampling at
+75% on the data phase and self-checking at 50%, which on a daisy chain at 2 Mbit
+lands on edges that have not settled. Every mis-read frame gets error-flagged,
+and error flags are what drove the counters.
+
+Worth noting what the 5 Mbit column shows: a 200 ns bit with the SSP at 250 ns
+was checking **past the end of the bit entirely**. That is a more likely
+explanation for the transmit-only errors than the isolator pulse-width
+distortion originally suspected — the TDC offset was never adjusted when the
+data rate changed.
 
 `80 MHz / 40 = 2 Mbit`. Set the same rate in every ODrive
 (`odrv0.can.config.data_baud_rate`) — a drive left at 5 Mbit is electrically

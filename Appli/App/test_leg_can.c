@@ -52,18 +52,20 @@ static const char *const s_mon_name[MONITOR_COUNT] = { "" };
 /*
  * Output-shaft turns -> what each drive is sent.
  *
- * TEMPORARY: the hip's load-side AS5047P is dead, so that drive is running on
- * its onboard MA702, which sits on the MOTOR side of the 47:1. Its pos_estimate
- * is therefore in motor turns and every command to it must be scaled by 47 -
- * position AND velocity feedforward alike. Put this back to 1.0 the moment the
- * load encoder is repaired, or the hip will be commanded 47x too far.
+ * Every axis is now configured with its LOAD-side encoder, so pos_estimate is
+ * already in output-shaft turns and a gait value goes to the drive unscaled.
+ * All ones.
  *
- * The knee's load encoder still works, so it stays at 1.0.
+ * This was { 47, 1, 9 } while the hip ran on its motor-side MA702 (its
+ * load-side AS5047P had failed) and the ankle was motor-side by design. If an
+ * encoder is ever moved back to the motor side, set that entry to the gear
+ * ratio - the drive's position units follow the encoder, not the gearbox.
  *
- * The ankle's encoder is also on the MOTOR side, of a 9:1, so it takes x9 for
- * the same reason the hip takes x47.
+ * Note this table is about POSITION units only. It is not a gearbox table:
+ * test_leg_torque.c keeps a separate s_gear[] = { 47, 47, 9 } because torque
+ * still has to cross the reduction whatever the encoder is doing.
  */
-static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
+static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 1.0f };
 
 /*
  * Controller gains pushed to each drive over CAN at arming.
@@ -191,15 +193,15 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_TRACE_RX             0
 #define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
-#define LEGTEST_ENABLE_CLOSED_LOOP   1
+#define LEGTEST_ENABLE_CLOSED_LOOP   0
 #define LEGTEST_ARM_DELAY_MS         3000u
 #define LEGTEST_STOP_BUTTON          1
 #define LEGTEST_MOTION_GAIT          1
 #define LEGTEST_AMPLITUDE_TURNS      0.05f 
 #define LEGTEST_FREQ_HZ              0.25f 
-#define LEGTEST_GAIT_SPEED           0.5f
+#define LEGTEST_GAIT_SPEED           1.0f
 #define LEGTEST_GAIT_ENTRY_MS        2000u
-#define LEGTEST_GAIT_CYCLES          5u
+#define LEGTEST_GAIT_CYCLES          10u
 #define LEGTEST_GAIT_VEL_FF          1
 #define LEGTEST_GAIT_TORQUE_FF       0
 #define LEGTEST_GAIT_IDLE_AFTER      1
@@ -223,7 +225,21 @@ static uint8_t   s_cap_dumped;
 #define LEGTEST_VEL_POKE             0
 #define LEGTEST_VEL_POKE_TURNS_S     0.5f
 #define LEGTEST_USE_CAN_FD           1
-#define LEGTEST_TDC_OFFSET           20u
+/*
+ * Secondary Sample Point, in tq (1 tq = 12.5 ns at the 80 MHz kernel clock).
+ *
+ * The SSP is where the transmitter re-reads its own bit to check the bus
+ * followed it, and it should sit at the SAME place in the bit as the receive
+ * sample point - not merely past the transceiver's loop delay. 33 tq =
+ * 412.5 ns = 82.5% of a 500 ns data bit, matching DataTimeSeg1/2 below.
+ *
+ * It was 20 tq (250 ns = 50%), which self-checked halfway through the bit
+ * while receivers sampled at 75%. At 5 Mbit that offset was worse still: a
+ * 200 ns bit with the SSP at 250 ns checked PAST THE END of the bit entirely,
+ * which is the likelier cause of the transmit-only errors (TEC climbing to
+ * bus-off with REC at 0) than the isolator distortion first suspected.
+ */
+#define LEGTEST_TDC_OFFSET           33u
 #define LEGTEST_TX_DIV               1u
 #define NODE_SILENT_TICKS            500u
 
@@ -806,6 +822,26 @@ static void bus_setup(void)
     printf("CAN FD: TDC on, SSP offset %u tq (%u ns past the measured"
            " loop delay)\r\n",
            (unsigned)LEGTEST_TDC_OFFSET, (unsigned)(LEGTEST_TDC_OFFSET * 25u / 2u));
+#else
+    /*
+     * Classic frames are 1.6x the airtime of FD+BRS, so say what this run will
+     * cost before it starts rather than leaving it to be discovered at 80%.
+     */
+    {
+        uint32_t per_node = 1000u   /* Set_Input_Pos, one per tick   */
+                          + 1250u;  /* heartbeat + encoder + torques */
+        uint32_t load = (per_node * JOINT_COUNT * FRAME_US) / 10000u;
+
+        printf("CAN: CLASSIC 2.0, no BRS, 1 Mbit - CAN-FD is DISABLED\r\n");
+        printf("     %u us per frame. %d node(s) at current rates ~= %lu%% of"
+               " the bus.\r\n",
+               (unsigned)FRAME_US, JOINT_COUNT, (unsigned long)load);
+        if (load > 60u)
+        {
+            printf("     !! above 60%% - drop encoder_msg_rate_ms on the drives"
+                   " (5 = 200 Hz)\r\n");
+        }
+    }
 #endif
 
     if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)

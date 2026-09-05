@@ -16,6 +16,7 @@
 #define NEXUS_MODE_ROBOT     0   /* full 1 kHz loop, all subsystems           */
 #define NEXUS_MODE_LEG_CAN   1   /* CAN-FD only: one leg, 4 ODrives           */
 #define NEXUS_MODE_IMU       2   /* IMU only: print quaternion/accel/gyro     */
+#define NEXUS_MODE_LEG_TORQUE 3  /* one leg, STM32-side PD -> Set_Input_Torque */
 
 #ifndef NEXUS_MODE
 #define NEXUS_MODE  NEXUS_MODE_LEG_CAN

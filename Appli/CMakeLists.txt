@@ -67,6 +67,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/fusion.c
     App/gait_ref.c
     App/test_leg_can.c
+    App/test_leg_torque.c
     App/test_imu.c
     App/enc_as5048a.c
     App/imu_bno085.c

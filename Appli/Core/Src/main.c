@@ -25,6 +25,7 @@
 #include "app.h"
 #include "nexus_mode.h"
 #include "test_leg_can.h"
+#include "test_leg_torque.h"
 #include "test_imu.h"
 #include "imu_bno085.h"
 #include "enc_as5048a.h"
@@ -161,7 +162,10 @@ int main(void)
    */
   
   /* USER CODE BEGIN 2 */
-#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+#if (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
+  printf("APPLI: mode = LEG_TORQUE (STM32-side PD -> Set_Input_Torque)\r\n");
+  legtorque_init();
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   printf("APPLI: mode = LEG_CAN (CAN-FD single leg test)\r\n");
   legtest_init();
 #elif (NEXUS_MODE == NEXUS_MODE_IMU)
@@ -195,7 +199,9 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+#if (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
+  legtorque_run();
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   legtest_run();
 #elif (NEXUS_MODE == NEXUS_MODE_IMU)
   imutest_run();
@@ -237,12 +243,12 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.ProtocolException = ENABLE;
   hfdcan1.Init.NominalPrescaler = 1;
   hfdcan1.Init.NominalSyncJumpWidth = 10;
-  hfdcan1.Init.NominalTimeSeg1 = 63;
-  hfdcan1.Init.NominalTimeSeg2 = 16;
+  hfdcan1.Init.NominalTimeSeg1 = 69;
+  hfdcan1.Init.NominalTimeSeg2 = 10;
   hfdcan1.Init.DataPrescaler = 1;
-  hfdcan1.Init.DataSyncJumpWidth = 10;
-  hfdcan1.Init.DataTimeSeg1 = 29;
-  hfdcan1.Init.DataTimeSeg2 = 10;
+  hfdcan1.Init.DataSyncJumpWidth = 7;
+  hfdcan1.Init.DataTimeSeg1 = 32;
+  hfdcan1.Init.DataTimeSeg2 = 7;
   hfdcan1.Init.StdFiltersNbr = 1;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
@@ -280,12 +286,12 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.ProtocolException = ENABLE;
   hfdcan2.Init.NominalPrescaler = 1;
   hfdcan2.Init.NominalSyncJumpWidth = 10;
-  hfdcan2.Init.NominalTimeSeg1 = 63;
-  hfdcan2.Init.NominalTimeSeg2 = 16;
+  hfdcan2.Init.NominalTimeSeg1 = 69;
+  hfdcan2.Init.NominalTimeSeg2 = 10;
   hfdcan2.Init.DataPrescaler = 1;
-  hfdcan2.Init.DataSyncJumpWidth = 10;
-  hfdcan2.Init.DataTimeSeg1 = 29;
-  hfdcan2.Init.DataTimeSeg2 = 10;
+  hfdcan2.Init.DataSyncJumpWidth = 7;
+  hfdcan2.Init.DataTimeSeg1 = 32;
+  hfdcan2.Init.DataTimeSeg2 = 7;
   hfdcan2.Init.StdFiltersNbr = 1;
   hfdcan2.Init.ExtFiltersNbr = 0;
   hfdcan2.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
@@ -559,7 +565,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM6)
   {
-#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+#if (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
+    legtorque_on_tick();
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
     legtest_on_tick();
 #elif (NEXUS_MODE == NEXUS_MODE_IMU)
     imutest_on_tick();
@@ -592,7 +600,12 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     return;
   }
 
-#if (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
+#if (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
+  if (hfdcan->Instance == FDCAN1)
+  {
+    legtorque_on_rx();
+  }
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_CAN)
   if (hfdcan->Instance == FDCAN1)
   {
     legtest_on_rx();
