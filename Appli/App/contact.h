@@ -3,7 +3,34 @@
 
 #include <stdint.h>
 
+/*
+ * The four foot switches: left toe, left heel, right toe, right heel.
+ *
+ * The raw GPIOs chatter as a foot lands, so nothing here reports a switch
+ * until it has held its new position for a set number of ticks. Making
+ * contact and breaking it use different thresholds, so a foot can be trusted
+ * quickly when it lands without flickering off on a small bounce.
+ */
+
+/*
+ * Set up the switch table and clear all state. Call once at startup, before
+ * contact_poll().
+ *
+ * Each channel is bound to its GPIO and to its bit in the reported mask. The
+ * bit constants (NEXUS_CONTACT_*_BIT) are not the same as the array indices
+ * (NEXUS_CONTACT_*) - mixing them up made the left toe invisible and the
+ * right heel set two bits at once, so they are spelled out here deliberately.
+ */
 void    contact_init(void);
+
+/*
+ * Read all four switches and update the debounce. Call once per tick.
+ *
+ * A switch reads as closed when its pin is low. A change is only accepted
+ * after it has persisted for CONTACT_MAKE_TICKS (landing) or
+ * CONTACT_BREAK_TICKS (lifting); anything shorter is treated as bounce and
+ * discarded. Also updates the per-foot bits and the stable-tick counters.
+ */
 void    contact_poll(void);
 
 /* Debounced per-switch bits, in NEXUS_CONTACT_*_BIT positions:
