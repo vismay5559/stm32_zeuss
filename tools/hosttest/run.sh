@@ -62,6 +62,16 @@ run_suite() {
     echo
 }
 
+run_suite test_health \
+    "$HERE/test_health.c" \
+    "$APP/health.c"
+
+run_suite test_kinematics \
+    "$HERE/test_kinematics.c" \
+    "$APP/kinematics.c" \
+    "$APP/lie_group.c" \
+    "$APP/robot_config.c"
+
 run_suite test_lie_group \
     "$HERE/test_lie_group.c" \
     "$APP/lie_group.c"

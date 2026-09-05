@@ -102,10 +102,19 @@ uint32_t health_expected(void);
  * the motors answering on both wires, is the Pi still sending instructions,
  * did the last heartbeat arrive on time.
  *
- * A part that goes quiet is recorded as faulty and STAYS recorded, even if it
- * recovers a moment later. Something that fails intermittently is a real
- * problem, and letting it quietly clear itself would hide exactly the fault
- * worth finding.
+ * Sensor faults follow the live state: a part that goes quiet is reported as
+ * faulty, and stops being reported once it comes back. So health_faults()
+ * answers "is anything broken right now", which is the question safety.c asks
+ * before it will let the robot move.
+ *
+ * HEALTH_TIMING is the exception. It latches, and only health_clear_latched()
+ * clears it - a missed heartbeat means the robot lost track of time, and
+ * that should not stop being true just because the next tick was punctual.
+ *
+ * The consequence worth knowing: a sensor that drops out intermittently shows
+ * as faulty only while it is actually out. Nothing here records that it
+ * happened, so a fault seen once and gone by the time anyone looks leaves no
+ * trace in this module.
  */
 void     health_tick(const imu_sample_t *imu, uint8_t enc_valid);
 
