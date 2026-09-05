@@ -15,6 +15,9 @@
 
 #include <stdint.h>
 
+/* The motor driver talks to the FDCAN peripheral through this. */
+#include "fdcan.h"
+
 typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET = 1 } GPIO_PinState;
 
 typedef struct { int id; } GPIO_TypeDef;

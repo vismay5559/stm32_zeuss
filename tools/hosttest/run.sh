@@ -29,6 +29,21 @@ CFLAGS="-std=c11 -O1 -g -Wall -Wextra -Wconversion -Wshadow -Werror
         -DNEXUS_HOSTTEST=1 -I$HERE/stub -I$APP"
 LDLIBS="-lm"
 
+# SAN=1 adds the address and undefined-behaviour sanitizers.
+#
+# Warnings catch what the compiler can see standing still; these catch what
+# only happens when the code runs - an index that walks off the end of an
+# array, a signed overflow, an alignment the target would fault on. Compiled
+# code on the board has neither, so a mistake of that kind is silent there
+# until it corrupts the variable next door.
+#
+# -fno-sanitize-recover makes the first report fail the run rather than print
+# and carry on, so CI cannot go green with a warning buried in the log.
+if [ "${SAN:-0}" != "0" ]; then
+    CFLAGS="$CFLAGS -fsanitize=address,undefined -fno-sanitize-recover=all"
+    export ASAN_OPTIONS="detect_leaks=0"
+fi
+
 mkdir -p "$OUT"
 rm -f "$OUT"/*
 
@@ -61,6 +76,11 @@ run_suite() {
     fi
     echo
 }
+
+run_suite test_act_odrive \
+    "$HERE/test_act_odrive.c" \
+    "$HERE/stub/fdcan_stub.c" \
+    "$APP/act_odrive.c"
 
 run_suite test_link_usb \
     "$HERE/test_link_usb.c" \

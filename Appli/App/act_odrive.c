@@ -259,7 +259,19 @@ void act_init(void)
 
 void act_on_rx(uint8_t bus_index)
 {
-    FDCAN_HandleTypeDef *h = bus_handle(bus_index);
+    /*
+     * There are two buses, and the joint index derived below indexes ten-entry
+     * arrays. Every other entry point here bounds-checks its bus argument, and
+     * the s_rx_count line already masked - but the joint index did not, so a
+     * third bus would have written past the end of s_telem and s_pos_age.
+     *
+     * Not reachable today: the only callers are the two FDCAN interrupt
+     * handlers in main.c, which pass 0 and 1. Masking once, here, makes the
+     * whole function agree with the rest of the file rather than half of it.
+     */
+    const uint8_t bus = bus_index & 1u;
+
+    FDCAN_HandleTypeDef *h = bus_handle(bus);
     FDCAN_RxHeaderTypeDef hdr;
     uint8_t data[64];
 
@@ -278,9 +290,9 @@ void act_on_rx(uint8_t bus_index)
             continue;
         }
 
-        s_rx_count[bus_index & 1u]++;
+        s_rx_count[bus]++;
 
-        int j = (int)(bus_index * ODRV_NODES_PER_BUS) + (int)(node - 1u);
+        int j = (int)(bus * ODRV_NODES_PER_BUS) + (int)(node - 1u);
 
         switch (cmd)
         {
