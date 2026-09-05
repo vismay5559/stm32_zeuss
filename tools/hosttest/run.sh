@@ -62,6 +62,10 @@ run_suite() {
     echo
 }
 
+run_suite test_lie_group \
+    "$HERE/test_lie_group.c" \
+    "$APP/lie_group.c"
+
 run_suite test_contact \
     "$HERE/test_contact.c" \
     "$HERE/stub/hal_stub.c" \
