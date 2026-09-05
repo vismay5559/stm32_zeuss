@@ -5,65 +5,76 @@
 #include "link_proto.h"
 
 /*
- * AS5048A magnetic encoders, read over one SPI bus by DMA.
+ * THE SPRING SENSORS
  *
- * All NEXUS_NUM_ENCODERS devices are daisy-chained, so a single transfer
- * clocks a reading out of every one of them. The transfer is started at the
- * end of a tick and lands during the gap before the next, which gives it the
- * whole inter-tick period and makes the sample age a constant 1 ms rather
- * than something that varies with how long the tick ran.
+ * Each leg joint has a spring in it, so the leg gives a little instead of
+ * being rigid. These sensors measure how far each spring is squashed. From
+ * that you can work out how hard the leg is pushing, because a spring pushed
+ * twice as far pushes twice as hard.
  *
- * These encoders sit AFTER the series springs. What they measure is spring
- * deflection, not joint angle - the joint angles come from the drives. Reading
- * them as joint angles is a mistake this codebase has made before.
+ * IMPORTANT: they measure the SQUASH, not the angle of the joint. The joint
+ * angles come from the motors instead. Reading these as joint angles is a
+ * mistake that has been made in this codebase before, and it sent the
+ * estimator's idea of where the foot was badly wrong.
+ *
+ * All the sensors are wired in a chain, so one request reads every one of
+ * them at once. See README.md in this folder for tick, DMA and mask.
  */
 
 /*
- * Prepare the driver. Call once at startup, before any other function here.
- * Fills the transmit buffer with the read-angle command, clears the stored
- * readings and counters, and idles chip-select high.
+ * Get the sensors ready. Call once when the robot starts up, before anything
+ * else here.
  */
 void enc_init(void);
 
 /*
- * Begin one SPI transfer for every encoder. Call once per tick, at the end of
+ * Ask all the sensors for a fresh reading. Call once per tick, at the end of
  * the tick.
  *
- * If the previous transfer has not finished it is left alone, and after
- * ENC_XFER_TIMEOUT_TICKS of that it is abandoned and counted in enc_stalls().
- * Returns immediately either way - the reading arrives later, in the DMA
- * completion interrupt.
+ * This only asks. The answer arrives a moment later, on its own. Asking at the
+ * end of the tick gives the reply the whole gap before the next tick to come
+ * back, which means readings are always the same age rather than sometimes
+ * fresh and sometimes not.
+ *
+ * If the previous request never came back, this leaves it alone for a while
+ * and then gives up on it, counting that in enc_stalls().
  */
 void enc_start_read(void);
 
 /*
- * Called from the SPI DMA completion interrupt. Not for application code.
+ * The hardware calls this by itself when the readings have arrived. Nothing
+ * else should call it.
  *
- * Releases chip-select and decodes each 16-bit word: a reading is kept only if
- * its even-parity bit checks out and the device's error flag is clear, so a
- * garbled word is dropped rather than believed. Readings that fail are left at
- * their previous value and their bit is cleared in the valid mask.
+ * Each sensor sends a check digit along with its reading. A reading is only
+ * kept if that digit adds up and the sensor is not reporting a fault, so a
+ * garbled reading is thrown away rather than believed. A reading that fails
+ * keeps its previous value and is marked untrustworthy.
  */
 void enc_on_dma_complete(void);
 
 /*
- * Copy out the most recent readings.
+ * Hand back the newest readings.
  *
- * `angle` receives one raw 14-bit count per encoder (0..16383 over a full
- * turn). `valid_mask` receives one bit per encoder, set when that reading
- * passed its parity and error checks in the last completed transfer - always
- * check it, because a cleared bit means the matching angle is stale.
+ * `angle` gets one number per sensor: a whole turn of the shaft counts from
+ * 0 up to 16383 and then wraps back to 0.
  *
- * Interrupts are briefly disabled so the angles and the mask describe the same
- * sample; the DMA interrupt rewrites both.
+ * `valid_mask` says which of those numbers to trust - one yes/no per sensor.
+ * ALWAYS check it. A "no" means that sensor's number is left over from an
+ * earlier reading, and using it as if it were current is the failure this
+ * mask exists to prevent.
  */
 void enc_get(uint16_t angle[NEXUS_NUM_ENCODERS], uint8_t *valid_mask);
 
-/* Transfers abandoned because the DMA never completed. Non-zero means the SPI
-   link is unreliable, not that a reading was merely bad. */
+/*
+ * How many requests were given up on because no answer ever came back.
+ *
+ * Anything other than zero means the wiring or the connection is unreliable -
+ * a worse problem than one bad reading, because it means the robot is
+ * regularly flying blind on these sensors.
+ */
 uint32_t enc_stalls(void);
 
-/* SPI errors recovered from. */
+/* How many communication errors happened and were recovered from. */
 uint32_t enc_errors(void);
 
 #endif /* ENC_AS5048A_H */

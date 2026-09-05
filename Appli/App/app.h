@@ -4,47 +4,63 @@
 #include <stdint.h>
 
 /*
- * The application layer: everything the board does after the peripherals are
- * up. main() calls app_init() once and then app_run(), which never returns.
+ * THE MAIN PROGRAM
  *
- * Two clocks drive it. The 1 kHz timer interrupt calls app_on_tick(), which
- * only counts; the real per-tick work happens in app_run()'s loop, so a long
- * job cannot run inside an interrupt and delay the next one. Between ticks the
- * loop keeps servicing the IMU, the CAN transmit queue and the USB link.
+ * This is the part that actually runs the robot. Everything else in this
+ * folder is a piece it uses.
+ *
+ * The startup code calls app_init() once to get set up, then app_run(), which
+ * never finishes - it keeps going until the power is cut.
+ *
+ * Two rhythms run at the same time. A timer wakes the board 1000 times a
+ * second; each wake-up is a "tick", and once per tick the robot reads its
+ * sensors, works out where it is, and reports to the Pi. In between ticks the
+ * program keeps busy with quicker jobs: listening to the movement sensor,
+ * pushing messages out to the motors, and picking up anything the Pi sent.
+ *
+ * See README.md in this folder for tick, the Pi, and armed.
  */
 
 /*
- * Set the application up. Call once, from main(), after the peripherals are
- * initialised and before app_run().
+ * Get everything ready. Call once at startup, before app_run().
  *
- * Clears the yellow LED that Boot left on (so a yellow board points at the
- * Boot-to-Appli handover rather than at anything here), reads and reports the
- * reset cause before anything can clear it - a board silently rebooting itself
- * says so on the next line - and zeroes the state the loop keeps.
+ * Turns off the yellow light the startup code left on, so a board still
+ * showing yellow tells you it never got this far. Records why the board last
+ * restarted, before anything can erase that - a robot quietly restarting
+ * itself mid-run and coming back looking fine is the worst thing that can
+ * happen silently. Then clears everything back to a known starting point.
  */
 void app_init(void);
 
 /*
  * Run the robot. Never returns.
  *
- * The loop does two kinds of work. As fast as it can go: service the IMU, pump
- * queued CAN frames to the hardware FIFO, and take any command that arrived
- * over USB. Once per 1 kHz tick: read the sensors, run the estimator, and send
- * the state packet.
+ * Round and round: keep the sensors and motors serviced, and once per tick do
+ * the full cycle of read, work out position, decide, report.
  *
- * Every command passes safety.c before it can reach an actuator. A valid CRC
- * proves the bytes survived the wire; it says nothing about whether the board
- * is allowed to be moving or whether the numbers are sane.
+ * Every command from the Pi is checked by safety.c before it can reach a
+ * motor. The command arriving undamaged is not the same as the command being
+ * safe to obey - the robot might not be healthy, or might not be switched on
+ * for movement at all.
  */
 void app_run(void);
 
 /*
- * Called from the 1 kHz timer interrupt. Counts the tick and returns
- * immediately - app_run() does the work outside interrupt context.
+ * The timer calls this 1000 times a second. Nothing else should call it.
+ *
+ * It only makes a note that a tick is due and returns straight away. The real
+ * work happens in app_run(). Doing it this way means a slow job can never
+ * delay the next heartbeat.
  */
 void app_on_tick(void);
 
-/* Number of 1 kHz ticks missed because a cycle ran long. Should stay at 0. */
+/*
+ * How many heartbeats were missed because a cycle took too long.
+ *
+ * Should stay at zero. Anything else means the robot is not keeping up with
+ * itself, and its sense of timing - which the position estimate depends on -
+ * is no longer reliable.
+ */
 uint32_t app_overruns(void);
 
 
