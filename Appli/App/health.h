@@ -72,8 +72,17 @@
 #define HEALTH_EXPECTED_MASK  HEALTH_EXPECTED_ROBOT
 #endif
 
+/*
+ * Start watching. Call once at startup.
+ *
+ * `expected_mask` lists which parts must be working for the robot to count as
+ * healthy. During bench work you can watch fewer things; on a real robot it
+ * should be all of them.
+ */
 void     health_init(uint32_t expected_mask);
+/* Change which parts are being watched, after startup. */
 void     health_set_expected(uint32_t mask);
+/* Which parts are currently being watched. */
 uint32_t health_expected(void);
 
 /*
@@ -84,6 +93,19 @@ uint32_t health_expected(void);
  * data app.c had read microseconds earlier - two more critical sections and a
  * struct copy every millisecond, and worse, a second sample that could differ
  * from the one that went into the packet.
+ */
+/*
+ * Check on everything. Call once per heartbeat.
+ *
+ * Each part is judged by whether it is still producing fresh data: is the
+ * movement sensor still sending samples, are the spring sensors readable, are
+ * the motors answering on both wires, is the Pi still sending instructions,
+ * did the last heartbeat arrive on time.
+ *
+ * A part that goes quiet is recorded as faulty and STAYS recorded, even if it
+ * recovers a moment later. Something that fails intermittently is a real
+ * problem, and letting it quietly clear itself would hide exactly the fault
+ * worth finding.
  */
 void     health_tick(const imu_sample_t *imu, uint8_t enc_valid);
 
@@ -98,12 +120,33 @@ void     health_tick(const imu_sample_t *imu, uint8_t enc_valid);
  * Called by safety.c on the explicit re-arm handshake, so acknowledging is
  * always a deliberate act by whoever is flying the robot.
  */
+/*
+ * Forget the faults recorded so far and start judging fresh.
+ *
+ * This is deliberate, not automatic - someone has to decide the problem has
+ * been dealt with. It is how a robot gets going again after a fault without
+ * switching the power off.
+ */
 void     health_clear_latched(void);
 
 /* Currently-faulted subsystems, already masked by "expected". 0 = all good. */
+/*
+ * Everything currently recorded as faulty. Zero means all watched parts are
+ * behaving. The safety system will not let the robot move while this is
+ * anything else.
+ */
 uint32_t health_faults(void);
 
 /* 0 = no fault, otherwise 1..HEALTH_COUNT = blink count of the first fault. */
+/*
+ * How many times to blink the fault light, so a problem can be read off the
+ * robot itself with no computer attached.
+ *
+ * One blink is the movement sensor, two the spring sensors, three and four
+ * the two motor wires, five the link to the Pi, six the timing. Zero means
+ * nothing is wrong. If several things are wrong at once it reports the first
+ * one, so fix that and look again.
+ */
 uint8_t  health_blink_code(void);
 
 #endif /* HEALTH_H */

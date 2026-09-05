@@ -126,12 +126,39 @@ extern const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS];
 #define ROBOT_HIP_OFFSET_Y_M    0.05f
 
 /* Convenience for anything that wants to say "this is not trustworthy yet". */
+/*
+ * Has this robot actually been measured?
+ *
+ * The numbers in this file start as design values - what the drawings say the
+ * robot should be. A real machine differs: springs are not exactly as stiff
+ * as specified, and sensors are not mounted at exactly zero.
+ *
+ * Returns 0 until someone has measured a particular robot and filled in the
+ * real figures. While it returns 0 the position estimate deliberately never
+ * reports itself as fully trustworthy, because it is working from assumptions
+ * rather than measurements.
+ */
 static inline uint8_t robot_config_is_calibrated(void)
 {
     return (uint8_t)ROBOT_CONFIG_CALIBRATED;
 }
 
 /* Raw encoder counts -> signed spring deflection in radians. */
+/*
+ * Turn one raw spring-sensor reading into how far that spring is actually
+ * squashed, in radians.
+ *
+ * The sensor reports a plain count that means nothing on its own. This
+ * subtracts where that sensor sits when the spring is relaxed, converts to a
+ * real angle, and handles the wrap-around when a reading crosses the point
+ * where the count rolls over from its highest value back to zero.
+ *
+ * Multiply the result by the spring's stiffness and you have the force the
+ * leg is pushing with, which is the whole reason these sensors are fitted.
+ *
+ * An out-of-range sensor number returns zero rather than reading memory that
+ * does not belong to it.
+ */
 float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts);
 
 #endif /* ROBOT_CONFIG_H */

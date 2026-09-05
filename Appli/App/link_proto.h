@@ -213,6 +213,18 @@ typedef struct __attribute__((packed))
     uint16_t crc;                            /* 50 */
 } nexus_cmd_t;                               /* 52 total                        */
 
+/*
+ * Work out the check number for a message.
+ *
+ * This condenses a whole message down to one short number. The sender
+ * calculates it and sends it along; the receiver calculates it again from
+ * what arrived. If the two disagree, something was damaged on the way and the
+ * message is thrown away.
+ *
+ * Both the board and the Pi run the identical calculation, which is what lets
+ * either side spot a corrupted message. It says nothing about whether the
+ * contents were sensible - only that they arrived as they were sent.
+ */
 uint16_t nexus_crc16(const uint8_t *data, uint32_t len);
 
 #endif /* LINK_PROTO_H */

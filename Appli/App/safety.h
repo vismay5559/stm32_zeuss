@@ -86,11 +86,28 @@ typedef enum
  */
 #define SAFETY_ARM_TIMEOUT_CMDS  250u
 
+/*
+ * Get the safety system ready. Call once at startup. The robot begins unable
+ * to move, and has to earn its way to being allowed.
+ */
 void safety_init(void);
 
 /*
  * Run once per tick, after health_tick(). Drives the state machine and idles
  * the actuators on entry to FAULT.
+ */
+/*
+ * Reconsider whether the robot should be allowed to move. Call once per
+ * heartbeat, passing whatever health.c currently reports as broken.
+ *
+ * The robot moves through four states. It starts at BOOT and waits for
+ * everything to be working. Once it is, it sits at IDLE - healthy, but still
+ * refusing to move, until the Pi explicitly asks it to start. Then it is
+ * ARMED and will obey instructions. If the Pi goes quiet, or the robot falls
+ * behind its own heartbeat, it drops to FAULT and stops moving.
+ *
+ * Leaving FAULT is deliberate: someone has to clear the problem. The robot
+ * never quietly decides it is fine again and starts moving on its own.
  */
 void safety_tick(uint32_t faults);
 
@@ -101,15 +118,41 @@ void safety_tick(uint32_t faults);
  * rejected, in which case the actuators keep their previous target and the
  * caller must not touch them.
  */
+/*
+ * Decide whether one instruction from the Pi may reach the motors.
+ *
+ * Returns 1 and fills in `targets_out` if the instruction is allowed, 0 if it
+ * is refused - and nothing reaches a motor on a refusal.
+ *
+ * An instruction has to clear several hurdles. The robot must be ARMED. The
+ * instruction must be newer than the last one, so a repeated or delayed
+ * message cannot be acted on twice. Every target must be a real number - a
+ * meaningless value getting through would poison the motion permanently. Each
+ * target must be within the range the joint can physically reach, and must
+ * not be a huge jump from where the joint is now, because a large jump is a
+ * lurch rather than a movement.
+ *
+ * Too many refusals in a row is itself treated as a fault: it means the Pi is
+ * sending something the robot cannot follow, and continuing to ignore it
+ * quietly would be worse than stopping.
+ */
 uint8_t safety_accept_command(const nexus_cmd_t *cmd,
                               float targets_out[NEXUS_NUM_JOINTS]);
 
+/* Which of the four states the robot is in right now. */
 safety_state_t safety_state(void);
 
 /* Total commands refused since boot, for the console and the packet. */
+/*
+ * How many instructions have been refused in total. Climbing steadily means
+ * the Pi and the robot disagree about what is reasonable - worth
+ * investigating even while the robot still appears to be working.
+ */
 uint32_t safety_rejected(void);
 
 /* "BOOT" / "IDLE" / "ARMED" / "FAULT". */
+/* The current state as readable text - "BOOT", "IDLE", "ARMED", "FAULT" -
+   for logs and status lines. */
 const char *safety_state_name(void);
 
 #endif /* SAFETY_H */
