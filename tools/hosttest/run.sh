@@ -26,7 +26,7 @@ CC="${CC:-cc}"
 # class of bug the first catches, and the second found an estimator loop index
 # shadowing the accelerometer vector in the same function.
 CFLAGS="-std=c11 -O1 -g -Wall -Wextra -Wconversion -Wshadow -Werror
-        -I$HERE/stub -I$APP"
+        -DNEXUS_HOSTTEST=1 -I$HERE/stub -I$APP"
 LDLIBS="-lm"
 
 mkdir -p "$OUT"
@@ -61,6 +61,11 @@ run_suite() {
     fi
     echo
 }
+
+run_suite test_link_usb \
+    "$HERE/test_link_usb.c" \
+    "$HERE/stub/usb_stub.c" \
+    "$APP/link_usb.c"
 
 run_suite test_inekf \
     "$HERE/test_inekf.c" \
