@@ -62,6 +62,10 @@ run_suite() {
     echo
 }
 
+run_suite test_gait_ref \
+    "$HERE/test_gait_ref.c" \
+    "$APP/gait_ref.c"
+
 run_suite test_health \
     "$HERE/test_health.c" \
     "$APP/health.c"
