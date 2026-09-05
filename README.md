@@ -212,6 +212,7 @@ covers today:
 | `test_gait_ref` | phase wrap, interpolation, the seam, and the two documented table steps |
 | `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
 | `test_link_usb` | frame reassembly across any split, checksum rejection, and the busy-cable drop |
+| `test_act_odrive` | the interpolated ramp, the speed-hint clamp, arm and stop, a blocked wire, and where a reply is filed |
 | `check_proto.py` | that `link_proto.h` and `nexus_proto.py` agree byte for byte |
 
 The App sources are built against a stub HAL in `tools/hosttest/stub/`, so a
@@ -229,13 +230,38 @@ They disagree. GCC rejects a packed-member access that clang accepts silently,
 and on macOS `gcc` is Apple clang under another name - so a green local run
 there says less than it appears to. CI runs both.
 
-Not covered yet: `act_odrive`, `app`, `enc_as5048a`, `imu_bno085` - all of
-which talk to hardware, so testing them on a host means building a stub for the
-peripheral first, as `tools/hosttest/stub/` does for the HAL and USB.
+On a Mac, real GCC is one command away and is worth using before pushing:
+
+```bash
+docker run --rm -v "$PWD":/w -w /w -e CC=gcc gcc:14 tools/hosttest/run.sh
+```
+
+It has caught things a local run could not - a `?:` whose branches are `unsigned
+int`, narrowed to a `uint8_t` on return, which GCC rejects and clang does not
+mention.
+
+Not covered yet: `app`, `enc_as5048a`, `imu_bno085` - all of which talk to
+hardware, so testing them on a host means building a stub for the peripheral
+first, as `tools/hosttest/stub/` does for the HAL, USB and CAN.
 
 Note the host build adds `-Wconversion`, which the firmware build does not, so
 a file compiled here is held to a slightly stricter standard than one that only
 ever goes to the board.
+
+`SAN=1` builds and runs the same tests with the address and undefined-behaviour
+checkers:
+
+```bash
+SAN=1 CC=clang tools/hosttest/run.sh
+```
+
+Warnings catch what the compiler can see standing still; these catch what only
+happens when the code runs - an index that walks off the end of a table, a
+signed overflow. Compiled code on the board has neither check, so a mistake of
+that kind is silent there until it corrupts the variable next door. This is how
+the unbounded wire index in `act_on_rx()` was found: every test passed, and the
+write past the end of `s_pos_age` was invisible until something was watching
+for it.
 
 **When a test fails, work out which of the two is wrong before changing
 either.** Several of these suites failed on their first run and the code turned
@@ -253,11 +279,12 @@ assertions reads that as "the mutation survived".
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request.
-Two jobs, answering two different questions:
+Three jobs, answering three different questions:
 
 | Job | Question | What it does |
 | --- | --- | --- |
 | `host-tests` | Is the logic right? | `tools/hosttest/run.sh` under GCC and clang |
+| `sanitizers` | Is it doing anything it should not? | the same tests with the address and undefined-behaviour checkers |
 | `firmware` | Does it still build? | cross-compiles Boot and Appli, Debug and Release |
 
 The firmware job is the one more host tests cannot replace, and it earned its

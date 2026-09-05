@@ -4,6 +4,14 @@
 #
 #   host-tests  - is the logic right?    Builds and runs tools/hosttest/run.sh
 #                                        on a normal compiler. Seconds.
+#   sanitizers  - is it doing anything   The same tests again, built with the
+#                 it should not?         address and undefined-behaviour
+#                                        checkers. These catch what only shows
+#                                        up at run time: an index past the end
+#                                        of an array, a signed overflow. On the
+#                                        board such a write simply lands on
+#                                        whatever variable is next and nothing
+#                                        says a word.
 #   firmware    - does it still build?   Cross-compiles for the STM32H7RS with
 #                                        arm-none-eabi-gcc. Nothing else checks
 #                                        this: a change can pass every host test
@@ -51,6 +59,26 @@ jobs:
       - name: Run host tests
         env:
           CC: ${{ matrix.cc }}
+        run: tools/hosttest/run.sh
+
+  sanitizers:
+    # Same tests, same sources, run under the address and undefined-behaviour
+    # checkers. This is how the unbounded bus index in act_on_rx() was found:
+    # every test passed, and the write past the end of s_pos_age was invisible
+    # until something was watching for it.
+    name: Host tests (sanitizers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run host tests with sanitizers
+        env:
+          CC: clang
+          SAN: '1'
         run: tools/hosttest/run.sh
 
   firmware:
