@@ -18,6 +18,11 @@
  * (see the host tests) without dragging in the whole robot.
  */
 
+/*
+ * Reset the estimator and everything derived from it. Call once at startup,
+ * before the first fusion_tick(). Leaves the estimate INVALID until enough
+ * ticks have run for it to converge.
+ */
 void fusion_init(void);
 
 /*
@@ -40,13 +45,32 @@ void fusion_tick(const imu_sample_t *imu,
                  uint8_t contacts,
                  uint32_t now_us);
 
-/* Copy the estimate into the outgoing packet. */
+/*
+ * Copy the current estimate into the outgoing state packet: position,
+ * velocity, orientation, the IMU bias estimates, and the status byte.
+ *
+ * Call after fusion_tick() in the same tick, so the packet carries this
+ * tick's estimate rather than the previous one's.
+ */
 void fusion_fill_state(nexus_state_t *st);
 
-/* NEXUS_FUSION_INVALID / CONVERGING / OK */
+/*
+ * How much the estimate can be trusted, as one of NEXUS_FUSION_INVALID,
+ * NEXUS_FUSION_CONVERGING or NEXUS_FUSION_OK.
+ *
+ * INVALID means it has diverged or has not started; CONVERGING means it is
+ * running but has not settled - which is also where it stays for good while
+ * robot_config.h is marked UNCALIBRATED, since an uncalibrated robot cannot
+ * honestly report OK. safety.c will not arm on anything but OK.
+ */
 uint8_t fusion_status(void);
 
-/* For diagnostics: how long the estimate has been converged, in ticks. */
+/*
+ * How many consecutive ticks the estimate has been converged, for
+ * diagnostics. Resets to zero whenever it stops being converged, so a value
+ * that keeps returning to zero says the filter is struggling rather than
+ * simply starting up.
+ */
 uint32_t fusion_converged_ticks(void);
 
 #endif /* FUSION_H */

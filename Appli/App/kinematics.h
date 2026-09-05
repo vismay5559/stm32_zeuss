@@ -29,7 +29,14 @@ typedef struct
     inekf_real_t right_hip_offset[3];
 } kin_params_t;
 
-/* Fills in the defaults from the Python KinematicsParams dataclass. */
+/*
+ * Fill in the nominal leg geometry - segment lengths and hip offsets - from
+ * the Python KinematicsParams dataclass, so C and Python agree by default.
+ *
+ * These are design dimensions, not measurements of a particular robot. Call
+ * this first, then overwrite anything the machine in front of you disagrees
+ * with; kin_foot() trusts whatever it is given.
+ */
 void kin_defaults(kin_params_t *p);
 
 /*
