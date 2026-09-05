@@ -93,4 +93,17 @@ void host_iwdg_stick_sr(uint32_t mask);
 void host_press(GPIO_TypeDef *port, uint16_t pin, int pressed);
 void host_release_all(void);
 
+
+/*
+ * Interrupt intrinsics. On the board these disable interrupts around a
+ * multi-byte copy so an ISR cannot tear it in half. A host test is
+ * single-threaded with no ISRs, so the guard has nothing to protect against
+ * and these do nothing - but critical.h still has to compile, and the code
+ * under test still has to call them in the right order.
+ */
+static inline uint32_t __get_PRIMASK(void)          { return 0u; }
+static inline void     __set_PRIMASK(uint32_t p)    { (void)p; }
+static inline void     __disable_irq(void)          { }
+static inline void     __enable_irq(void)           { }
+
 #endif /* HOSTTEST_MAIN_H */

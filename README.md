@@ -211,6 +211,7 @@ covers today:
 | `test_health` | fault thresholds, which subsystem is blamed, latching, and the blink code |
 | `test_gait_ref` | phase wrap, interpolation, the seam, and the two documented table steps |
 | `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
+| `test_link_usb` | frame reassembly across any split, checksum rejection, and the busy-cable drop |
 | `check_proto.py` | that `link_proto.h` and `nexus_proto.py` agree byte for byte |
 
 The App sources are built against a stub HAL in `tools/hosttest/stub/`, so a
@@ -228,9 +229,13 @@ They disagree. GCC rejects a packed-member access that clang accepts silently,
 and on macOS `gcc` is Apple clang under another name - so a green local run
 there says less than it appears to. CI runs both.
 
-Not covered yet: `act_odrive`, `app`, `enc_as5048a`, `imu_bno085`, `link_usb` -
-all of which talk to hardware, so testing them on a host means building a stub
-for the peripheral first, as `tools/hosttest/stub/` does for the HAL.
+Not covered yet: `act_odrive`, `app`, `enc_as5048a`, `imu_bno085` - all of
+which talk to hardware, so testing them on a host means building a stub for the
+peripheral first, as `tools/hosttest/stub/` does for the HAL and USB.
+
+Note the host build adds `-Wconversion`, which the firmware build does not, so
+a file compiled here is held to a slightly stricter standard than one that only
+ever goes to the board.
 
 **When a test fails, work out which of the two is wrong before changing
 either.** Several of these suites failed on their first run and the code turned

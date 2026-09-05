@@ -13,8 +13,21 @@ extern USBD_HandleTypeDef hUsbDeviceHS;
  * outside the D-cache. The generated CDC buffers are in normal cached RAM, so
  * both directions are redirected here instead.
  */
-static uint8_t s_rx_dma[LINK_RX_DMA_SIZE] __attribute__((section("noncacheable_buffer"), aligned(32)));
-static uint8_t s_tx_dma[sizeof(nexus_state_t)] __attribute__((section("noncacheable_buffer"), aligned(32)));
+/*
+ * The section placement is a property of THIS linker script, and a host
+ * compiler has no such section - mach-o rejects the name outright. The
+ * alignment is kept either way, so the host build lays the buffers out the
+ * same; only the placement, which exists for the board's cache, is dropped.
+ * The target branch below is unchanged.
+ */
+#ifdef NEXUS_HOSTTEST
+#define NEXUS_DMA_BUFFER  __attribute__((aligned(32)))
+#else
+#define NEXUS_DMA_BUFFER  __attribute__((section("noncacheable_buffer"), aligned(32)))
+#endif
+
+static uint8_t s_rx_dma[LINK_RX_DMA_SIZE] NEXUS_DMA_BUFFER;
+static uint8_t s_tx_dma[sizeof(nexus_state_t)] NEXUS_DMA_BUFFER;
 
 static uint8_t  s_acc[sizeof(nexus_cmd_t)];
 static uint16_t s_acc_len;
@@ -39,7 +52,11 @@ uint16_t nexus_crc16(const uint8_t *data, uint32_t len)
         crc ^= (uint16_t)((uint16_t)data[i] << 8);
         for (int b = 0; b < 8; b++)
         {
-            crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
+            /* Shift as unsigned: a uint16_t promotes to int, so the shift
+               and XOR happen in a signed type before being narrowed back.
+               Same result, but it no longer relies on that promotion. */
+            crc = (crc & 0x8000u) ? (uint16_t)(((uint32_t)crc << 1) ^ 0x1021u)
+                                  : (uint16_t)((uint32_t)crc << 1);
         }
     }
 
