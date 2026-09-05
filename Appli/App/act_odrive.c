@@ -449,13 +449,22 @@ void act_bus_service(void)
     {
         FDCAN_HandleTypeDef        *h = bus_handle(bus);
         FDCAN_ProtocolStatusTypeDef ps;
+        FDCAN_ErrorCountersTypeDef  ec;
 
         if (HAL_FDCAN_GetProtocolStatus(h, &ps) != HAL_OK)
         {
             continue;
         }
 
-        s_tx_err_count[bus] = (uint8_t)ps.TxErrorCnt;
+        /* The transmit error counter lives in the error-counters struct, not
+         * the protocol-status one: HAL_FDCAN_GetProtocolStatus reports the
+         * bus state (bus-off, error-passive, warning), while the raw TEC/REC
+         * values come from HAL_FDCAN_GetErrorCounters. A failed read leaves
+         * the previous count rather than reporting a fictitious zero. */
+        if (HAL_FDCAN_GetErrorCounters(h, &ec) == HAL_OK)
+        {
+            s_tx_err_count[bus] = (uint8_t)ec.TxErrorCnt;
+        }
 
         if (ps.BusOff)
         {

@@ -436,7 +436,14 @@ void fusion_fill_state(nexus_state_t *st)
     st->fused_pos[1] = s_f.p[1];
     st->fused_pos[2] = s_f.p[2];
 
-    inekf_velocity_world(&s_f, st->fused_vel);
+    /* nexus_state_t is packed for the wire, so taking the address of a member
+     * to hand to a function is an unaligned-pointer risk in the general case —
+     * these two members happen to sit on 4-byte offsets today, but nothing
+     * stops a field being inserted ahead of them. Fill an aligned local and
+     * copy, the same way the bias arrays below already do. */
+    inekf_real_t vel_world[3];
+    inekf_velocity_world(&s_f, vel_world);
+    memcpy(st->fused_vel, vel_world, sizeof(st->fused_vel));
 
     memcpy(st->fused_gyro_bias,  s_f.bg, sizeof(st->fused_gyro_bias));
     memcpy(st->fused_accel_bias, s_f.ba, sizeof(st->fused_accel_bias));
@@ -444,7 +451,9 @@ void fusion_fill_state(nexus_state_t *st)
     st->fused_valid = s_status;
 
     /* ---- policy block ------------------------------------------------ */
-    inekf_quaternion(&s_f, st->quat);
+    inekf_real_t quat_wxyz[4];
+    inekf_quaternion(&s_f, quat_wxyz);
+    memcpy(st->quat, quat_wxyz, sizeof(st->quat));
     st->pelvis_z = s_f.p[2];
 
     /*
