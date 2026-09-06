@@ -39,12 +39,14 @@ if(NOT NEXUS_MODE AND DEFINED ENV{NEXUS_MODE})
 endif()
 
 set(NEXUS_MODE "${NEXUS_MODE}" CACHE STRING
-    "Firmware mode: NEXUS_MODE_ROBOT, NEXUS_MODE_LEG_CAN or NEXUS_MODE_IMU")
-if(NOT NEXUS_MODE)
-    set(NEXUS_MODE "NEXUS_MODE_ROBOT" CACHE STRING "" FORCE)
-endif()
+    "Firmware mode. Empty = whatever Appli/App/nexus_mode.h says.")
+# Deliberately NOT defaulted here. An empty value means no -DNEXUS_MODE reaches
+# the compiler, so the #ifndef in nexus_mode.h takes effect and editing that
+# header does what it looks like it does. Forcing a default here made the
+# header dead code: the command-line definition always won, so the file could
+# be edited to any value with no effect on the binary.
 set_property(CACHE NEXUS_MODE PROPERTY STRINGS
-    NEXUS_MODE_ROBOT NEXUS_MODE_LEG_CAN NEXUS_MODE_IMU)
+    "" NEXUS_MODE_ROBOT NEXUS_MODE_LEG_CAN NEXUS_MODE_IMU NEXUS_MODE_LEG_TORQUE)
 
 if(NOT HEALTH_EXPECTED_MASK AND DEFINED ENV{HEALTH_EXPECTED_MASK})
     set(HEALTH_EXPECTED_MASK "$ENV{HEALTH_EXPECTED_MASK}")
@@ -67,12 +69,17 @@ foreach(opt CONTACT_MAKE_TICKS CONTACT_BREAK_TICKS NEXUS_TRACE_PERIPHERAL_INIT
 endforeach()
 
 message("Build type: " ${CMAKE_BUILD_TYPE})
-message("Nexus mode: " ${NEXUS_MODE})
 
-if(NOT NEXUS_MODE STREQUAL "NEXUS_MODE_ROBOT")
-    message(WARNING
-        "Building a BRING-UP TEST binary (${NEXUS_MODE}), not the robot loop. "
-        "It will not answer the Pi. Unset NEXUS_MODE for flight firmware.")
+if(NEXUS_MODE)
+    message("Nexus mode: ${NEXUS_MODE}  (overrides nexus_mode.h)")
+    if(NOT NEXUS_MODE STREQUAL "NEXUS_MODE_ROBOT")
+        message(WARNING
+            "Building a BRING-UP TEST binary (${NEXUS_MODE}), not the robot "
+            "loop. It will not answer the Pi. Unset NEXUS_MODE for flight "
+            "firmware.")
+    endif()
+else()
+    message("Nexus mode: from Appli/App/nexus_mode.h")
 endif()
 
 if(HEALTH_EXPECTED_MASK)
@@ -109,7 +116,7 @@ set(CMAKE_CXX_COMPILER_FORCED "true")
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
-    NEXUS_MODE=${NEXUS_MODE}
+    $<$<BOOL:${NEXUS_MODE}>:NEXUS_MODE=${NEXUS_MODE}>
     $<$<BOOL:${HEALTH_EXPECTED_MASK}>:HEALTH_EXPECTED_MASK=${HEALTH_EXPECTED_MASK}>
     $<$<BOOL:${CONTACT_MAKE_TICKS}>:CONTACT_MAKE_TICKS=${CONTACT_MAKE_TICKS}>
     $<$<BOOL:${CONTACT_BREAK_TICKS}>:CONTACT_BREAK_TICKS=${CONTACT_BREAK_TICKS}>

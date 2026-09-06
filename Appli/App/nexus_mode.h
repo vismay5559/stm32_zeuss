@@ -13,23 +13,28 @@
  * main() dispatches on this and the unused code is simply not entered.
  */
 
-#define NEXUS_MODE_ROBOT     0   /* full 1 kHz loop, all subsystems           */
-#define NEXUS_MODE_LEG_CAN   1   /* CAN-FD only: one leg, 4 ODrives           */
-#define NEXUS_MODE_IMU       2   /* IMU only: print quaternion/accel/gyro     */
+#define NEXUS_MODE_ROBOT      0  /* full 1 kHz loop, all subsystems            */
+#define NEXUS_MODE_LEG_CAN    1  /* CAN-FD only: one leg, ODrive position mode */
+#define NEXUS_MODE_IMU        2  /* IMU only: print quaternion/accel/gyro      */
 #define NEXUS_MODE_LEG_TORQUE 3  /* one leg, STM32-side PD -> Set_Input_Torque */
 
 /*
- * The default is the ROBOT loop, deliberately.
+ * THIS LINE is the mode. Edit it, rebuild, reflash.
  *
- * A test mode has to be asked for, because the failure it causes is silent: a
- * board flashed with LEG_CAN answers no USB packets and drives one leg from a
- * canned trajectory, which from the Pi's side is indistinguishable from a dead
- * link. Select a test mode at configure time rather than by editing this file:
+ * The build can still override it for a one-off without touching the file,
+ * which is useful in CI or when trying a mode you do not want to commit:
  *
- *     cmake --preset Release -DNEXUS_MODE=NEXUS_MODE_LEG_CAN
+ *     NEXUS_MODE=NEXUS_MODE_LEG_CAN cmake --preset Debug    # whole project
+ *     cmake -S Appli -B Appli/build -DNEXUS_MODE=...        # this one alone
  *
- * That way the choice appears in the build log and in the .elf, instead of
- * living in an uncommitted local edit.
+ * The build only defines NEXUS_MODE when you actually ask for one, so with no
+ * -D and no environment variable this file wins. Configure prints which of the
+ * two is in force, so the binary is never a mystery.
+ *
+ * Keep ROBOT committed. A board flashed with a test mode answers no USB
+ * packets and drives one leg from a canned trajectory, which from the Pi's
+ * side is indistinguishable from a dead link - so the failure of forgetting to
+ * change it back is silent.
  */
 #ifndef NEXUS_MODE
 #define NEXUS_MODE  NEXUS_MODE_ROBOT
@@ -42,8 +47,10 @@
 #define NEXUS_MODE_NAME  "LEG_CAN"
 #elif (NEXUS_MODE == NEXUS_MODE_IMU)
 #define NEXUS_MODE_NAME  "IMU"
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
+#define NEXUS_MODE_NAME  "LEG_TORQUE"
 #else
-#error "NEXUS_MODE is not one of NEXUS_MODE_ROBOT / _LEG_CAN / _IMU"
+#error "NEXUS_MODE must be one of NEXUS_MODE_ROBOT / _LEG_CAN / _IMU / _LEG_TORQUE"
 #endif
 
 #endif /* NEXUS_MODE_H */
