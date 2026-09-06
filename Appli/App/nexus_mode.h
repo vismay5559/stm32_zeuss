@@ -37,7 +37,7 @@
  * change it back is silent.
  */
 #ifndef NEXUS_MODE
-#define NEXUS_MODE  NEXUS_MODE_ROBOT
+#define NEXUS_MODE  NEXUS_MODE_LEG_CAN
 #endif
 
 /* Short name for the boot banner and for the mode byte the Pi receives. */
