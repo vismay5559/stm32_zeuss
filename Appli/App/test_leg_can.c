@@ -78,21 +78,31 @@ static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 1.0f };
  * it makes a bad number recoverable by cycling power rather than by digging
  * through odrivetool.
  *
- * The two joints are NOT comparable at the same numbers. vel_gain turns
- * velocity error into MOTOR torque, and the hip's encoder now sits on the
- * motor side of its 47:1 while the knee's is on the load side - so identical
- * numbers give the hip roughly 47x the loop gain at the output. That is why
- * the hip tracks at 20/1.0/5.0 and the knee, on the same numbers, barely
- * moved: 3.3 deg commanded, 0.25 deg achieved.
+ * 20 / 1.0 / 5.0 is where the tuning campaign in the README finished: 0.167
+ * -> 0.5 -> 1.0 on vel_gain, halving the RMS error each round, 12.16 deg ->
+ * 2.14 -> 0.75. pos_gain is dimensionless (turn/s per turn) so it carries
+ * across unchanged.
  *
- * Step the knee up from here rather than jumping to 47x, and watch for
- * oscillation in the capture before raising further.
+ * EXPECT TO RAISE vel_gain. That campaign ran before every axis was moved to
+ * its load-side encoder, and vel_gain is Nm of MOTOR torque per encoder
+ * turn/s. Reading the load side divides the measured velocity by the gear
+ * ratio, so the same number now produces far less torque for the same physical
+ * motion. The evidence is already in the logs: the knee, which was always
+ * load-side, barely moved on these numbers - 3.3 deg commanded, 0.25 deg
+ * achieved - while the hip on its motor-side encoder tracked well on them.
+ *
+ * So this is a deliberately soft, known-safe starting point, not a finished
+ * answer. Double vel_gain (and vi with it) between runs and watch the RMS
+ * error in the capture, exactly as the README describes. Stop when it stops
+ * improving or the capture starts to show oscillation. Starting soft and
+ * climbing is the safe direction; starting stiff can oscillate against the
+ * mechanism.
  */
 #define GAIN_KEEP  (-1.0f)
 
 static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 20.0f, 20.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  4.0f,  4.0f,  4.0f };
-static const float s_vel_int_gain[JOINT_COUNT] = { 20.0f, 20.0f, 20.0f };
+static const float s_vel_gain[JOINT_COUNT]     = {  1.0f,  1.0f,  1.0f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  5.0f,  5.0f };
 
 #define LEGTEST_GAIT_RELATIVE        1
 #define LEGTEST_MAX_SWING_DEG        20.0f
