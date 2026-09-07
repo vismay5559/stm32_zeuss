@@ -52,16 +52,17 @@ static const char *const s_mon_name[MONITOR_COUNT] = { "" };
 /*
  * Output-shaft turns -> what each drive is sent.
  *
- * The drive's position units follow ITS ENCODER, not its gearbox. Hip and knee
- * read load-side encoders, so one drive turn is one output turn and a gait
- * value goes to them unscaled. The ANKLE reads the motor side of its 9:1, so
- * everything sent to it - position and velocity feedforward alike - is x9.
+ * The drive's position units follow ITS ENCODER, not its gearbox. The KNEE
+ * reads its load-side encoder, so one drive turn is one output turn and a
+ * gait value goes to it unscaled. HIP and ANKLE read the motor side of their
+ * 47:1 and 9:1, so everything sent to them - position and velocity
+ * feedforward alike - is multiplied by that ratio.
  *
  * This table is about POSITION units only. It is not a gearbox table:
  * test_leg_torque.c keeps a separate s_gear[] = { 47, 47, 9 } because torque
  * always has to cross the reduction, whatever the encoder is doing.
  */
-static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
+static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
 
 /*
  * Controller gains, pushed to every live drive from legtest_init() so all
@@ -316,6 +317,8 @@ static uint8_t   s_cap_dumped;
 #define EP_JSON_FW_MINOR  6u
 #define EP_JSON_FW_REV    12u
 
+#define EP_AXIS0_LOAD_ENCODER       294u   /* uint8, rw */
+#define EP_AXIS0_COMMUT_ENCODER     295u   /* uint8, rw */
 #define EP_SPI_ENC0_MAX_ERROR_RATE  673u   /* float, rw */
 #define EP_SAVE_CONFIGURATION       718u   /* function  */
 
@@ -353,6 +356,47 @@ static uint8_t   s_cap_dumped;
  */
 #define LEGTEST_CALIBRATE_JOINTS    { 1 }
 #define LEGTEST_CALIB_TIMEOUT_MS    5000u
+
+/*
+ * ---------------------------------------------------------------------------
+ * WHICH ENCODER EACH AXIS USES
+ * ---------------------------------------------------------------------------
+ *
+ * axis0.config.load_encoder and axis0.config.commutation_encoder hold an
+ * EncoderId enum. The number behind ONBOARD_ENCODER0 is not published anywhere
+ * reachable: it is absent from flat_endpoints.json, the encoders and
+ * hardware-config pages name it only symbolically, and the API reference
+ * returns HTTP 403. A wrong value in commutation_encoder tells the drive to
+ * commutate off the wrong sensor, so it is left unset here rather than guessed.
+ *
+ * Read it off a drive once:
+ *
+ *     odrv0.axis0.config.commutation_encoder = EncoderId.ONBOARD_ENCODER0
+ *     int(odrv0.axis0.config.commutation_encoder)      # <- this number
+ *
+ * Put that number in ODRV_ENC_ID_ONBOARD0 and the write below happens every
+ * boot. Until then the firmware only READS the two values and prints them,
+ * which is safe and is the only place a drive quietly running off a different
+ * encoder than s_cmd_scale[] assumes would ever become visible.
+ */
+#define ODRV_ENC_ID_UNKNOWN     (-1)
+#define ODRV_ENC_ID_ONBOARD0    ODRV_ENC_ID_UNKNOWN
+
+/*
+ * Per joint: the EncoderId to write, or ODRV_ENC_ID_UNKNOWN to leave that
+ * drive's own configuration alone. Load and commutation are set to the same
+ * source, which is what "run this axis off its onboard encoder" means.
+ *
+ * This table and s_cmd_scale[] have to agree. An axis on its onboard encoder
+ * reads the motor side and needs its gear ratio; an axis on a load-side
+ * encoder needs 1.0.
+ */
+#define LEGTEST_SET_ENCODER_SRC  1
+static const int s_enc_src[JOINT_COUNT] = {
+    ODRV_ENC_ID_ONBOARD0,      /* hip_pitch - motor side, x47 */
+    ODRV_ENC_ID_UNKNOWN,       /* knee      - leave on its load-side encoder */
+    ODRV_ENC_ID_ONBOARD0,      /* ankle     - motor side, x9  */
+};
 
 /* 1 = also persist it to the drive's flash (needs a power cycle to re-init). */
 #define LEGTEST_SDO_SAVE            0
@@ -1091,6 +1135,108 @@ static void sdo_call(uint8_t node, uint16_t ep)
     for (uint32_t i = 0u; i < 20u; i++) { tx_pump(); HAL_Delay(1); }
 }
 
+static uint8_t sdo_read_u8(uint8_t node, uint16_t ep, uint8_t *out)
+{
+    uint8_t d[4];
+
+    d[0] = SDO_OP_READ;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+
+    s_sdo_node = node;
+    s_sdo_ep   = ep;
+    s_sdo_got  = 0u;
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 4u);
+
+    if (!sdo_wait(&s_sdo_got, 250u)) { return 0u; }
+
+    *out = s_sdo_val[0];
+    return 1u;
+}
+
+static void sdo_write_u8(uint8_t node, uint16_t ep, uint8_t v)
+{
+    uint8_t d[8];
+
+    d[0] = SDO_OP_WRITE;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+    d[4] = v; d[5] = 0u; d[6] = 0u; d[7] = 0u;
+
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 8u);
+    for (uint32_t i = 0u; i < 20u; i++) { tx_pump(); HAL_Delay(1); }
+}
+
+/*
+ * Report which encoder each axis is using, and set it when a value was given.
+ *
+ * The read happens either way, because a drive running off a different encoder
+ * than s_cmd_scale[] assumes is a 47x scaling error that looks exactly like a
+ * tuning problem from the outside.
+ */
+static void encoder_source_one(int j)
+{
+    const uint8_t node = s_node_id[j];
+    uint8_t load = 0u, commut = 0u;
+
+    if (!s_joint_live[j])
+    {
+        printf("  %-9s not on the bus - skipped\r\n", s_joint_name[j]);
+        return;
+    }
+    if (!odrv_check_version(node)) { return; }
+
+    if (s_enc_src[j] != ODRV_ENC_ID_UNKNOWN)
+    {
+        sdo_write_u8(node, EP_AXIS0_LOAD_ENCODER,   (uint8_t)s_enc_src[j]);
+        sdo_write_u8(node, EP_AXIS0_COMMUT_ENCODER, (uint8_t)s_enc_src[j]);
+    }
+
+    if (!sdo_read_u8(node, EP_AXIS0_LOAD_ENCODER, &load) ||
+        !sdo_read_u8(node, EP_AXIS0_COMMUT_ENCODER, &commut))
+    {
+        printf("  %-9s no reply reading the encoder source\r\n",
+               s_joint_name[j]);
+        return;
+    }
+
+    printf("  %-9s load=%u  commutation=%u%s   cmd_scale %.0f\r\n",
+           s_joint_name[j], (unsigned)load, (unsigned)commut,
+           (s_enc_src[j] == ODRV_ENC_ID_UNKNOWN) ? "  [left alone]" : "  [set]",
+           (double)s_cmd_scale[j]);
+
+    if (load != commut)
+    {
+        printf("  %-9s !! load and commutation differ - s_cmd_scale follows"
+               " load\r\n", "");
+    }
+}
+
+static void encoder_source_all(void)
+{
+#if LEGTEST_SET_ENCODER_SRC
+    printf("\r\nencoder source per axis (endpoint %u load / %u commutation)\r\n",
+           (unsigned)EP_AXIS0_LOAD_ENCODER,
+           (unsigned)EP_AXIS0_COMMUT_ENCODER);
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        encoder_source_one(j);
+    }
+
+#if (ODRV_ENC_ID_ONBOARD0 == ODRV_ENC_ID_UNKNOWN)
+    printf("  ODRV_ENC_ID_ONBOARD0 is not set, so nothing was written."
+           " Read it once in\r\n"
+           "  odrivetool - int(odrv0.axis0.config.commutation_encoder) - and"
+           " put it in\r\n"
+           "  test_leg_can.c.\r\n");
+#endif
+    printf("\r\n");
+#endif
+}
+
 static void spi_err_rate_one(uint8_t node, const char *name)
 {
     float before = 0.0f, after = 0.0f;
@@ -1349,6 +1495,7 @@ void legtest_init(void)
 #endif
 
     bus_scan();
+    encoder_source_all();
     apply_encoder_config();
     run_calibration();
     send_all_gains();

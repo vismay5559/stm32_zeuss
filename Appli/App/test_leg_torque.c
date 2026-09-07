@@ -57,9 +57,9 @@ static const uint8_t s_gait_col[JOINT_COUNT] =
  * s_enc_per_out  - drive turns per turn of the OUTPUT shaft. Follows where the
  *                  encoder physically sits. Hip and knee read the LOAD side, so
  *                  pos_estimate and vel_estimate already arrive in output-shaft
- *                  units: 1.0. The ankle reads the MOTOR side of its 9:1, so
- *                  its readings are nine times the output and are divided down
- *                  before they reach the control law.
+ *                  units: 1.0. Hip and ankle read the MOTOR side of their
+ *                  47:1 and 9:1, so their readings are that many times the
+ *                  output and are divided down before the control law.
  *
  * s_gear         - the GEARBOX reduction. A property of the mechanism, not of
  *                  the encoder, so it does NOT become 1.0 just because the
@@ -72,7 +72,7 @@ static const uint8_t s_gait_col[JOINT_COUNT] =
  * knee. Using the gear table for position would command 47x too far. They look
  * similar and mean opposite things, which is why they are two tables.
  */
-static const float s_enc_per_out[JOINT_COUNT] = {  1.0f,  1.0f, 9.0f };
+static const float s_enc_per_out[JOINT_COUNT] = { 47.0f,  1.0f, 9.0f };
 static const float s_gear[JOINT_COUNT]        = { 47.0f, 47.0f, 9.0f };
 
 /*
