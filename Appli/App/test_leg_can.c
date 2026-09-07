@@ -354,7 +354,7 @@ static uint8_t   s_cap_dumped;
  * Results are NOT saved. LEGTEST_SDO_SAVE persists them if you want them to
  * survive a power cycle, and that needs a reboot to take effect.
  */
-#define LEGTEST_CALIBRATE_JOINTS    { 1 }
+#define LEGTEST_CALIBRATE_JOINTS    { 0 }
 #define LEGTEST_CALIB_TIMEOUT_MS    5000u
 
 /*
