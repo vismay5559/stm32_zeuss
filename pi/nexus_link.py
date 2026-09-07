@@ -243,7 +243,7 @@ class NexusLink:
 
     # ---- writing --------------------------------------------------------
 
-    def send_command(self, target_pos: Sequence[float],
+    def send_command(self, residual: Sequence[float],
                      enable: bool = True, flags: int = 0) -> None:
         """Send a position command, in turns, one per joint.
 
@@ -266,11 +266,11 @@ class NexusLink:
             flags |= CMD_ENABLE
 
         with self._tx_lock:
-            cmd = NexusCommand(seq=self._cmd_seq, target_pos=list(target_pos), flags=flags)
+            cmd = NexusCommand(seq=self._cmd_seq, residual=list(residual), flags=flags)
             self._cmd_seq = (self._cmd_seq + 1) & 0xFFFFFFFF
             self._ser.write(cmd.pack())
 
-    def stand_down(self, target_pos: Optional[Sequence[float]] = None) -> None:
+    def stand_down(self, residual: Optional[Sequence[float]] = None) -> None:
         """Hand the actuators back: send a command with CMD_ENABLE clear.
 
         Two reasons to call this. Ending a run cleanly is the obvious one -
@@ -282,7 +282,7 @@ class NexusLink:
         one. That is deliberate: without the handshake, a link that dropped
         for 300 ms would hand control straight back to a policy that has no
         idea it ever lost it, mid-stride."""
-        self.send_command(target_pos if target_pos is not None else [0.0] * NUM_JOINTS,
+        self.send_command(residual if residual is not None else [0.0] * NUM_JOINTS,
                           enable=False)
 
 

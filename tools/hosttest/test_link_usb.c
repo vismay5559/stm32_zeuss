@@ -41,7 +41,7 @@ static void build_command(nexus_cmd_t *c, uint32_t seq)
 
     for (int i = 0; i < NEXUS_NUM_JOINTS; i++)
     {
-        c->target_pos[i] = 0.1f * (float)(i + 1);
+        c->residual[i] = 0.1f * (float)(i + 1);
     }
 
     c->crc = nexus_crc16((const uint8_t *)c, sizeof(*c) - sizeof(uint16_t));
@@ -143,7 +143,7 @@ static void test_a_corrupted_command_is_thrown_away(void)
     /* Flip a bit in a target position, leaving the checksum stale. */
     uint8_t raw[sizeof(nexus_cmd_t)];
     memcpy(raw, &sent, sizeof(raw));
-    raw[offsetof(nexus_cmd_t, target_pos) + 1] ^= 0x40u;
+    raw[offsetof(nexus_cmd_t, residual) + 1] ^= 0x40u;
 
     link_usb_on_rx(raw, sizeof(raw));
 
