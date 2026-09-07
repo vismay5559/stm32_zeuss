@@ -42,6 +42,14 @@ static int s_fail;
 
 static uint32_t s_seq;
 
+/*
+ * The reference the residual is added to. Zero for most tests, so a residual
+ * IS the target and every pre-residual test keeps its meaning. The envelope
+ * tests set it, because a joint is driven past its limit by the sum, and the
+ * sum is the only place that can happen once the residual itself is bounded.
+ */
+static float s_ref[NEXUS_NUM_JOINTS];
+
 static nexus_cmd_t make_cmd(float pos, uint16_t flags)
 {
     nexus_cmd_t c;
@@ -55,7 +63,7 @@ static nexus_cmd_t make_cmd(float pos, uint16_t flags)
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        c.target_pos[j] = pos;
+        c.residual[j] = pos;
     }
     return c;
 }
@@ -64,6 +72,7 @@ static nexus_cmd_t make_cmd(float pos, uint16_t flags)
 static void arm(float pos)
 {
     safety_init();
+    memset(s_ref, 0, sizeof(s_ref));
     s_seq = 0;
     s_disarm_calls = 0;
     s_arm_requests = 0;
@@ -74,7 +83,7 @@ static void arm(float pos)
 
     float t[NEXUS_NUM_JOINTS];
     nexus_cmd_t c = make_cmd(pos, NEXUS_CMD_ENABLE);
-    (void)safety_accept_command(&c, t);
+    (void)safety_accept_command(&c, s_ref, t);
 }
 
 /* ---- tests ----------------------------------------------------------- */
@@ -84,6 +93,7 @@ static void test_boot_refuses_commands(void)
     printf("BOOT refuses commands until the watched subsystems are healthy\n");
 
     safety_init();
+    memset(s_ref, 0, sizeof(s_ref));
     s_seq = 0;
     s_closed_loop = 1;
 
@@ -91,7 +101,7 @@ static void test_boot_refuses_commands(void)
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
 
     CHECK(safety_state() == SAFETY_BOOT, "did not start in BOOT");
-    CHECK(safety_accept_command(&c, t) == 0, "accepted a command while in BOOT");
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted a command while in BOOT");
 
     /*
      * A subsystem that is still coming up holds BOOT. HEALTH_IMU rather than
@@ -102,14 +112,14 @@ static void test_boot_refuses_commands(void)
     CHECK(safety_state() == SAFETY_BOOT, "left BOOT while a subsystem was faulted");
 
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 0,
+    CHECK(safety_accept_command(&c, s_ref, t) == 0,
           "accepted a command before the subsystems were healthy");
 
     safety_tick(0);
     CHECK(safety_state() == SAFETY_IDLE, "did not reach IDLE once healthy");
 
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 1, "refused a good command from IDLE");
+    CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a good command from IDLE");
     CHECK(safety_state() == SAFETY_ARMED, "did not arm on a good command");
 }
 
@@ -177,13 +187,13 @@ static void test_fault_requires_explicit_rearm(void)
 
     /* Still enabled: must NOT come straight back under the Pi's control. */
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 0, "re-armed without a handshake");
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "re-armed without a handshake");
     CHECK(safety_state() != SAFETY_ARMED, "re-armed without a handshake");
 
     /* The Pi drops ENABLE, acknowledging it lost control... */
     s_clear_latched_calls = 0;
     c = make_cmd(0.0f, 0);
-    (void)safety_accept_command(&c, t);
+    (void)safety_accept_command(&c, s_ref, t);
 
     /*
      * The handshake must also acknowledge the latched timing fault. Without
@@ -197,7 +207,7 @@ static void test_fault_requires_explicit_rearm(void)
 
     /* ...and only now may it take the robot back. */
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 1, "refused a proper re-arm");
+    CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a proper re-arm");
     CHECK(safety_state() == SAFETY_ARMED, "did not arm after the handshake");
 }
 
@@ -212,7 +222,7 @@ static void test_enable_off_stands_down(void)
     float t[NEXUS_NUM_JOINTS];
     nexus_cmd_t c = make_cmd(0.0f, 0);
 
-    CHECK(safety_accept_command(&c, t) == 0, "acted on a disabled command");
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "acted on a disabled command");
     CHECK(safety_state() == SAFETY_IDLE, "did not stand down on ENABLE off");
     CHECK(s_disarm_calls == 1, "did not disarm on ENABLE off");
 
@@ -233,20 +243,20 @@ static void test_rejects_nan_and_out_of_range(void)
     uint32_t before = safety_rejected();
 
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    c.target_pos[3] = NAN;
-    CHECK(safety_accept_command(&c, t) == 0, "accepted a NaN target");
+    c.residual[3] = (float)NAN;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted a NaN target");
 
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    c.target_pos[7] = INFINITY;
-    CHECK(safety_accept_command(&c, t) == 0, "accepted an infinite target");
+    c.residual[7] = (float)INFINITY;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an infinite target");
 
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    c.target_pos[0] = SAFETY_POS_MAX_TURNS + 1.0f;
-    CHECK(safety_accept_command(&c, t) == 0, "accepted an over-range target");
+    s_ref[0] = SAFETY_POS_MAX_TURNS + 1.0f;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an over-range target");
 
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    c.target_pos[0] = SAFETY_POS_MIN_TURNS - 1.0f;
-    CHECK(safety_accept_command(&c, t) == 0, "accepted an under-range target");
+    s_ref[0] = SAFETY_POS_MIN_TURNS - 1.0f;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an under-range target");
 
     CHECK(safety_rejected() == before + 4,
           "rejection counter = %u, expected %u",
@@ -261,18 +271,18 @@ static void test_slew_limit(void)
 
     arm(0.0f);
 
-    nexus_cmd_t c = make_cmd(SAFETY_MAX_STEP_TURNS * 0.5f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 1, "refused a legal step");
+    nexus_cmd_t c = make_cmd(SAFETY_MAX_RESIDUAL_TURNS * 0.5f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a legal step");
 
     c = make_cmd(SAFETY_MAX_STEP_TURNS * 0.5f + SAFETY_MAX_STEP_TURNS + 0.1f,
                  NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 0, "accepted an oversized step");
+    CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an oversized step");
 
     /* The refused command must not have moved the reference. A rejected
        frame that still updates s_last_pos would let a policy walk the robot
        anywhere one rejected step at a time. */
-    c = make_cmd(SAFETY_MAX_STEP_TURNS * 0.5f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 1,
+    c = make_cmd(SAFETY_MAX_RESIDUAL_TURNS * 0.5f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&c, s_ref, t) == 1,
           "a rejected command moved the slew reference");
 }
 
@@ -285,29 +295,30 @@ static void test_replayed_and_stale_seq(void)
     arm(0.0f);
 
     nexus_cmd_t good = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&good, t) == 1, "refused a fresh command");
+    CHECK(safety_accept_command(&good, s_ref, t) == 1, "refused a fresh command");
 
     /* Exact replay. */
-    CHECK(safety_accept_command(&good, t) == 0, "accepted a replayed frame");
+    CHECK(safety_accept_command(&good, s_ref, t) == 0, "accepted a replayed frame");
 
     /* Older sequence number. */
     nexus_cmd_t old = good;
     old.seq = good.seq - 5u;
-    CHECK(safety_accept_command(&old, t) == 0, "accepted a stale frame");
+    CHECK(safety_accept_command(&old, s_ref, t) == 0, "accepted a stale frame");
 
     /* Sequence wrap must still read as forward motion, not as stale. */
     safety_init();
+    memset(s_ref, 0, sizeof(s_ref));
     s_seq = 0;
     s_closed_loop = 1;
     safety_tick(0);
 
     nexus_cmd_t a = make_cmd(0.0f, NEXUS_CMD_ENABLE);
     a.seq = 0xFFFFFFFEu;
-    CHECK(safety_accept_command(&a, t) == 1, "setup: refused first command");
+    CHECK(safety_accept_command(&a, s_ref, t) == 1, "setup: refused first command");
 
     nexus_cmd_t b = make_cmd(0.0f, NEXUS_CMD_ENABLE);
     b.seq = 1u;                    /* wrapped past 0xFFFFFFFF */
-    CHECK(safety_accept_command(&b, t) == 1,
+    CHECK(safety_accept_command(&b, s_ref, t) == 1,
           "treated a wrapped sequence number as stale");
 }
 
@@ -323,8 +334,8 @@ static void test_sustained_garbage_faults(void)
     for (unsigned i = 0; i < SAFETY_MAX_REJECTS; i++)
     {
         nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-        c.target_pos[0] = NAN;
-        (void)safety_accept_command(&c, t);
+        c.residual[0] = (float)NAN;
+        (void)safety_accept_command(&c, s_ref, t);
     }
 
     CHECK(safety_state() == SAFETY_FAULT,
@@ -340,6 +351,7 @@ static void test_good_command_passes_through_intact(void)
     float t[NEXUS_NUM_JOINTS];
 
     safety_init();
+    memset(s_ref, 0, sizeof(s_ref));
     s_seq = 0;
     s_closed_loop = 1;
     safety_tick(0);
@@ -347,10 +359,10 @@ static void test_good_command_passes_through_intact(void)
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        c.target_pos[j] = 0.01f * (float)j;
+        c.residual[j] = 0.01f * (float)j;
     }
 
-    CHECK(safety_accept_command(&c, t) == 1, "refused a good command");
+    CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a good command");
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
@@ -369,6 +381,7 @@ static void test_arms_the_drives_before_commanding(void)
     printf("drives are put into closed loop before any command is acted on\n");
 
     safety_init();
+    memset(s_ref, 0, sizeof(s_ref));
     s_seq = 0;
     s_arm_requests = 0;
     s_disarm_calls = 0;
@@ -378,7 +391,7 @@ static void test_arms_the_drives_before_commanding(void)
     float t[NEXUS_NUM_JOINTS];
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
 
-    CHECK(safety_accept_command(&c, t) == 0,
+    CHECK(safety_accept_command(&c, s_ref, t) == 0,
           "commanded actuators that were not in closed loop");
     CHECK(s_arm_requests == 1, "did not ask the drives to arm");
     CHECK(safety_state() != SAFETY_ARMED, "reported ARMED with idle drives");
@@ -386,7 +399,7 @@ static void test_arms_the_drives_before_commanding(void)
     /* Drives arrive in closed loop; the next command goes through. */
     s_closed_loop = 1;
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    CHECK(safety_accept_command(&c, t) == 1, "refused a command once armed");
+    CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a command once armed");
     CHECK(safety_state() == SAFETY_ARMED, "did not reach ARMED");
 }
 
@@ -395,6 +408,7 @@ static void test_drives_that_never_arm_fault(void)
     printf("drives that never reach closed loop fault rather than hang\n");
 
     safety_init();
+    memset(s_ref, 0, sizeof(s_ref));
     s_seq = 0;
     s_arm_requests = 0;
     s_disarm_calls = 0;
@@ -406,13 +420,63 @@ static void test_drives_that_never_arm_fault(void)
     for (unsigned i = 0; i < SAFETY_ARM_TIMEOUT_CMDS; i++)
     {
         nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-        (void)safety_accept_command(&c, t);
+        (void)safety_accept_command(&c, s_ref, t);
     }
 
     CHECK(safety_state() == SAFETY_FAULT,
           "still %s after %u commands with the drives refusing to arm",
           safety_state_name(), SAFETY_ARM_TIMEOUT_CMDS);
     CHECK(s_disarm_calls == 1, "did not disarm after failing to arm");
+}
+
+/*
+ * The residual is a correction, not a trajectory.
+ *
+ * Two separate bounds, and both matter. A policy that emits a large value must
+ * not be able to fling a joint, so the residual is bounded on its own. And a
+ * residual well inside that bound can still take a joint past its envelope
+ * when the reference is already near one, so the sum is bounded again.
+ */
+static void test_residual_bounds(void)
+{
+    float t[NEXUS_NUM_JOINTS];
+
+    printf("a residual larger than the limit is refused\n");
+    arm(0.0f);
+
+    nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    c.residual[2] = SAFETY_MAX_RESIDUAL_TURNS * 1.5f;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0,
+          "accepted a residual beyond the limit");
+
+    c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    c.residual[2] = -SAFETY_MAX_RESIDUAL_TURNS * 1.5f;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0,
+          "accepted a large negative residual");
+
+    printf("a legal residual on a reference near the limit is refused\n");
+    arm(0.0f);
+    s_ref[4] = SAFETY_POS_MAX_TURNS - (SAFETY_MAX_RESIDUAL_TURNS * 0.5f);
+    c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    c.residual[4] = SAFETY_MAX_RESIDUAL_TURNS;
+    CHECK(safety_accept_command(&c, s_ref, t) == 0,
+          "accepted a sum outside the envelope");
+
+    printf("the reference alone drives the joint when the residual is zero\n");
+    arm(0.0f);
+    s_ref[1] = 0.25f;
+    c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&c, s_ref, t) == 1,
+          "refused a zero residual on a valid reference");
+    CHECK(t[1] == 0.25f, "reference did not reach the drives: got %f",
+          (double)t[1]);
+
+    printf("a broken reference is refused even with a zero residual\n");
+    arm(0.0f);
+    s_ref[6] = (float)NAN;
+    c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&c, s_ref, t) == 0,
+          "accepted a NaN reference");
 }
 
 int main(void)
@@ -432,6 +496,7 @@ int main(void)
     test_good_command_passes_through_intact();
     test_arms_the_drives_before_commanding();
     test_drives_that_never_arm_fault();
+    test_residual_bounds();
 
     printf("-------------------\n%s (%d failure%s)\n",
            s_fail ? "FAILED" : "PASSED", s_fail, s_fail == 1 ? "" : "s");

@@ -71,6 +71,18 @@ typedef enum
  */
 #define SAFETY_MAX_STEP_TURNS  (0.5f)
 
+/*
+ * Largest residual the policy may add to the reference, per joint, in
+ * output-shaft turns. 0.1 turns is 36 degrees at the joint - a large
+ * correction for a gait whose whole hip swing is about 14 degrees, and still
+ * far short of letting the policy drive the leg somewhere of its own choosing.
+ *
+ * This is checked on the residual ALONE, before it is added. The sum is then
+ * checked again against the envelope and the slew limit, so a plausible
+ * residual on top of a reference near a limit is still refused.
+ */
+#define SAFETY_MAX_RESIDUAL_TURNS  (0.1f)
+
 /* Consecutive rejected commands before the link is treated as untrustworthy. */
 #define SAFETY_MAX_REJECTS     10u
 
@@ -137,6 +149,7 @@ void safety_tick(uint32_t faults);
  * quietly would be worse than stopping.
  */
 uint8_t safety_accept_command(const nexus_cmd_t *cmd,
+                              const float ref_turns[NEXUS_NUM_JOINTS],
                               float targets_out[NEXUS_NUM_JOINTS]);
 
 /* Which of the four states the robot is in right now. */

@@ -40,7 +40,7 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 3
+PROTO_VERSION = 6
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
@@ -210,7 +210,7 @@ COMMAND_FORMAT = (
     "B"      # msg_id
     "B"      # version
     "I"      # seq
-    "10f"    # target_pos      turns
+    "10f"    # residual        turns, added to ref_angle
     "H"      # flags
     "H"      # crc
 )
@@ -512,13 +512,13 @@ class NexusCommand:
     """Position command to the STM32. Send at ~250 Hz."""
 
     seq: int = 0
-    target_pos: Optional[List[float]] = None   # turns, NUM_JOINTS
+    residual: Optional[List[float]] = None     # turns, added to ref_angle
     flags: int = 0
 
     def pack(self) -> bytes:
-        pos = self.target_pos if self.target_pos is not None else [0.0] * NUM_JOINTS
+        pos = self.residual if self.residual is not None else [0.0] * NUM_JOINTS
         if len(pos) != NUM_JOINTS:
-            raise ValueError(f"target_pos must have {NUM_JOINTS} entries")
+            raise ValueError(f"residual must have {NUM_JOINTS} entries")
 
         body = struct.pack(
             COMMAND_FORMAT[:-1],       # everything except the trailing crc

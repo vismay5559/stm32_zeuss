@@ -106,11 +106,41 @@ void safety_tick(uint32_t faults)
     }
 }
 
-static uint8_t targets_are_sane(const nexus_cmd_t *cmd)
+/*
+ * Two checks, deliberately separate.
+ *
+ * The residual is bounded on its own so a policy cannot use it as a
+ * trajectory. The SUM is then bounded again, because a residual well inside
+ * its limit can still push a joint past its envelope when the reference is
+ * already near one - and because the slew limit has to see the value the
+ * drives will actually be given, not the correction on top of it.
+ */
+static uint8_t targets_are_sane(const nexus_cmd_t *cmd,
+                                const float ref_turns[NEXUS_NUM_JOINTS],
+                                float targets_out[NEXUS_NUM_JOINTS])
 {
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        float p = cmd->target_pos[j];
+        float r = cmd->residual[j];
+
+        /* The reference is ours, but a broken gait table must not become a
+           command either. */
+        if (!isfinite(ref_turns[j]))
+        {
+            return 0;
+        }
+        if (!isfinite(r))
+        {
+            return 0;
+        }
+        if ((r < -SAFETY_MAX_RESIDUAL_TURNS) || (r > SAFETY_MAX_RESIDUAL_TURNS))
+        {
+            return 0;
+        }
+
+        float p = ref_turns[j] + r;
+
+        targets_out[j] = p;
 
         /*
          * A NaN is worse than an out-of-range number. It passes every
@@ -167,6 +197,7 @@ static void reject(void)
 }
 
 uint8_t safety_accept_command(const nexus_cmd_t *cmd,
+                              const float ref_turns[NEXUS_NUM_JOINTS],
                               float targets_out[NEXUS_NUM_JOINTS])
 {
     uint8_t enabled = (cmd->flags & NEXUS_CMD_ENABLE) ? 1u : 0u;
@@ -225,7 +256,7 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
         }
     }
 
-    if (!targets_are_sane(cmd))
+    if (!targets_are_sane(cmd, ref_turns, targets_out))
     {
         reject();
         return 0;
@@ -256,10 +287,11 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
     s_last_seq   = cmd->seq;
     s_have_seq   = 1;
 
+    /* targets_out was filled by targets_are_sane, which is also what the slew
+       limit compared against - so the two can never disagree. */
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        s_last_pos[j]  = cmd->target_pos[j];
-        targets_out[j] = cmd->target_pos[j];
+        s_last_pos[j] = targets_out[j];
     }
 
     s_state = SAFETY_ARMED;

@@ -31,7 +31,7 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     5u      /* v5: diagnostics block               */
+#define NEXUS_PROTO_VERSION     6u      /* v6: command is a residual, not a target */
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
@@ -208,7 +208,30 @@ typedef struct __attribute__((packed))
     uint8_t  msg_id;                         /*  2 */
     uint8_t  version;                        /*  3 */
     uint32_t seq;                            /*  4 */
-    float    target_pos[NEXUS_NUM_JOINTS];   /*  8 turns                        */
+    /*
+     * A RESIDUAL, not a target. Output-shaft turns, added to the reference
+     * the STM32 is already playing:
+     *
+     *     drive_target[j] = ref_angle[j] + residual[j]
+     *
+     * Send zeros and the robot walks the stored gait unaided. The policy's job
+     * is only the correction on top, which is why a Pi that stops sending
+     * degrades to a nominal walk rather than to nonsense.
+     *
+     * The reference this is added to comes back in the state packet as
+     * ref_angle[] (radians) with phase, so the policy can see exactly what it
+     * is correcting and when in the stride it is.
+     *
+     * Bounded by SAFETY_MAX_RESIDUAL_TURNS on its own account, and the sum is
+     * bounded again by the joint envelope and the slew limit. A residual is a
+     * nudge; anything large enough to be a trajectory of its own is refused.
+     *
+     * This field was target_pos[] in v5, same offset and size but an absolute
+     * command. The version bump is the guard: link_usb.c rejects any frame
+     * whose version is not NEXUS_PROTO_VERSION, so a v5 Pi cannot have its
+     * absolute angles silently added to the gait.
+     */
+    float    residual[NEXUS_NUM_JOINTS];     /*  8 turns, added to ref_angle    */
     uint16_t flags;                          /* 48 */
     uint16_t crc;                            /* 50 */
 } nexus_cmd_t;                               /* 52 total                        */

@@ -1,4 +1,5 @@
 #include "app.h"
+#include "gait_ref.h"
 #include "main.h"
 #include "link_proto.h"
 #include "link_usb.h"
@@ -185,6 +186,69 @@ static void update_health_leds(void)
     {
         phase      = 0;
         shown_code = 0;         /* re-evaluate which fault to show */
+    }
+}
+
+/* ===================================================================== */
+/*  The on-board reference walk                                          */
+/* ===================================================================== */
+
+/*
+ * Build all ten joint references for one instant of the stride.
+ *
+ * gait_ref.c holds ONE leg - four columns, generated for the right leg from
+ * the trajectory optimisation. The other leg is that same trajectory half a
+ * cycle later, which is what a symmetric walk is.
+ *
+ * Two things about the mirror are worth stating rather than leaving in the
+ * arithmetic. The pitch joints (hip_pitch, knee, ankle) swing in the sagittal
+ * plane and mirror onto the left leg unchanged. hip_roll does not: it moves
+ * out of that plane, so the mirrored leg needs the opposite sign. Getting that
+ * sign wrong gives a robot that leans both hips the same way and falls over
+ * sideways, which looks like a balance problem rather than a table problem.
+ *
+ * Joint index is bus * 5 + (node - 1), per robot_config.h:
+ *
+ *     left  (bus 0): 0 hip_roll  1 hip_pitch  2 knee  3 ankle  4 unused
+ *     right (bus 1): 5 hip_roll  6 hip_pitch  7 knee  8 ankle  9 unused
+ *
+ * THE FIFTH JOINT ON EACH LEG HAS NO REFERENCE. The trajectory has four
+ * columns and the robot has five actuators a side, so indices 4 and 9 are held
+ * at zero and only the policy's residual moves them. When a five-column table
+ * is generated, add the column here and the rest of this file is unchanged.
+ */
+/*
+ * Stride playback rate. 1.0 plays the trajectory at the speed it was optimised
+ * for; GAIT_CYCLE_S is that period. Lower is slower and safer to watch.
+ */
+#define APP_GAIT_SPEED   1.0f
+
+static float s_phase;
+static float s_ref_turns[NEXUS_NUM_JOINTS];
+
+static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
+{
+    static const uint8_t col[4] = {
+        GAIT_COL_HIP_ROLL, GAIT_COL_HIP_PITCH, GAIT_COL_KNEE, GAIT_COL_ANKLE
+    };
+    /* +1 keeps the right leg as generated; the left leg mirrors roll only. */
+    static const float mirror[4] = { -1.0f, 1.0f, 1.0f, 1.0f };
+
+    float right[GAIT_JOINTS];
+    float left[GAIT_JOINTS];
+
+    gait_sample(phase, right);
+    gait_sample(phase + 0.5f, left);        /* half a stride behind */
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        ref_turns[j] = 0.0f;
+    }
+
+    for (int k = 0; k < 4; k++)
+    {
+        ref_turns[0 + k] = left[col[k]] * mirror[k];
+        ref_turns[5 + k] = right[col[k]];
     }
 }
 
@@ -385,9 +449,28 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
      * NEXUS_STREAM_GAIT_LIVE says it outright. Set the bit when the library
      * lands; silence that has to be inferred is not a protocol.
      */
-    memset(s_state.ref_angle, 0, sizeof(s_state.ref_angle));
-    s_state.phase        = 0.0f;
-    s_state.stream_flags = 0u;
+    /*
+     * The stride clock. It free-runs at 1 kHz whether or not the Pi is
+     * talking, so the reference is always defined and a policy that stops
+     * sending degrades to the nominal walk rather than to a held pose.
+     */
+    s_phase += (0.001f * APP_GAIT_SPEED) / GAIT_CYCLE_S;
+    if (s_phase >= 1.0f)
+    {
+        s_phase -= 1.0f;
+    }
+
+    build_reference(s_phase, s_ref_turns);
+
+    /* The packet reports the reference in radians on the output side, the same
+       units and convention as joint_pos, so the Pi can subtract them. The
+       command residual stays in turns, matching what the drives take. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_state.ref_angle[j] = s_ref_turns[j] * 6.28318530718f;
+    }
+    s_state.phase        = s_phase;
+    s_state.stream_flags = NEXUS_STREAM_GAIT_LIVE;
 
     /* Estimate before packing, so the packet carries this tick's fused state
        rather than the previous one. */
@@ -433,7 +516,12 @@ void app_run(void)
              * that gets as far as act_set_targets() poisons the interpolator
              * permanently.
              */
-            if (safety_accept_command(&cmd, targets))
+            /*
+             * The residual is added to the reference INSIDE safety.c, so the
+             * bounds are applied to the number the drives will actually be
+             * given rather than to the correction on its own.
+             */
+            if (safety_accept_command(&cmd, s_ref_turns, targets))
             {
                 act_set_targets(targets);
             }
