@@ -52,20 +52,16 @@ static const char *const s_mon_name[MONITOR_COUNT] = { "" };
 /*
  * Output-shaft turns -> what each drive is sent.
  *
- * Every axis is now configured with its LOAD-side encoder, so pos_estimate is
- * already in output-shaft turns and a gait value goes to the drive unscaled.
- * All ones.
+ * The drive's position units follow ITS ENCODER, not its gearbox. Hip and knee
+ * read load-side encoders, so one drive turn is one output turn and a gait
+ * value goes to them unscaled. The ANKLE reads the motor side of its 9:1, so
+ * everything sent to it - position and velocity feedforward alike - is x9.
  *
- * This was { 47, 1, 9 } while the hip ran on its motor-side MA702 (its
- * load-side AS5047P had failed) and the ankle was motor-side by design. If an
- * encoder is ever moved back to the motor side, set that entry to the gear
- * ratio - the drive's position units follow the encoder, not the gearbox.
- *
- * Note this table is about POSITION units only. It is not a gearbox table:
+ * This table is about POSITION units only. It is not a gearbox table:
  * test_leg_torque.c keeps a separate s_gear[] = { 47, 47, 9 } because torque
- * still has to cross the reduction whatever the encoder is doing.
+ * always has to cross the reduction, whatever the encoder is doing.
  */
-static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 1.0f };
+static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
 
 /*
  * Controller gains, pushed to every live drive from legtest_init() so all
@@ -205,7 +201,7 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_TRACE_RX             0
 #define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
-#define LEGTEST_ENABLE_CLOSED_LOOP   0
+#define LEGTEST_ENABLE_CLOSED_LOOP   1
 #define LEGTEST_ARM_DELAY_MS         3000u
 #define LEGTEST_STOP_BUTTON          1
 #define LEGTEST_MOTION_GAIT          1
@@ -278,6 +274,89 @@ static uint8_t   s_cap_dumped;
 #define ODRV_AXIS_STATE_IDLE            1u
 #define ODRV_AXIS_STATE_CLOSED_LOOP     8u
 
+/*
+ * Calibration states. Set_Axis_State (0x007) takes these exactly like IDLE or
+ * CLOSED_LOOP - the drive runs the routine and returns to IDLE when it is done.
+ *
+ *   3  FULL_CALIBRATION_SEQUENCE    motor R/L, then the encoder offset
+ *   4  MOTOR_CALIBRATION            resistance and inductance only, no motion
+ *   7  ENCODER_OFFSET_CALIBRATION   finds the electrical angle; MOVES the motor
+ *
+ * These numbers are from the ODrive axis-state enum. They have not been
+ * verified against the 0.6.12 documentation from here - the error and enum
+ * pages return HTTP 403 - so confirm 3 and 7 in odrivetool before trusting a
+ * joint to them.
+ */
+#define ODRV_AXIS_STATE_FULL_CALIB      3u
+#define ODRV_AXIS_STATE_MOTOR_CALIB     4u
+#define ODRV_AXIS_STATE_ENC_OFFSET_CALIB 7u
+
+/*
+ * Arbitrary parameter access (ODrive "CANSimple" SDO).
+ *
+ *   RxSdo  0x004  us -> drive   [ opcode | ep_lo | ep_hi | 0 | value(4) ]
+ *   TxSdo  0x005  drive -> us   [   0    | ep_lo | ep_hi | 0 | value(4) ]
+ *
+ * Endpoint numbers are NOT stable: they move with every firmware and hardware
+ * revision. The ones below come from flat_endpoints.json for fw 0.6.12 /
+ * hw 5.2.0. Writing the wrong endpoint silently corrupts an unrelated setting,
+ * so odrv_check_version() interrogates each drive with Get_Version first and
+ * refuses to write to anything that does not match exactly.
+ */
+#define ODRV_CMD_GET_VERSION    0x000u
+#define ODRV_CMD_RX_SDO         0x004u
+#define ODRV_CMD_TX_SDO         0x005u
+#define SDO_OP_READ             0x00u
+#define SDO_OP_WRITE            0x01u
+
+#define EP_JSON_HW_LINE   5u
+#define EP_JSON_HW_VER    2u
+#define EP_JSON_HW_VAR    0u
+#define EP_JSON_FW_MAJOR  0u
+#define EP_JSON_FW_MINOR  6u
+#define EP_JSON_FW_REV    12u
+
+#define EP_SPI_ENC0_MAX_ERROR_RATE  673u   /* float, rw */
+#define EP_SAVE_CONFIGURATION       718u   /* function  */
+
+/*
+ * spi_encoder0.config.max_error_rate - the fraction of SPI transactions the
+ * drive will tolerate coming back bad before it declares the encoder estimate
+ * missing and disarms. The knee has been dropping out mid-gait; loosening this
+ * buys headroom while the harness is investigated. It does NOT fix bad wiring,
+ * it only stops a handful of corrupt reads from ending the run.
+ */
+#define LEGTEST_SET_SPI_ERR_RATE    1
+#define LEGTEST_SPI_MAX_ERROR_RATE  0.1f
+
+/*
+ * ---------------------------------------------------------------------------
+ * CALIBRATION OVER CAN - READ THIS BEFORE SETTING IT TO 1
+ * ---------------------------------------------------------------------------
+ *
+ * Which joints to run FULL_CALIBRATION_SEQUENCE on at boot, by index into the
+ * joint tables. -1 ends the list. { -1 } means calibrate nothing.
+ *
+ * THE JOINT WILL MOVE. Encoder offset calibration spins the motor to find the
+ * electrical angle, and it expects the shaft to turn freely. Through a 47:1
+ * gearbox into a joint with 70 degrees of total travel, "freely" is not what it
+ * gets: the routine can drive the joint into a hard stop and either fail with a
+ * calibration error or load the mechanism against it.
+ *
+ * So run this with the joint DECOUPLED or with the leg supported and the travel
+ * clear, watch it, and keep the stop button in reach. It is not something to
+ * leave enabled - calibration belongs in a bring-up session, not in every boot
+ * of a control test.
+ *
+ * Results are NOT saved. LEGTEST_SDO_SAVE persists them if you want them to
+ * survive a power cycle, and that needs a reboot to take effect.
+ */
+#define LEGTEST_CALIBRATE_JOINTS    { 1 }
+#define LEGTEST_CALIB_TIMEOUT_MS    5000u
+
+/* 1 = also persist it to the drive's flash (needs a power cycle to re-init). */
+#define LEGTEST_SDO_SAVE            0
+
 typedef struct
 {
     float    pos;
@@ -297,6 +376,28 @@ static volatile joint_t s_joint[JOINT_COUNT];
 #if (MONITOR_COUNT > 0)
 static volatile joint_t s_mon[MONITOR_COUNT];
 #endif
+
+/* filled by the RX handler while an SDO / version exchange is outstanding */
+static volatile uint8_t  s_sdo_node;
+static volatile uint16_t s_sdo_ep;
+static volatile uint8_t  s_sdo_got;
+static volatile uint8_t  s_sdo_val[4];
+static volatile uint8_t  s_ver_node;
+static volatile uint8_t  s_ver_got;
+static volatile uint8_t  s_ver[8];
+
+typedef struct
+{
+    uint32_t id;
+    uint8_t  len;
+    uint8_t  fd;       
+    uint8_t  brs;       
+    uint8_t  data[8];
+} trace_t;
+
+static volatile trace_t  s_trace[TRACE_LEN];
+static volatile uint8_t  s_trace_head;
+static volatile uint8_t  s_trace_tail;
 
 static volatile uint16_t s_node_seen[64];
 static volatile uint8_t  s_node_state[64];
@@ -692,6 +793,29 @@ void legtest_on_rx(void)
             }
         }
 
+        /* replies to a setup exchange, from any node - handled before the
+           joint lookup so a monitor-only node can answer too */
+        if (cmd == ODRV_CMD_GET_VERSION)
+        {
+            if (node == s_ver_node)
+            {
+                for (int b = 0; b < 8; b++) { s_ver[b] = data[b]; }
+                s_ver_got = 1u;
+            }
+            continue;
+        }
+        if (cmd == ODRV_CMD_TX_SDO)
+        {
+            uint16_t ep = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+
+            if ((node == s_sdo_node) && (ep == s_sdo_ep))
+            {
+                for (int b = 0; b < 4; b++) { s_sdo_val[b] = data[4 + b]; }
+                s_sdo_got = 1u;
+            }
+            continue;
+        }
+
         volatile joint_t *t = NULL;
         int j = joint_from_node(node);
 
@@ -862,6 +986,270 @@ static void trace_drain(int max_lines)
 
 static void can_status(void);
 
+/* ===================================================================== */
+/*  Arbitrary parameter access - runs once at boot, before the timers      */
+/* ===================================================================== */
+
+/*
+ * Blocking. Only ever called from legtest_init(), before the 1 kHz tick is
+ * started, so pumping the queue and draining RX inline here is safe.
+ */
+static uint8_t sdo_wait(volatile uint8_t *flag, uint32_t ms)
+{
+    for (uint32_t i = 0u; i < ms; i++)
+    {
+        tx_pump();
+        legtest_on_rx();
+        if (*flag) { return 1u; }
+        HAL_Delay(1);
+    }
+    return 0u;
+}
+
+/*
+ * The endpoint numbers this file hard-codes are only meaningful for one
+ * firmware/hardware pair. Ask the drive what it is and refuse to write if it
+ * disagrees - a mismatched write lands on whatever parameter happens to sit at
+ * that number, which is far worse than not writing at all.
+ */
+static uint8_t odrv_check_version(uint8_t node)
+{
+    uint8_t empty[8] = { 0 };
+
+    s_ver_node = node;
+    s_ver_got  = 0u;
+    tx_enqueue(node, ODRV_CMD_GET_VERSION, empty, 0u);
+
+    if (!sdo_wait(&s_ver_got, 250u))
+    {
+        printf("  node %u: no reply to Get_Version - skipped\r\n", (unsigned)node);
+        return 0u;
+    }
+
+    uint8_t hw_line = s_ver[1], hw_ver = s_ver[2], hw_var = s_ver[3];
+    uint8_t fw_maj  = s_ver[4], fw_min = s_ver[5], fw_rev = s_ver[6];
+
+    if ((hw_line != EP_JSON_HW_LINE) || (hw_ver != EP_JSON_HW_VER) ||
+        (hw_var != EP_JSON_HW_VAR)   || (fw_maj != EP_JSON_FW_MAJOR) ||
+        (fw_min != EP_JSON_FW_MINOR) || (fw_rev != EP_JSON_FW_REV))
+    {
+        printf("  node %u: hw %u.%u.%u fw %u.%u.%u does not match the endpoint\r\n"
+               "          table (hw %u.%u.%u fw %u.%u.%u) - NOT writing.\r\n"
+               "          Fetch that drive's own flat_endpoints.json.\r\n",
+               (unsigned)node, hw_line, hw_ver, hw_var, fw_maj, fw_min, fw_rev,
+               EP_JSON_HW_LINE, EP_JSON_HW_VER, EP_JSON_HW_VAR,
+               EP_JSON_FW_MAJOR, EP_JSON_FW_MINOR, EP_JSON_FW_REV);
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t sdo_read_f32(uint8_t node, uint16_t ep, float *out)
+{
+    uint8_t d[4];
+
+    d[0] = SDO_OP_READ;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+
+    s_sdo_node = node;
+    s_sdo_ep   = ep;
+    s_sdo_got  = 0u;
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 4u);
+
+    if (!sdo_wait(&s_sdo_got, 250u)) { return 0u; }
+
+    *out = le_f32((const uint8_t *)s_sdo_val);
+    return 1u;
+}
+
+static void sdo_write_f32(uint8_t node, uint16_t ep, float v)
+{
+    uint8_t d[8];
+
+    d[0] = SDO_OP_WRITE;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+    put_f32(&d[4], v);
+
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 8u);
+    for (uint32_t i = 0u; i < 20u; i++) { tx_pump(); HAL_Delay(1); }
+}
+
+static void sdo_call(uint8_t node, uint16_t ep)
+{
+    uint8_t d[4];
+
+    d[0] = SDO_OP_WRITE;
+    d[1] = (uint8_t)(ep & 0xFFu);
+    d[2] = (uint8_t)(ep >> 8);
+    d[3] = 0u;
+
+    tx_enqueue(node, ODRV_CMD_RX_SDO, d, 4u);
+    for (uint32_t i = 0u; i < 20u; i++) { tx_pump(); HAL_Delay(1); }
+}
+
+static void spi_err_rate_one(uint8_t node, const char *name)
+{
+    float before = 0.0f, after = 0.0f;
+
+    if (s_node_seen[node] == 0u)
+    {
+        printf("  node %u %-9s : silent on the scan - skipped\r\n",
+               (unsigned)node, name);
+        return;
+    }
+    if (!odrv_check_version(node)) { return; }
+
+    if (!sdo_read_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE, &before))
+    {
+        printf("  node %u %-9s : no reply reading the endpoint - skipped\r\n",
+               (unsigned)node, name);
+        return;
+    }
+
+    sdo_write_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE,
+                  LEGTEST_SPI_MAX_ERROR_RATE);
+
+    if (!sdo_read_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE, &after))
+    {
+        printf("  node %u %-9s : wrote %.3f but could not read it back\r\n",
+               (unsigned)node, name, (double)LEGTEST_SPI_MAX_ERROR_RATE);
+        return;
+    }
+
+    float want = LEGTEST_SPI_MAX_ERROR_RATE;
+    float d    = (after > want) ? (after - want) : (want - after);
+
+    printf("  node %u %-9s : max_error_rate %.4f -> %.4f%s\r\n",
+           (unsigned)node, name, (double)before, (double)after,
+           (d < 1e-6f) ? "" : "   !! DID NOT TAKE");
+
+#if LEGTEST_SDO_SAVE
+    if (d < 1e-6f)
+    {
+        printf("  node %u %-9s : save_configuration()\r\n", (unsigned)node, name);
+        sdo_call(node, EP_SAVE_CONFIGURATION);
+        HAL_Delay(500);
+    }
+#else
+    (void)sdo_call;
+#endif
+}
+
+/*
+ * Run FULL_CALIBRATION_SEQUENCE on one joint and wait for it to finish.
+ *
+ * Blocking, and only called from legtest_init() before the timers start, like
+ * everything else in this section. The drive returns itself to IDLE when the
+ * routine completes, so "done" is axis_state back at IDLE with no error - and
+ * an error is reported rather than swallowed, because a joint that failed
+ * calibration will refuse closed loop later with no obvious reason.
+ */
+static uint8_t calibrate_joint(int j)
+{
+    const uint8_t node = s_node_id[j];
+
+    if (!s_joint_live[j])
+    {
+        printf("  %-9s not on the bus - not calibrated\r\n", s_joint_name[j]);
+        return 0u;
+    }
+
+    printf("  %-9s (node %u) FULL_CALIBRATION_SEQUENCE - THE JOINT WILL MOVE\r\n",
+           s_joint_name[j], (unsigned)node);
+
+    s_joint[j].axis_state = 0u;
+    s_joint[j].axis_error = 0u;
+    send_axis_state(j, ODRV_AXIS_STATE_FULL_CALIB);
+
+    /* Let it leave IDLE first, so "already idle" is not read as "finished". */
+    uint8_t started = 0u;
+
+    for (uint32_t ms = 0u; ms < LEGTEST_CALIB_TIMEOUT_MS; ms++)
+    {
+        tx_pump();
+        legtest_on_rx();
+        HAL_Delay(1);
+
+        if (s_joint[j].axis_error != 0u)
+        {
+            printf("  %-9s calibration FAILED, axis_error 0x%08lX\r\n",
+                   s_joint_name[j], (unsigned long)s_joint[j].axis_error);
+            return 0u;
+        }
+        if (!started)
+        {
+            if (s_joint[j].axis_state == ODRV_AXIS_STATE_FULL_CALIB)
+            {
+                started = 1u;
+            }
+            continue;
+        }
+        if (s_joint[j].axis_state == ODRV_AXIS_STATE_IDLE)
+        {
+            printf("  %-9s calibration complete, back in IDLE\r\n",
+                   s_joint_name[j]);
+            return 1u;
+        }
+    }
+
+    printf("  %-9s calibration TIMED OUT after %u ms (state %u)\r\n",
+           s_joint_name[j], (unsigned)LEGTEST_CALIB_TIMEOUT_MS,
+           (unsigned)s_joint[j].axis_state);
+    return 0u;
+}
+
+static void run_calibration(void)
+{
+    static const int want[] = LEGTEST_CALIBRATE_JOINTS;
+
+    if ((sizeof(want) / sizeof(want[0]) == 1u) && (want[0] < 0))
+    {
+        return;                     /* nothing asked for */
+    }
+
+    printf("\r\ncalibration\r\n");
+
+    for (unsigned k = 0; k < (sizeof(want) / sizeof(want[0])); k++)
+    {
+        if ((want[k] < 0) || (want[k] >= JOINT_COUNT)) { continue; }
+        (void)calibrate_joint(want[k]);
+    }
+    printf("\r\n");
+}
+
+static void apply_encoder_config(void)
+{
+#if LEGTEST_SET_SPI_ERR_RATE
+    printf("\r\nspi_encoder0.config.max_error_rate -> %.3f  "
+           "(endpoint %u, fw %u.%u.%u / hw %u.%u.%u)\r\n",
+           (double)LEGTEST_SPI_MAX_ERROR_RATE,
+           (unsigned)EP_SPI_ENC0_MAX_ERROR_RATE,
+           EP_JSON_FW_MAJOR, EP_JSON_FW_MINOR, EP_JSON_FW_REV,
+           EP_JSON_HW_LINE, EP_JSON_HW_VER, EP_JSON_HW_VAR);
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        spi_err_rate_one(s_node_id[j], s_joint_name[j]);
+    }
+#if (MONITOR_COUNT > 0)
+    for (int m = 0; m < MONITOR_COUNT; m++)
+    {
+        spi_err_rate_one(s_mon_node[m], s_mon_name[m]);
+    }
+#endif
+
+#if !LEGTEST_SDO_SAVE
+    printf("  not saved to flash - this is a runtime write and is lost on the\r\n"
+           "  next power cycle. Set LEGTEST_SDO_SAVE 1 to persist it.\r\n");
+#endif
+    printf("\r\n");
+#endif
+}
+
 static void bus_scan(void)
 {
     printf("\r\nscanning the bus for %u ms - not transmitting...\r\n",
@@ -961,6 +1349,8 @@ void legtest_init(void)
 #endif
 
     bus_scan();
+    apply_encoder_config();
+    run_calibration();
     send_all_gains();
 
     HAL_TIM_Base_Start(&htim2);

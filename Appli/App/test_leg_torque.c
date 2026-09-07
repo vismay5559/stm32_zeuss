@@ -54,12 +54,12 @@ static const uint8_t s_gait_col[JOINT_COUNT] =
  * Two different ratios. They are NOT interchangeable and the tables stay
  * separate even when one of them is all ones.
  *
- * s_enc_per_out  - drive turns per turn of the OUTPUT shaft. Every axis is now
- *                  configured with its LOAD-side encoder, so pos_estimate and
- *                  vel_estimate already arrive in output-shaft units and this
- *                  is 1.0 everywhere. It exists so that if an encoder is ever
- *                  moved back to the motor side, there is one obvious place to
- *                  say so instead of a scattering of magic numbers.
+ * s_enc_per_out  - drive turns per turn of the OUTPUT shaft. Follows where the
+ *                  encoder physically sits. Hip and knee read the LOAD side, so
+ *                  pos_estimate and vel_estimate already arrive in output-shaft
+ *                  units: 1.0. The ankle reads the MOTOR side of its 9:1, so
+ *                  its readings are nine times the output and are divided down
+ *                  before they reach the control law.
  *
  * s_gear         - the GEARBOX reduction. A property of the mechanism, not of
  *                  the encoder, so it does NOT become 1.0 just because the
@@ -68,10 +68,11 @@ static const uint8_t s_gait_col[JOINT_COUNT] =
  *                  so every torque we send is divided by this, and every
  *                  torque it reports is multiplied by it to read as joint Nm.
  *
- * Using the encoder table for torque would command 47x too much on the hip
- * and knee. That is why they are two tables.
+ * Using the encoder table for torque would command 47x too much on the hip and
+ * knee. Using the gear table for position would command 47x too far. They look
+ * similar and mean opposite things, which is why they are two tables.
  */
-static const float s_enc_per_out[JOINT_COUNT] = {  1.0f,  1.0f, 1.0f };
+static const float s_enc_per_out[JOINT_COUNT] = {  1.0f,  1.0f, 9.0f };
 static const float s_gear[JOINT_COUNT]        = { 47.0f, 47.0f, 9.0f };
 
 /*
@@ -656,8 +657,9 @@ void legtorque_run(void)
                 if (fabsf(s_hold_out[j]) > 0.5f)
                 {
                     printf("!! %s reads %+.3f output turns at arming."
-                           " A load-side encoder cannot.\r\n"
-                           "   s_enc_per_out[%d] is probably wrong.\r\n",
+                           " No joint here has that much travel.\r\n"
+                           "   s_enc_per_out[%d] is probably wrong for where"
+                           " that encoder sits.\r\n",
                            s_joint_name[j], (double)s_hold_out[j], j);
                     stop_all("implausible encoder reading at arming");
                 }

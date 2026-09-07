@@ -27,6 +27,11 @@ joint on this leg**.
 
 ### Hip pitch and knee — encoder on the load side, 47:1
 
+> **Current as of this writing.** Hip and knee read load-side encoders; the
+> ankle reads the motor side of its 9:1, so the section below applies to it.
+> `s_cmd_scale[] = { 1, 1, 9 }` in `test_leg_can.c` follows that split — the
+> drive's position units follow its encoder, not its gearbox.
+
 Output travel is ±25° and ±35°, both far inside **one turn of the output
 shaft**. If the load-side encoder is absolute, one encoder reading maps to
 exactly one joint angle, with no ambiguity.
