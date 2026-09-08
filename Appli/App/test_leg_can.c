@@ -97,9 +97,34 @@ static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
  */
 #define GAIN_KEEP  (-1.0f)
 
-static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 20.0f, 20.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  1.0f,  1.0f,  1.0f };
-static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  5.0f,  5.0f };
+static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 30.0f, 17.0f };
+static const float s_vel_gain[JOINT_COUNT]     = {  1.0f,  10.0f,  0.3f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  12.0f,  1.5f };
+
+/*
+ * Velocity feedforward, scaled PER JOINT.
+ *
+ * 1.0 sends the trajectory's own velocity, 0.0 sends none. Measured at
+ * GAIT_SPEED 1.0 by running the same gait with it on and off:
+ *
+ *              RMS with 1.0   RMS with 0.0
+ *   hip_pitch      0.13 deg       1.53 deg    needs all of it
+ *   knee           0.58           0.46        slightly better without
+ *   ankle          1.88           0.26        7x better without
+ *
+ * The hip lags badly without it; the ankle overshoots 22% and arrives early
+ * WITH it. The same feedforward that is right for one joint is roughly double
+ * what the other can use, and one global switch cannot say that.
+ *
+ * The firmware sends all three the same thing - trajectory velocity, scaled by
+ * GAIT_SPEED and s_cmd_scale, times 1000 because the drive divides by
+ * input_vel_scale. So the disagreement is on the DRIVE side, and
+ * axis0.config.can.input_vel_scale is per axis. If the ankle's is not 1000 its
+ * feedforward is multiplied by however far off it is, and these numbers are
+ * working around a config difference rather than a real one. Worth reading
+ * before treating them as permanent.
+ */
+static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
 
 #define LEGTEST_GAIT_RELATIVE        1
 #define LEGTEST_MAX_SWING_DEG        20.0f
@@ -208,10 +233,10 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_MOTION_GAIT          1
 #define LEGTEST_AMPLITUDE_TURNS      0.05f 
 #define LEGTEST_FREQ_HZ              0.25f 
-#define LEGTEST_GAIT_SPEED           1.0f
+#define LEGTEST_GAIT_SPEED           0.5f
 #define LEGTEST_GAIT_ENTRY_MS        2000u
-#define LEGTEST_GAIT_CYCLES          10u
-#define LEGTEST_GAIT_VEL_FF          1
+#define LEGTEST_GAIT_CYCLES          3u
+#define LEGTEST_GAIT_VEL_FF          1   /* master switch; per-joint scale is s_vel_ff[] */
 #define LEGTEST_GAIT_TORQUE_FF       0
 #define LEGTEST_GAIT_IDLE_AFTER      1
 #define LEGTEST_CAPTURE              1
@@ -354,7 +379,7 @@ static uint8_t   s_cap_dumped;
  * Results are NOT saved. LEGTEST_SDO_SAVE persists them if you want them to
  * survive a power cycle, and that needs a reboot to take effect.
  */
-#define LEGTEST_CALIBRATE_JOINTS    { 0 }
+#define LEGTEST_CALIBRATE_JOINTS    { -1 }
 #define LEGTEST_CALIB_TIMEOUT_MS    5000u
 
 /*
@@ -1995,7 +2020,7 @@ void legtest_run(void)
                      */
                     target[j]     = joint_cmd(j, all[s_gait_col[j]]);
                     target_vel[j] = all_vel[s_gait_col[j]] * vscale
-                                    * s_cmd_scale[j];
+                                    * s_cmd_scale[j] * s_vel_ff[j];
                 }
             }
 #else

@@ -508,7 +508,43 @@ setpoints: a stale setpoint is worthless, the newest is exactly what the
 actuator should receive, and dropping the newest instead would leave the queue
 full of seconds-old commands that would replay when the bus recovered.
 
-### Two discontinuities in the generated table
+### The generated table is repaired, not raw
+
+The source trajectory is **two half-strides concatenated, and they do not
+meet**. Every joint jumps at once at `t = cycle/2`, sample 99 -> 100, by 1.7 to
+2.0 degrees where the neighbouring steps are 0.03. There is a second, smaller
+join at the wrap, 199 -> 0.
+
+`gen_gait.py` closes both, with different methods because they are different
+problems:
+
+- **Interior joins** are found by looking at every joint at once: two or more
+  stepping together at the same index means a stitch. Judging each joint alone
+  gets this wrong - the ankle's jump is only 5.5x its own median step and reads
+  as ordinary motion, while the knee's is 49x. Each side is then pulled halfway
+  to the other, tapered to nothing over 20 samples with a smoothstep so velocity
+  stays continuous at the window edges.
+- **The wrap** is a constant offset over a whole cycle, so it is spread as a
+  tiny slope across the entire path rather than concentrated in a few samples.
+
+Worst step on any joint is now **3% of its span, from 44%**.
+
+The check reports every step over 5% of each joint's own travel. It used to
+compare against a fixed 0.01 turns - 3.6 degrees, most of the knee's entire
+range - so a step could be nearly half that joint's motion and pass silently,
+which is exactly what happened.
+
+#### Why it mattered
+
+The knee's whole travel is 3.7 degrees and the step was 1.65 of them - **44% of
+the gait arriving in one 4 ms sample**, 412 deg/s at the output. No gain
+follows that. Its captures read 230% tracking while the joint was simply ringing
+after each kick, and it was untunable until the table was fixed.
+
+<details>
+<summary>The original numbers, for reference</summary>
+
+
 
 The hip column has step changes at samples **99 -> 100** and **199 -> 0** that
 are 15x to 250x the neighbouring step, at points where the joint is at an
@@ -537,9 +573,17 @@ no drive can follow. It is reliably the largest tracking error in every capture:
 
 Sample 100 is phase 0.5 and sample 200 is the seam, so a gait that looks like
 two half-cycles stitched together with a small mismatch at each junction is
-exactly what this pattern means. It is a defect in the **generated table**, not
-in the firmware — fix it in `tools/gen_gait.py` or in the source trajectory, not
-by smoothing in the control loop. Every cycle costs two of these.
+exactly what this pattern means.
+
+</details>
+
+**Regenerating used to delete code from the file it generates.** `row_vel()` and
+the NULL guards in `gait_sample_vel()` had been hand-added to `gait_ref.c` and
+were not in the generator's template, so a regeneration silently downgraded the
+velocity feedforward from a centred difference to a one-sided one and made the
+host tests segfault on the first NULL call. Both live in the template now, along
+with the per-function documentation. **Do not hand-edit `gait_ref.c` or
+`gait_ref.h`** - anything added there is lost the next time the generator runs.
 
 ### If the bus goes quiet
 
@@ -754,7 +798,37 @@ layer that protects the hardware if this firmware stops.
 *discover* every motion from tracking error, which means it is always behind by
 whatever error it took to generate the torque.
 
-`LEGTEST_GAIT_VEL_FF` (default 1) sends the trajectory's own derivative.
+`LEGTEST_GAIT_VEL_FF` is the master switch; `s_vel_ff[]` scales it **per
+joint**, and it has to, because the right amount is not the same for all three.
+Measured at `GAIT_SPEED 1.0` by running the identical gait with it on and off:
+
+| joint | RMS with FF 1.0 | RMS with FF 0.0 | |
+|---|---|---|---|
+| hip_pitch | **0.13°** | 1.53° | needs all of it - 12x worse without |
+| knee | 0.58° | **0.46°** | slightly better without |
+| ankle | 1.88° | **0.26°** | **7x better without** |
+
+The hip lags visibly without it. The ankle *overshoots by 22% and arrives
+early* with it - it is being driven past its own setpoint. One global switch
+cannot express that, hence the table.
+
+What makes this worth reading twice: the firmware sends all three joints the
+**same** thing - trajectory velocity, scaled by `GAIT_SPEED` and `s_cmd_scale`,
+multiplied by 1000 because the drive divides by `input_vel_scale`. Same
+function, same frame, same tick. So a joint that wants 0.0 while another wants
+1.0 points at a difference on the DRIVE side, and `axis0.config.can.input_vel_scale`
+is a per-axis setting. Working backwards from the ankle's overshoot, its applied
+feedforward looks about double what was intended. **Read that parameter on each
+drive before treating `s_vel_ff[2] = 0.0` as a real result** - a joint that
+genuinely does not want velocity feedforward is unusual; a drive with a mis-set
+scale factor is not.
+
+This also cost four rounds of gain tuning to find. The ankle's error did not
+move when `vel_gain` was cut by 70%, because **feedforward bypasses the position
+loop entirely** - no gain can touch it. An error that ignores the gains is not a
+gain problem, and that is the signal to stop tuning and start measuring.
+
+`gait_sample_vel()` supplies the derivative.
 `gait_sample_vel()` computes it as a central difference across neighbouring
 table rows — wrapping rather than clamping at the seam — then interpolates, so
 the result is continuous rather than the staircase a forward difference of the
@@ -853,6 +927,55 @@ stiffness of the position loop:
 | RMS error | 12.16° | **2.14°** |
 | worst error | 20.30° | 5.01° |
 | stuck mid-stroke | seizing for seconds | 0.8% |
+
+#### Where the three joints ended up
+
+Three joints, three different answers, at `GAIT_SPEED 1.0`:
+
+| joint | encoder | pos / vel / vi | FF | tracking | RMS |
+|---|---|---|---|---|---|
+| hip_pitch | motor, 47:1 | 20 / 1.0 / 5.0 | 1.0 | 101% | **0.13°** |
+| knee | **load**, 47:1 | 30 / 10 / 12 | 0.5 | 145% | 0.46° |
+| ankle | motor, 9:1 | 17 / 0.3 / 1.5 | 0.0 | 101% | **0.26°** |
+
+**Do not read that as the hip being better tuned.** It has an easier job and a
+flattering measurement, and both effects are large:
+
+- **The gearbox divides the error.** Convert each RMS back to drive turns and
+  the hip is 0.017, the ankle 0.047 - the ankle's drive is 2.8x worse in its own
+  units, but 14x worse at the output, because 47:1 divides its error by 47 and
+  9:1 only divides by 9. Two drives of identical quality still differ by 5.2x at
+  the joint, and no tuning touches that.
+- **Reflected inertia scales as 1/N².** The ankle's motor feels 27x more load
+  than the hip's, which lowers the mechanical resonance and caps its stable
+  gains. It vibrated at `vel_gain` 1.0, where the hip is perfectly happy. The
+  ankle will never take the hip's numbers.
+- **The knee is measured at the load.** Its 0.46° includes every degree of
+  backlash and wind-up in its gearbox. The hip's 0.13° is a motor measurement
+  divided by 47, and whatever its gearbox does is invisible in it. The knee's
+  number is honest; the hip's is not comparable.
+
+#### What each failure mode looks like
+
+Every one of these was met at least once while tuning this leg:
+
+| symptom | cause | what to change |
+|---|---|---|
+| overshoot, amplitude > 100%, smooth | underdamped | raise `vel_gain` |
+| achieved arrives late, amplitude ~100% | not enough bandwidth | raise `pos_gain` |
+| **both**: gain > 1 with ~90° lag | driven at the closed-loop resonant peak | raise `vel_gain`; do NOT drop `pos_gain` |
+| constant-amplitude ripple, audible buzz | at the stability limit | lower the gain you last raised |
+| square-wave error, sign flips with direction | friction, gravity, or feedforward | `vel_integrator_gain`, or `s_vel_ff[]` |
+| **error does not respond to gain changes at all** | not the loop - look at feedforward | `s_vel_ff[]` |
+
+The last row is the one that cost the most time. Lowering `pos_gain` from 20 to
+7 on the knee made tracking% *improve* from 159% to 142% while RMS got **worse**,
+1.03° to 1.34°, because the joint had simply gone slow enough to stop
+overshooting - it was running a quarter-second behind the trajectory.
+
+**Judge on RMS error, not tracking%.** Tracking% is an amplitude ratio: it
+punishes overshoot and rewards a joint that merely lags, and it recommended
+exactly the wrong change.
 
 At the first setting the proportional term needed 27° of error to make the
 ~0.15 Nm that breaks the joint loose, and the whole gait is 13.8° — so the

@@ -261,6 +261,34 @@ immediately instead of being assumed.
 
 ---
 
+## Velocity feedforward is per joint
+
+`Set_Input_Pos` byte 4-5 is `Vel_FF`, int16, and the drive interprets it as
+`input_vel = Vel_FF / input_vel_scale` with `input_vel_scale` defaulting to
+1000. The SENDER therefore multiplies by 1000 so the drive's division lands on
+the intended value - dividing here would send 0 and the feedforward would
+vanish.
+
+The firmware sends every joint the same quantity: trajectory velocity, scaled
+by `GAIT_SPEED` and by `s_cmd_scale`, times 1000. Despite that, the right
+amount differs per joint, measured at `GAIT_SPEED 1.0`:
+
+| joint | RMS, FF 1.0 | RMS, FF 0.0 |
+|---|---|---|
+| hip_pitch | **0.13 deg** | 1.53 |
+| knee | 0.58 | **0.46** |
+| ankle | 1.88 | **0.26** |
+
+The hip lags badly without it; the ankle overshoots 22% and arrives early with
+it. `s_vel_ff[]` in `test_leg_can.c` scales it per joint.
+
+Since the firmware treats them identically, the difference is on the DRIVE side.
+`axis0.config.can.input_vel_scale` is per axis (endpoint 292) - if one drive's
+is not 1000, its feedforward is multiplied by however far off it is. Read it on
+each drive before accepting a per-joint scale as a real mechanical result.
+
+---
+
 ## What we do not send
 
 - **No torque commands.** `Set_Input_Torque` (`0x00E`) is never used.
