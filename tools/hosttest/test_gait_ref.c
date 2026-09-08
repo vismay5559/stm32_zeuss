@@ -136,40 +136,53 @@ static void test_the_stride_does_not_jump_anywhere_else(void)
           (double)biggest, where, (double)mean);
 }
 
-static void test_the_known_table_discontinuities_are_still_there(void)
+static void test_the_known_table_discontinuities_are_gone(void)
 {
-    printf("the two documented table steps are still where README says\n");
+    printf("the two stitch points are smooth now, not steps\n");
 
     /*
-     * PINS A KNOWN DEFECT so it cannot drift unnoticed. If gen_gait.py is
-     * fixed these will fail, and the right response is to delete this test and
-     * the exclusions above - not to loosen it. If they grow, the generator has
-     * regressed.
+     * This test used to PIN the defect - it asserted both joins still stepped
+     * by ~0.0055 turns, so the number could not drift unnoticed, and it said
+     * the right response to it failing was to delete it rather than loosen it.
      *
-     * README quotes ~0.0055 output turns for both, which on the hip becomes a
-     * 0.26 turn setpoint step after the 47:1 factor: a jerk no drive follows.
+     * gen_gait.py now repairs both, so it is inverted instead of deleted. The
+     * joins are still the interesting rows: sample 99 -> 100 is where the two
+     * half-strides were concatenated, and 199 -> 0 is the wrap. If either ever
+     * steps again, something in the generator stopped repairing it, and that
+     * matters most on the knee - its whole travel is 0.010 turns, so the old
+     * 0.0055 step was 44% of the gait and made the joint impossible to tune.
      */
-    struct { int row; const char *name; } steps[2] = {
+    struct { int row; const char *name; } joins[2] = {
         { KNOWN_STEP_ROW_A, "mid-stride (row 99 -> 100)" },
         { KNOWN_STEP_ROW_B, "the seam (row 199 -> 0)"    },
     };
 
     for (int i = 0; i < 2; i++)
     {
-        int   r    = steps[i].row;
+        int   r    = joins[i].row;
         int   next = (r + 1) % GAIT_SAMPLES;
-        float worst = 0.0f;
 
         for (int k = 0; k < GAIT_JOINTS; k++)
         {
-            float d = fabsf(g_gait_turns[next][k] - g_gait_turns[r][k]);
-            if (d > worst) { worst = d; }
-        }
+            float span = 0.0f, lo = g_gait_turns[0][k], hi = g_gait_turns[0][k];
 
-        CHECK(worst > 0.004f && worst < 0.007f,
-              "%s now steps by %f turns; README documents ~0.0055. Either the "
-              "generator changed, or this test should go",
-              steps[i].name, (double)worst);
+            for (int n = 1; n < GAIT_SAMPLES; n++)
+            {
+                if (g_gait_turns[n][k] < lo) { lo = g_gait_turns[n][k]; }
+                if (g_gait_turns[n][k] > hi) { hi = g_gait_turns[n][k]; }
+            }
+            span = hi - lo;
+
+            float d = fabsf(g_gait_turns[next][k] - g_gait_turns[r][k]);
+
+            /* Relative to the joint's own travel, because an absolute limit
+               cannot judge a knee that moves 0.010 turns and an ankle that
+               moves 0.040 by the same number. */
+            CHECK(span < 1e-6f || d < span * 0.05f,
+                  "%s: joint %d steps %f turns, %.0f%% of its %f span",
+                  joins[i].name, k, (double)d,
+                  (double)(100.0f * d / span), (double)span);
+        }
     }
 }
 
@@ -244,7 +257,10 @@ static void test_the_seam_interpolates_too(void)
               (double)hi, (double)(0.5f * (lo + hi)));
         tested++;
     }
-    CHECK(tested > 0, "no joint differed across the seam");
+    /* Nothing to assert if the seam is perfectly closed - which it now is,
+       by design. The interpolation either side is covered by the row-landing
+       and between-rows tests, which do not depend on the seam being rough. */
+    (void)tested;
 }
 
 static void test_speed_is_a_centred_difference_of_the_table(void)
@@ -370,7 +386,7 @@ int main(void)
     test_phase_wraps_so_the_walk_repeats();
     test_exact_samples_come_back_verbatim();
     test_the_stride_does_not_jump_anywhere_else();
-    test_the_known_table_discontinuities_are_still_there();
+    test_the_known_table_discontinuities_are_gone();
     test_it_interpolates_rather_than_snapping_to_a_row();
     test_the_seam_interpolates_too();
     test_speed_is_a_centred_difference_of_the_table();

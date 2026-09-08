@@ -36,19 +36,17 @@
 extern const float g_gait_turns[GAIT_SAMPLES][GAIT_JOINTS];
 
 /*
- * Sample the trajectory at an arbitrary phase, 0..1, wrapping past the end.
- * Linearly interpolates between the 250 Hz samples, so a 1 kHz caller
- * gets a smooth ramp rather than a staircase.
- */
-/*
  * Where every joint should be at one moment in a walking stride.
  *
  * `phase` is how far through a single stride the robot is: 0.0 at the start,
  * 1.0 at the end, and back to 0.0 to begin the next one. Feed it a steadily
- * rising phase and it walks out one full step cycle.
+ * rising phase and it walks out one full step cycle. Values outside 0..1 wrap,
+ * so a free-running phase clock needs no special case at the seam.
  *
- * `turns_out` receives one target per joint, measured in turns of the motor
- * shaft.
+ * `turns_out` receives one target per joint, in turns on the OUTPUT shaft.
+ *
+ * Linearly interpolates between the 250 Hz samples, so a 1 kHz caller
+ * gets a smooth ramp rather than a staircase.
  */
 void gait_sample(float phase, float *turns_out);
 
@@ -63,20 +61,10 @@ void gait_sample(float phase, float *turns_out);
  *
  * Central difference over the neighbouring table samples, then interpolated,
  * so the result is continuous rather than the piecewise-constant staircase a
- * plain forward difference of the interpolated position would give. The table
- * is a sampling of a smooth optimised trajectory; this estimates the velocity
- * of that underlying curve, not of its linear reconstruction.
+ * plain forward difference of the interpolated position would give.
  *
- * turns_out or tps_out may be NULL if only one is wanted.
+ * turns_out or vel_out may be NULL if only one is wanted.
  */
-/*
- * The same as gait_sample(), and additionally how fast each joint should be
- * moving at that instant - `tps_out`, in turns per second.
- *
- * Telling a motor where to go AND how fast it should be travelling when it
- * gets there produces noticeably smoother movement than position alone,
- * because the motor is not left guessing between one target and the next.
- */
-void gait_sample_vel(float phase, float *turns_out, float *tps_out);
+void gait_sample_vel(float phase, float *turns_out, float *vel_out);
 
 #endif /* GAIT_REF_H */
