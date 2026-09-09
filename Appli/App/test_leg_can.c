@@ -2272,6 +2272,8 @@ static uint8_t s_arm_blocked;
 /* After the one gait cycle: disarm, wait 2 s, then re-arm and return the
  * whole leg to the defined absolute zero over 2 s.  Once there, hold zero
  * in closed loop so the leg is ready for the next test/reset. */
+static uint8_t  s_fault_recovering;
+static uint32_t s_fault_cleared_tick;
 static uint8_t  s_return_zero_active;
 static uint8_t  s_return_zero_armed;
 static uint32_t s_return_zero_start_tick;
@@ -2427,6 +2429,7 @@ static uint8_t   s_cap_dumped;
 #define ODRV_CMD_HEARTBEAT      0x001u
 #define ODRV_CMD_SET_AXIS_STATE 0x007u
 #define ODRV_CMD_GET_ENCODER    0x009u
+#define ODRV_CMD_CLEAR_ERRORS   0x018u
 #define ODRV_CMD_SET_ABS_POS    0x019u
 #define ODRV_CMD_SET_CTRL_MODE  0x00Bu
 #define ODRV_CMD_SET_INPUT_POS  0x00Cu
@@ -3635,6 +3638,96 @@ static uint8_t define_absolute_zero_one(int j)
     return (pos_err < 1e-4f) ? 1u : 0u;
 }
 
+#if LEGTEST_CAPTURE
+static void cap_dump(void);
+#endif
+
+/*
+ * Clear_Errors, 0x018. Host->drive, no payload, no reply.
+ *
+ * The drive latches an error and refuses closed loop until it is cleared. That
+ * is the correct default - a fault that silently un-latches is a fault you
+ * never find out about - but it means recovery has to be explicit.
+ */
+static void send_clear_errors(int j)
+{
+    uint8_t data[4] = { 0u, 0u, 0u, 0u };
+
+    tx_enqueue(s_node_id[j], ODRV_CMD_CLEAR_ERRORS, data, 4u);
+}
+
+/*
+ * Any drive reporting a fault in its heartbeat ends the run.
+ *
+ * The whole leg stops, not just the joint that failed: these three are bolted
+ * to the same limb, and leaving two of them servoing to a trajectory while the
+ * third has gone limp bends the leg against itself. The gait is abandoned where
+ * it is, every axis is idled, the errors are cleared on the drives that had
+ * them, and then the normal return-to-zero brings the leg home.
+ *
+ * Clearing before the return matters: the return-to-zero re-arm refuses any
+ * axis whose axis_error is non-zero, so without this it would find the fault
+ * still latched and leave the leg wherever it stopped.
+ */
+static uint8_t check_and_handle_faults(void)
+{
+    if (s_fault_recovering || s_stopped) { return 0u; }
+
+    int faulted = -1;
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (!s_joint_live[j]) { continue; }
+        if (s_joint[j].axis_error != 0u) { faulted = j; break; }
+    }
+
+    if (faulted < 0) { return 0u; }
+
+    printf("\r\n!! FAULT: %s (node %u) axis_error 0x%08lX state=%u\r\n",
+           s_joint_name[faulted], (unsigned)s_node_id[faulted],
+           (unsigned long)s_joint[faulted].axis_error,
+           (unsigned)s_joint[faulted].axis_state);
+
+    /* Stop commanding before anything else. */
+    s_gait_done = 1;
+    s_stopped   = 1;
+    disarm_all();
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (!s_joint_live[j]) { continue; }
+        if (s_joint[j].axis_error == 0u) { continue; }
+
+        printf("   clearing errors on %s (node %u)\r\n",
+               s_joint_name[j], (unsigned)s_node_id[j]);
+        send_clear_errors(j);
+    }
+
+    for (uint32_t spin = 0u;
+         (s_txq_tail != s_txq_head) && (spin < 100000u);
+         spin++)
+    {
+        tx_pump();
+    }
+
+    s_fault_recovering   = 1u;
+    s_fault_cleared_tick = s_tick;
+
+    /* Reuse the end-of-gait path. The delay gives the drives time to report a
+       clean heartbeat, which the re-arm below then checks for itself. */
+    s_return_zero_active     = 1u;
+    s_return_zero_armed      = 0u;
+    s_return_zero_start_tick = s_tick + LEGTEST_RETURN_ZERO_DELAY_MS;
+
+    printf("   leg stopped. Returning to zero in %u s, then disarming.\r\n\r\n",
+           (unsigned)(LEGTEST_RETURN_ZERO_DELAY_MS / 1000u));
+
+#if LEGTEST_CAPTURE
+    cap_dump();
+#endif
+    return 1u;
+}
+
 static void define_absolute_zero_all(void)
 {
 #if LEGTEST_ZERO_ABSOLUTE_AT_BOOT
@@ -4096,6 +4189,12 @@ void legtest_run(void)
         float target_trq[JOINT_COUNT] = { 0.0f };
 
 #if LEGTEST_ENABLE_CLOSED_LOOP
+        /* Before anything computes a target: a faulted drive ends the run. */
+        if (s_tick > LEGTEST_ARM_DELAY_MS)
+        {
+            (void)check_and_handle_faults();
+        }
+
         if (!s_return_zero_active && (s_tick > LEGTEST_ARM_DELAY_MS))
         {
             uint32_t since_arm = s_tick - LEGTEST_ARM_DELAY_MS;
