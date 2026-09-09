@@ -261,6 +261,43 @@ immediately instead of being assumed.
 
 ---
 
+## Defining the joint zero over CAN
+
+`Set_Absolute_Position` (`0x019`), 4 bytes, float32 turns. Sent once from
+`legtest_init()` while `LEGTEST_ZERO_ABSOLUTE_AT_BOOT` is 1, telling each drive
+that where it is standing right now is zero.
+
+    put_f32(data, 0.0f);
+    can_send(node, ODRV_CMD_SET_ABS_POS, data, 4u);
+
+`s_define_zero[]` picks which joints get it - currently `{ 1, 1, 0 }`, so hip
+and knee are zeroed and the ankle is left alone.
+
+**Put the hip and knee at mechanical zero before powering the STM32.** The
+firmware prints that reminder at boot, because this command does not find zero,
+it declares it. Whatever pose the leg is in when the board starts becomes the
+origin of an absolute trajectory.
+
+There is no acknowledgement frame - `0x019` is host->drive only - so the
+firmware waits for fresh encoder telemetry and checks the drive now reports
+within 1e-4 turns of zero. A joint that does not is reported and
+`s_arm_blocked` is set, so a silent failure cannot become an absolute gait
+played from an unknown origin:
+
+    absolute joint reference setup
+      Put HIP and KNEE at mechanical 0 deg before powering the STM32.
+      hip_pitch CAN 0x19: Set_Absolute_Position(0.0 turns)
+      hip_pitch reference: pos_estimate=+0.000000 turns  [OK]
+      knee      CAN 0x19: Set_Absolute_Position(0.0 turns)
+      knee      reference: pos_estimate=+0.000000 turns  [OK]
+    absolute reference setup complete: HIP=0, KNEE=0
+
+Nothing is saved to the drive, so this is re-established on every boot rather
+than persisting - which is the right way round for a bench test, and the reason
+the pose at power-on matters every single time.
+
+---
+
 ## Velocity feedforward is per joint
 
 `Set_Input_Pos` byte 4-5 is `Vel_FF`, int16, and the drive interprets it as
@@ -294,7 +331,9 @@ each drive before accepting a per-joint scale as a real mechanical result.
 - **No torque commands.** `Set_Input_Torque` (`0x00E`) is never used.
 - **No trajectory-mode commands.** No `Set_Traj_Vel_Limit` or friends;
   PASSTHROUGH means the ODrive does no planning of its own.
-- **No `Set_Absolute_Position`.** That is a homing command, not a control mode.
+- **No `Set_Absolute_Position` during a run.** It is now sent ONCE at boot,
+  before the timers start, to define the joint zero - see below. It is a
+  homing command, not a control mode, and the control loop never issues it.
 - **No persistent config writes.** Gains are pushed at arming and
   `max_error_rate` at boot, but both are runtime writes that die with the power.
   `save_configuration` is never called unless `LEGTEST_SDO_SAVE` is set, so what

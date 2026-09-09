@@ -417,7 +417,21 @@ JOINT_COUNT` loop and decide explicitly whether it needs `s_joint_live[j]`.
 
 ```bash
 python tools/gen_gait.py reference_gait_rleg_40ms_250hz.xlsx
+
+# a workbook with one sheet per speed needs the sheet named
+python tools/gen_gait_sheet_select.py final_humangait.xlsx --sheet 0.4
 ```
+
+`final_humangait.xlsx` holds **two steps over 1.26 s** at three speeds, one per
+sheet - `0.3`, `0.4`, `0.5` m/s - and names its columns through the shared
+string table rather than inline, which the original reader could not decode.
+`gen_gait_sheet_select.py` parses the workbook relationships to map sheet names
+to XML parts, lists what it found, and takes `--sheet`. Run it with no `--sheet`
+to see the available names.
+
+Two steps per table rather than one stride is worth noticing: `phase` 0..1 now
+covers **two** steps, so `gait_sample(phase + 0.5)` is the same leg one step
+later - which is exactly what the contralateral leg needs in `build_reference()`.
 
 200 samples, 0.8 s cycle, from a Pinocchio + CasADi trajectory optimisation at
 0.40 m/s. Re-run the generator when the trajectory changes — hand-editing 200
@@ -507,6 +521,75 @@ When the queue is full it discards the **oldest** entry. These are position
 setpoints: a stale setpoint is worthless, the newest is exactly what the
 actuator should receive, and dropping the newest instead would leave the queue
 full of seconds-old commands that would replay when the bus recovered.
+
+### Absolute trajectory, and the zero it is measured from
+
+`LEGTEST_GAIT_RELATIVE` is **0**. The table value *is* the joint angle - there
+is no re-centring on the pose at arming, so the gait means the same thing on
+every run and a capture from today is comparable with one from last week.
+
+That only works if the drives and the leg agree where zero is, so the firmware
+establishes it at boot:
+
+```
+absolute joint reference setup
+  Put HIP and KNEE at mechanical 0 deg before powering the STM32.
+  hip_pitch CAN 0x19: Set_Absolute_Position(0.0 turns)
+  hip_pitch reference: pos_estimate=+0.000000 turns  [OK]
+  knee      CAN 0x19: Set_Absolute_Position(0.0 turns)
+  knee      reference: pos_estimate=+0.000000 turns  [OK]
+absolute reference setup complete: HIP=0, KNEE=0
+```
+
+`s_define_zero[]` chooses which joints - `{ 1, 1, 0 }`, so the ankle keeps
+whatever zero it has. `0x019` has no reply frame, so the firmware waits for
+fresh encoder telemetry and checks the drive now reports within 1e-4 turns of
+zero; a joint that does not sets `s_arm_blocked` and nothing arms. An absolute
+trajectory played from an unverified origin is the one failure worth blocking a
+run for.
+
+**This command declares zero, it does not find it.** Whatever pose the leg is
+in when the board powers up becomes the origin, and it cannot tell that you got
+the pose wrong - it will call a 20-degree error the origin just as readily. Put
+the hip and knee at mechanical zero first, every time. Nothing is saved to the
+drive, so this is re-established on every boot.
+
+#### Two guards on top
+
+**Preflight.** `limits_ok()` walks the whole table before arming and refuses if
+any joint would exceed `s_limit_deg[]` (30 / 35 / 35 degrees) or swing more
+than `LEGTEST_MAX_SWING_DEG` (30) from where it starts.
+
+**Per-tick hard stop.** Every target is checked against `s_limit_deg[]` in the
+transmit path, after the trajectory has produced it and before it reaches a
+drive:
+
+```
+!! HARD LIMIT: ankle target +37.40 deg exceeds +/-35.0 deg - DISARM
+```
+
+The preflight catches a trajectory that was always going to be out of range.
+The hard stop catches everything else - a runtime fault, a bad offset, a gait
+that wraps when it should not. One checks the plan, the other checks what is
+actually about to be sent.
+
+#### Returning to zero
+
+With an absolute trajectory the leg should finish where it started, so it now
+does rather than simply going limp:
+
+```
+gait complete -> 2 s pause, axes IDLE, nothing transmitted
+             -> re-arm, checking every axis is healthy first
+             -> 2 s linear ramp from wherever each joint is, to 0
+             -> disarm
+```
+
+`LEGTEST_RETURN_ZERO_DELAY_MS` and `LEGTEST_RETURN_ZERO_MS` set the two
+durations. The pause is deliberately silent - the axes are IDLE and nothing is
+transmitted - so the leg settles before being commanded again. If an axis has
+faulted or gone quiet in the meantime the re-arm is refused and it stays IDLE,
+because a joint that failed during the gait is not one to hand a fresh setpoint.
 
 ### The generated table is repaired, not raw
 

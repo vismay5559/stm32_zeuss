@@ -95,9 +95,20 @@ odrv0.save_configuration()
 ```
 
 The exact call varies with ODrive firmware version — check what your S1 build
-exposes. Over CAN the equivalent is `Set_Absolute_Position` (`0x019`), which the
-leg firmware deliberately never sends: this is a setup operation, not something
-a control loop should ever do.
+exposes. Over CAN the equivalent is `Set_Absolute_Position` (`0x019`).
+
+**The leg firmware now sends this itself**, once, from `legtest_init()` while
+`LEGTEST_ZERO_ABSOLUTE_AT_BOOT` is 1, for the joints listed in
+`s_define_zero[]`. It is still a setup operation and the control loop still
+never issues it: it happens before the timers start, and the result is not
+saved to the drive, so it is re-established every boot rather than persisting.
+
+That changes what this document is for. The procedure below makes a zero that
+SURVIVES a power cycle, which is what the robot needs. The firmware's
+boot-time version is the bench equivalent - it declares the current pose to be
+zero, so **the leg has to be in the zero pose before the STM32 is powered**,
+every single time. It does not find zero, and it cannot tell you the pose was
+wrong: it will happily call a 20-degree error the origin.
 
 ### 3. Verify it persisted — do not skip this
 
