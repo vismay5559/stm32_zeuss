@@ -25,20 +25,80 @@ away from the robot's zero. That is the failure this is about.
 Entirely determined by the encoder, and **it is not the same answer for every
 joint on this leg**.
 
-### Hip pitch and knee — encoder on the load side, 47:1
+### Hip pitch and knee — load-side encoder, done
 
-> **Current as of this writing.** Hip and knee read load-side encoders; the
-> ankle reads the motor side of its 9:1, so the section below applies to it.
-> `s_cmd_scale[] = { 1, 1, 9 }` in `test_leg_can.c` follows that split — the
-> drive's position units follow its encoder, not its gearbox.
+Both read load-side absolute encoders. Output travel is ±30°, far inside **one
+turn of the output shaft**, so one encoder reading maps to exactly one joint
+angle and there is nothing to disambiguate.
 
-Output travel is ±25° and ±35°, both far inside **one turn of the output
-shaft**. If the load-side encoder is absolute, one encoder reading maps to
-exactly one joint angle, with no ambiguity.
+**Set once, saved in the drive, survives power cycles.** This is configured and
+working — the firmware does not touch it, and must not.
 
-**Set the zero once. It persists.** That is the answer you were hoping for.
+#### How ODrive actually holds the reference
 
-### Ankle — encoder on the MOTOR side, 9:1
+Worth understanding, because the mechanism is not obvious and the earlier
+version of this document got it wrong.
+
+Every position command is interpreted against `<axis>.pos_estimate`. From the
+[control docs](https://docs.odriverobotics.com/v/latest/manual/control.html#position-reference-frame):
+
+> *"The ODrive interprets all position commands with respect to
+> `<axis>.pos_estimate`. That means when the user commands a position setpoint
+> of 0.123, the ODrive tries to move the axis such that `<axis>.pos_estimate`
+> becomes 0.123."*
+
+`pos_estimate` is not the raw encoder angle. It is the encoder angle plus a
+stored offset:
+
+| parameter | what it does |
+|---|---|
+| `pos_vel_mapper.config.offset` | shifts where axis zero sits relative to the encoder's own zero |
+| `pos_vel_mapper.config.offset_valid` | enables it |
+| `pos_vel_mapper.config.approx_init_pos` | for multi-turn axes: the range the axis is guaranteed to start in |
+| `pos_vel_mapper.config.approx_init_pos_valid` | enables that guarantee |
+
+`set_abs_pos(x)` computes the offset that makes the current encoder reading
+report as `x`, and writes it there. **`save_configuration()` persists it**, and
+after that the docs are explicit: the position estimate *"will be immediately
+available without needing a homing procedure."*
+
+So the drive does the work at power-up. It reads its absolute encoder, adds the
+saved offset, and `pos_estimate` is already correct before the STM32 has said
+anything.
+
+#### What that means for the firmware
+
+**`test_leg_can.c` must not send `Set_Absolute_Position` to these two.** That
+command redefines zero as wherever the leg happens to be standing, which would
+silently overwrite a calibrated reference with an arbitrary one. `s_define_zero`
+is `{ 0, 0, 1 }` — the ankle only — for exactly this reason.
+
+Instead the firmware **drives to** zero: the run opens with a `RUN_GOTO_ZERO`
+phase that ramps both joints to `pos_estimate = 0` before anything else happens.
+Declaring zero and driving to zero are opposite operations, and only one of them
+is right once the drive holds a real reference frame.
+
+#### Setting it, once
+
+```python
+# leg held at the pose you are calling zero
+odrv0.axis0.set_abs_pos(0)
+odrv0.save_configuration()
+```
+
+Then verify, and do not skip this:
+
+```
+1. read pos_estimate               -> ~0
+2. power everything down completely
+3. power back up, leg untouched
+4. read pos_estimate again         -> must still be ~0
+```
+
+If step 4 does not match step 1 the offset did not persist, and you have a
+per-power-up procedure rather than an absolute zero.
+
+### Ankle — motor-side encoder, 9:1, cannot persist
 
 This one does not work the same way, and it is worth being precise about why.
 
@@ -64,6 +124,26 @@ joint's output angle on its own.** One of these has to be true:
 
 Find out which before relying on the ankle's zero. (1) and (2) are operating
 procedures; (3) is a bug waiting for a bad day.
+
+**What the firmware does today is (3), made explicit.** `s_define_zero` is
+`{ 0, 0, 1 }`, so `legtest_init()` sends `Set_Absolute_Position(0.0)` to the
+ankle and to nothing else:
+
+```
+absolute joint reference setup
+  Hip and knee keep the reference frame saved in their drives:
+  pos_vel_mapper offset, persisted by save_configuration.
+  Only the ANKLE is declared here - put it at mechanical 0 deg
+  before powering the STM32, because a motor-side encoder on a
+  9:1 cannot hold a zero across a power cycle.
+  ankle     CAN 0x19: Set_Absolute_Position(0.0 turns)
+  ankle     reference: pos_estimate=+0.000000 turns  [OK]
+```
+
+**This declares zero, it does not find it.** Whatever pose the ankle is in when
+the board powers up becomes its origin, and the readback only proves the drive
+accepted the command - not that the joint was anywhere near where you meant.
+Place it by hand, every boot, until it gets a load-side encoder.
 
 ---
 

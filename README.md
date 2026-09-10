@@ -522,74 +522,90 @@ setpoints: a stale setpoint is worthless, the newest is exactly what the
 actuator should receive, and dropping the newest instead would leave the queue
 full of seconds-old commands that would replay when the bus recovered.
 
-### Absolute trajectory, and the zero it is measured from
+### The run, as a sequence of phases
 
-`LEGTEST_GAIT_RELATIVE` is **0**. The table value *is* the joint angle - there
-is no re-centring on the pose at arming, so the gait means the same thing on
-every run and a capture from today is comparable with one from last week.
+`LEGTEST_GAIT_RELATIVE` is **0**. A table value *is* the joint angle, measured
+from the zero the drives already hold — no re-centring on whatever pose the leg
+was left in, so the gait means the same thing on every run and a capture from
+today is comparable with one from last week.
 
-That only works if the drives and the leg agree where zero is, so the firmware
-establishes it at boot:
-
-```
-absolute joint reference setup
-  Put HIP and KNEE at mechanical 0 deg before powering the STM32.
-  hip_pitch CAN 0x19: Set_Absolute_Position(0.0 turns)
-  hip_pitch reference: pos_estimate=+0.000000 turns  [OK]
-  knee      CAN 0x19: Set_Absolute_Position(0.0 turns)
-  knee      reference: pos_estimate=+0.000000 turns  [OK]
-absolute reference setup complete: HIP=0, KNEE=0
-```
-
-`s_define_zero[]` chooses which joints - `{ 1, 1, 0 }`, so the ankle keeps
-whatever zero it has. `0x019` has no reply frame, so the firmware waits for
-fresh encoder telemetry and checks the drive now reports within 1e-4 turns of
-zero; a joint that does not sets `s_arm_blocked` and nothing arms. An absolute
-trajectory played from an unverified origin is the one failure worth blocking a
-run for.
-
-**This command declares zero, it does not find it.** Whatever pose the leg is
-in when the board powers up becomes the origin, and it cannot tell that you got
-the pose wrong - it will call a 20-degree error the origin just as readily. Put
-the hip and knee at mechanical zero first, every time. Nothing is saved to the
-drive, so this is re-established on every boot.
-
-#### Two guards on top
-
-**Preflight.** `limits_ok()` walks the whole table before arming and refuses if
-any joint would exceed `s_limit_deg[]` (30 / 35 / 35 degrees) or swing more
-than `LEGTEST_MAX_SWING_DEG` (30) from where it starts.
-
-**Per-tick hard stop.** Every target is checked against `s_limit_deg[]` in the
-transmit path, after the trajectory has produced it and before it reaches a
-drive:
+That only works if every run starts from the same place, so it does:
 
 ```
-!! HARD LIMIT: ankle target +37.40 deg exceeds +/-35.0 deg - DISARM
+WAIT_ARM      countdown; nothing is commanded, axes arm when they report healthy
+    |
+GOTO_ZERO     3 s ramp from wherever the leg powered up, to absolute zero
+    |
+ENTRY         2 s ramp from zero to the trajectory's first sample
+    |
+GAIT          the trajectory
+    |
+SETTLE        1 s holding the last pose, still armed
+    |
+RETURN_ZERO   2 s ramp back to absolute zero
+    |
+DONE          disarmed
 ```
 
-The preflight catches a trajectory that was always going to be out of range.
-The hard stop catches everything else - a runtime fault, a bad offset, a gait
-that wraps when it should not. One checks the plan, the other checks what is
-actually about to be sent.
+Every phase is a straight line in **time** between two known poses. `phase_enter()`
+records the tick it began on and the pose each joint began from, once, and
+`ramp_to()` interpolates from there.
 
-#### Returning to zero
+None of them recompute the setpoint from the live encoder, and that is the
+subtlest thing in the file. A setpoint that follows the measurement can never
+build an error larger than one tick's step — and error is what a position loop
+turns into torque, so the drive would trail the leg around rather than drive it,
+and would track a droop under gravity straight down instead of resisting it.
+Capturing the starting pose *once* also means a joint that lags does not drag
+the whole ramp out behind it.
 
-With an absolute trajectory the leg should finish where it started, so it now
-does rather than simply going limp:
+`GOTO_ZERO` gets the longest ramp because it is the only move whose distance is
+not known in advance. Everything after it starts from a defined pose.
+
+### Where zero comes from, and why it differs per joint
+
+**Hip and knee read load-side absolute encoders and hold their own reference
+frame.** Every ODrive position command is interpreted against `pos_estimate`,
+which is the encoder angle plus a stored offset — `pos_vel_mapper.config.offset`
+with `offset_valid`, written by `set_abs_pos()` and persisted by
+`save_configuration()`. The drive applies it at power-up, so `pos_estimate` is
+already correct before the firmware says anything, with no homing.
+
+**So the firmware must not send `Set_Absolute_Position` to those two.** That
+command redefines zero as wherever the leg is standing, which would silently
+replace a calibrated reference with an arbitrary one. `s_define_zero` is
+`{ 0, 0, 1 }`. The firmware **drives to** zero instead of declaring it — the
+opposite operation, and the right one once the drive holds a real frame.
+
+**The ankle is the exception.** Its encoder is on the motor side of a 9:1, so
+±35° of joint travel is 1.75 turns of encoder and a single-turn absolute reading
+maps to several possible angles. No saved offset can disambiguate that, so it
+still gets `0x19` at boot — which means **the ankle must be placed by hand
+before power-up, every time.** Declaring zero is not finding it: the readback
+only proves the drive accepted the command, not that the joint was anywhere near
+where you meant. `docs/ZEROING.md` has the full argument.
+
+### Three guards, failing differently on purpose
+
+| guard | when | catches |
+|---|---|---|
+| `limits_ok()` | before arming | a trajectory that was never going to fit |
+| command check | every tick | a setpoint outside the range, before it is sent |
+| measurement check | every tick | a joint that overshot its way past the limit |
 
 ```
-gait complete -> 2 s pause, axes IDLE, nothing transmitted
-             -> re-arm, checking every axis is healthy first
-             -> 2 s linear ramp from wherever each joint is, to 0
-             -> disarm
+!! HARD LIMIT: knee position +30.412 deg exceeds +/-30.0 deg - DISARM
 ```
 
-`LEGTEST_RETURN_ZERO_DELAY_MS` and `LEGTEST_RETURN_ZERO_MS` set the two
-durations. The pause is deliberately silent - the axes are IDLE and nothing is
-transmitted - so the leg settles before being commanded again. If an axis has
-faulted or gone quiet in the meantime the re-arm is refused and it stays IDLE,
-because a joint that failed during the gait is not one to hand a fresh setpoint.
+The command check alone would miss a joint that reaches a mechanical stop while
+being told to do something perfectly legal. The measurement check alone would
+miss a bad setpoint that has not moved the joint yet. Whichever fires says which
+it was.
+
+`s_limit_deg[]` is `{ 30, 30, 35 }` degrees. **Watch the margin**: on the 0.3 m/s
+trajectory the knee is commanded to 28.85°, which leaves 1.15° before the hard
+stop fires. A joint that overshoots by more than that will disarm mid-gait —
+correctly, but it will end the run.
 
 ### The generated table is repaired, not raw
 
