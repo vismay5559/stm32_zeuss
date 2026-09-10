@@ -97,9 +97,9 @@ static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
  */
 #define GAIN_KEEP  (-1.0f)
 
-static const float s_pos_gain[JOINT_COUNT]     = { 30.0f, 30.0f, 17.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  10.0f,  10.0f,  0.3f };
-static const float s_vel_int_gain[JOINT_COUNT] = {  12.0f,  12.0f,  1.5f };
+static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 30.0f, 17.0f };
+static const float s_vel_gain[JOINT_COUNT]     = {  5.0f,  10.0f,  0.3f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  8.0f,  12.0f,  1.5f };
 
 /*
  * Velocity feedforward, scaled PER JOINT.
@@ -127,12 +127,12 @@ static const float s_vel_int_gain[JOINT_COUNT] = {  12.0f,  12.0f,  1.5f };
 static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
 
 /*
- * Velocity and current ceilings, pushed with Set_Limits (0x00F) before arming.
- * In each drive's OWN units - output turns/s where the encoder is on the load
- * side, motor turns/s where it is on the motor side.
+ * Velocity ceiling per joint, in that drive's OWN units - output turns/s where
+ * the encoder is on the load side, motor turns/s where it is on the motor side.
+ * A negative value leaves the drive's own setting alone.
  *
- * A load-side encoder puts the gearbox INSIDE the loop, which brings a failure
- * mode a motor-side encoder does not have:
+ * This exists because a load-side encoder puts the gearbox INSIDE the loop,
+ * which brings a failure mode a motor-side encoder does not have:
  *
  *     the load stops responding    (a stop, stiction, a slipped encoder)
  *  -> position error grows, because the loop cannot see the motor moving
@@ -144,14 +144,19 @@ static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
  * the faster it runs away. A ceiling in the DRIVE does stop it, and it holds
  * even when the control loop is the thing at fault.
  *
- * The trajectory's own peak is far below these: the hip covers 26.5 degrees in
+ * The trajectory's own peak is far below this: the hip covers 26.5 degrees in
  * about 0.6 s, roughly 0.12 output turns/s. 2.0 is sixteen times anything the
  * gait asks for and still slow enough to walk away from.
+ *
+ * Current limits are NOT touched. Set_Limits (0x00F) carries velocity and
+ * current in one frame and would overwrite whatever is configured in the drive,
+ * so this writes controller.config.vel_limit over SDO instead - one parameter,
+ * nothing else disturbed.
  */
-#define LEGTEST_SET_LIMITS      1
-static const float s_vel_limit[JOINT_COUNT] = {  2.0f,  2.0f, 10.0f };
-static const float s_cur_limit[JOINT_COUNT] = { 10.0f, 10.0f, 10.0f };
+#define LEGTEST_SET_VEL_LIMIT   1
+static const float s_vel_limit[JOINT_COUNT] = { 2.0f, 2.0f, -1.0f };
 
+static void sdo_write_f32(uint8_t node, uint16_t ep, float v);
 static void send_limits(int j);
 
 #define LEGTEST_GAIT_RELATIVE        0  /* absolute joint trajectory */
@@ -301,7 +306,7 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_TRACE_RX             0
 #define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
-#define LEGTEST_ENABLE_CLOSED_LOOP   0
+#define LEGTEST_ENABLE_CLOSED_LOOP   1
 #define LEGTEST_ARM_DELAY_MS         3000u
 #define LEGTEST_STOP_BUTTON          1
 #define LEGTEST_MOTION_GAIT          1
@@ -379,7 +384,6 @@ static uint8_t   s_cap_dumped;
 #define ODRV_CMD_HEARTBEAT      0x001u
 #define ODRV_CMD_SET_AXIS_STATE 0x007u
 #define ODRV_CMD_GET_ENCODER    0x009u
-#define ODRV_CMD_SET_LIMITS     0x00Fu
 #define ODRV_CMD_CLEAR_ERRORS   0x018u
 #define ODRV_CMD_SET_ABS_POS    0x019u
 #define ODRV_CMD_SET_CTRL_MODE  0x00Bu
@@ -436,6 +440,7 @@ static uint8_t   s_cap_dumped;
 #define EP_JSON_FW_MINOR  6u
 #define EP_JSON_FW_REV    12u
 
+#define EP_AXIS0_VEL_LIMIT          396u   /* float, rw - controller.config.vel_limit */
 #define EP_AXIS0_LOAD_ENCODER       294u   /* uint8, rw */
 #define EP_AXIS0_COMMUT_ENCODER     295u   /* uint8, rw */
 #define EP_SPI_ENC0_MAX_ERROR_RATE  673u   /* float, rw */
@@ -886,12 +891,10 @@ static void send_all_gains(void)
  */
 static void send_limits(int j)
 {
-#if LEGTEST_SET_LIMITS
-    uint8_t data[8];
+#if LEGTEST_SET_VEL_LIMIT
+    if (s_vel_limit[j] < 0.0f) { return; }      /* leave this drive alone */
 
-    put_f32(&data[0], s_vel_limit[j]);
-    put_f32(&data[4], s_cur_limit[j]);
-    tx_enqueue(s_node_id[j], ODRV_CMD_SET_LIMITS, data, 8u);
+    sdo_write_f32(s_node_id[j], EP_AXIS0_VEL_LIMIT, s_vel_limit[j]);
 #else
     (void)j;
 #endif
