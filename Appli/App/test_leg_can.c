@@ -97,9 +97,9 @@ static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
  */
 #define GAIN_KEEP  (-1.0f)
 
-static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 30.0f, 17.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  1.0f,  10.0f,  0.3f };
-static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  12.0f,  1.5f };
+static const float s_pos_gain[JOINT_COUNT]     = { 30.0f, 30.0f, 17.0f };
+static const float s_vel_gain[JOINT_COUNT]     = {  10.0f,  10.0f,  0.3f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  12.0f,  12.0f,  1.5f };
 
 /*
  * Velocity feedforward, scaled PER JOINT.
@@ -125,6 +125,34 @@ static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  12.0f,  1.5f };
  * before treating them as permanent.
  */
 static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
+
+/*
+ * Velocity and current ceilings, pushed with Set_Limits (0x00F) before arming.
+ * In each drive's OWN units - output turns/s where the encoder is on the load
+ * side, motor turns/s where it is on the motor side.
+ *
+ * A load-side encoder puts the gearbox INSIDE the loop, which brings a failure
+ * mode a motor-side encoder does not have:
+ *
+ *     the load stops responding    (a stop, stiction, a slipped encoder)
+ *  -> position error grows, because the loop cannot see the motor moving
+ *  -> pos_gain turns that error into a large velocity command
+ *  -> the motor accelerates into it, the load still does not move, and the
+ *     error is still there
+ *
+ * Nothing in the position loop stops that by itself, and the harder it is tuned
+ * the faster it runs away. A ceiling in the DRIVE does stop it, and it holds
+ * even when the control loop is the thing at fault.
+ *
+ * The trajectory's own peak is far below these: the hip covers 26.5 degrees in
+ * about 0.6 s, roughly 0.12 output turns/s. 2.0 is sixteen times anything the
+ * gait asks for and still slow enough to walk away from.
+ */
+#define LEGTEST_SET_LIMITS      1
+static const float s_vel_limit[JOINT_COUNT] = {  2.0f,  2.0f, 10.0f };
+static const float s_cur_limit[JOINT_COUNT] = { 10.0f, 10.0f, 10.0f };
+
+static void send_limits(int j);
 
 #define LEGTEST_GAIT_RELATIVE        0  /* absolute joint trajectory */
 #define LEGTEST_MAX_SWING_DEG        30.0f
@@ -351,6 +379,7 @@ static uint8_t   s_cap_dumped;
 #define ODRV_CMD_HEARTBEAT      0x001u
 #define ODRV_CMD_SET_AXIS_STATE 0x007u
 #define ODRV_CMD_GET_ENCODER    0x009u
+#define ODRV_CMD_SET_LIMITS     0x00Fu
 #define ODRV_CMD_CLEAR_ERRORS   0x018u
 #define ODRV_CMD_SET_ABS_POS    0x019u
 #define ODRV_CMD_SET_CTRL_MODE  0x00Bu
@@ -838,6 +867,7 @@ static void send_all_gains(void)
             continue;
         }
         send_gains(j);
+        send_limits(j);
     }
 
     for (uint32_t spin = 0u;
@@ -848,6 +878,23 @@ static void send_all_gains(void)
     }
     HAL_Delay(20);
     printf("\r\n");
+}
+
+/*
+ * Set_Limits, 0x00F: velocity limit then current limit, both float32.
+ * Sent before arming, so a drive is never in closed loop without them.
+ */
+static void send_limits(int j)
+{
+#if LEGTEST_SET_LIMITS
+    uint8_t data[8];
+
+    put_f32(&data[0], s_vel_limit[j]);
+    put_f32(&data[4], s_cur_limit[j]);
+    tx_enqueue(s_node_id[j], ODRV_CMD_SET_LIMITS, data, 8u);
+#else
+    (void)j;
+#endif
 }
 
 static void send_axis_state(int j, uint32_t state)
@@ -2484,6 +2531,7 @@ void legtest_run(void)
                     {
                         if (!s_joint_live[j]) { continue; }
                         send_gains(j);
+                        send_limits(j);
                         send_controller_mode(j);
                         send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                     }
@@ -2640,6 +2688,7 @@ void legtest_run(void)
                     (s_joint[j].n_heartbeat > 0u))
                 {
                     send_gains(j);
+                    send_limits(j);
                     send_controller_mode(j);
                     send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                 }
