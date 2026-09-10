@@ -587,6 +587,13 @@ where you meant. `docs/ZEROING.md` has the full argument.
 
 ### Three guards, failing differently on purpose
 
+A geared joint legitimately reads **different encoders for position and
+commutation** — `load=5` (`SPI_ENCODER0`) and `commutation=13`
+(`ONBOARD_ENCODER0`) on hip and knee. Commutation needs the electrical angle,
+which only a motor-side encoder can resolve; position wants the load side,
+because that is where the joint actually is. `s_cmd_scale` has to agree with the
+**load** encoder, since that is what `pos_estimate` reports.
+
 | guard | when | catches |
 |---|---|---|
 | `limits_ok()` | before arming | a trajectory that was never going to fit |
@@ -602,10 +609,24 @@ being told to do something perfectly legal. The measurement check alone would
 miss a bad setpoint that has not moved the joint yet. Whichever fires says which
 it was.
 
-`s_limit_deg[]` is `{ 30, 30, 35 }` degrees. **Watch the margin**: on the 0.3 m/s
-trajectory the knee is commanded to 28.85°, which leaves 1.15° before the hard
-stop fires. A joint that overshoots by more than that will disarm mid-gait —
-correctly, but it will end the run.
+`s_limit_deg[]` is `{ 30, 35, 35 }` degrees, and the knee's 35 is deliberate.
+
+**A walking knee only ever flexes.** This trajectory runs +16.34° to +28.85° and
+never goes negative at all, so a symmetric ±30° spends its whole negative half
+on travel the joint never uses and leaves **1.15°** on the side that matters —
+less than the 3° of headroom `limits_ok()` requires, so the run is refused
+before it arms:
+
+```
+!! knee: gait clears its stop by only 1.1 deg, want 3.0.
+!! trajectory does not fit the joint limits - NOT MOVING
+```
+
+35° is the knee's mechanical travel from `docs/ZEROING.md` and gives 6.15° of
+real margin. If 30 is a genuine hard stop on your machine rather than a round
+number, put it back and reduce the trajectory amplitude instead — do not lower
+`LEGTEST_LIMIT_MARGIN_DEG` to squeeze under it, which removes the warning
+without removing the interference.
 
 ### The generated table is repaired, not raw
 

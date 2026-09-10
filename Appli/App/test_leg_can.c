@@ -136,7 +136,24 @@ static float joint_cmd(int j, float out_turns)
 }
 
 /* Physical joint limits used by the absolute-position safety checks. */
-static const float s_limit_deg[JOINT_COUNT] = { 30.0f, 30.0f, 35.0f };
+/*
+ * Joint travel, degrees either side of zero. The runtime hard stop disarms on
+ * either the command or the measurement crossing these.
+ *
+ * The knee is 35, not 30, and the reason is worth writing down. A walking knee
+ * only ever flexes: this trajectory runs +16.34 to +28.85 degrees and never
+ * goes negative at all. A symmetric +/-30 therefore spends its entire negative
+ * half on travel the joint does not use, and leaves 1.15 degrees on the side
+ * that matters - less than the 3 degrees of headroom limits_ok() insists on
+ * before it will arm, so the run was refused.
+ *
+ * 35 is the knee's mechanical travel as recorded in docs/ZEROING.md, and gives
+ * 6.15 degrees of real margin. If 30 is a genuine hard stop on your machine
+ * rather than a round number, put it back and reduce the trajectory amplitude
+ * instead - do not reduce LEGTEST_LIMIT_MARGIN_DEG to squeeze under it, which
+ * only removes the warning and not the interference.
+ */
+static const float s_limit_deg[JOINT_COUNT] = { 30.0f, 35.0f, 35.0f };
 #define LEGTEST_LIMIT_MARGIN_DEG     3.0f
 
 static uint8_t s_arm_blocked;
@@ -442,18 +459,19 @@ static uint8_t   s_cap_dumped;
  * returns HTTP 403. A wrong value in commutation_encoder tells the drive to
  * commutate off the wrong sensor, so it is left unset here rather than guessed.
  *
- * Read it off a drive once:
+ * The values, from the EncoderId enum in the 0.6.12 API reference:
  *
- *     odrv0.axis0.config.commutation_encoder = EncoderId.ONBOARD_ENCODER0
- *     int(odrv0.axis0.config.commutation_encoder)      # <- this number
+ *     0 NONE            5 SPI_ENCODER0    10 RS485_ENCODER0   13 ONBOARD_ENCODER0
+ *                       6 SPI_ENCODER1    11 RS485_ENCODER1   14 ONBOARD_ENCODER1
+ *                       7 SPI_ENCODER2    12 RS485_ENCODER2
+ *                       8 HALL_ENCODER0
+ *                       9 HALL_ENCODER1
  *
- * Put that number in ODRV_ENC_ID_ONBOARD0 and the write below happens every
- * boot. Until then the firmware only READS the two values and prints them,
- * which is safe and is the only place a drive quietly running off a different
- * encoder than s_cmd_scale[] assumes would ever become visible.
+ * The read is the useful part and it runs every boot. The WRITE is deliberately
+ * left disarmed - see s_enc_src[] below.
  */
 #define ODRV_ENC_ID_UNKNOWN     (-1)
-#define ODRV_ENC_ID_ONBOARD0    ODRV_ENC_ID_UNKNOWN
+#define ODRV_ENC_ID_ONBOARD0    13    /* EncoderId.ONBOARD_ENCODER0 */
 
 /*
  * Per joint: the EncoderId to write, or ODRV_ENC_ID_UNKNOWN to leave that
@@ -466,9 +484,9 @@ static uint8_t   s_cap_dumped;
  */
 #define LEGTEST_SET_ENCODER_SRC  1
 static const int s_enc_src[JOINT_COUNT] = {
-    ODRV_ENC_ID_ONBOARD0,      /* hip_pitch - motor side, x47 */
-    ODRV_ENC_ID_UNKNOWN,       /* knee      - leave on its load-side encoder */
-    ODRV_ENC_ID_ONBOARD0,      /* ankle     - motor side, x9  */
+    ODRV_ENC_ID_UNKNOWN,       /* hip_pitch - configured in odrivetool */
+    ODRV_ENC_ID_UNKNOWN,       /* knee      - configured in odrivetool */
+    ODRV_ENC_ID_UNKNOWN,       /* ankle     - configured in odrivetool */
 };
 
 /* 1 = also persist it to the drive's flash (needs a power cycle to re-init). */
@@ -1280,10 +1298,22 @@ static void encoder_source_one(int j)
            (s_enc_src[j] == ODRV_ENC_ID_UNKNOWN) ? "  [left alone]" : "  [set]",
            (double)s_cmd_scale[j]);
 
+    /*
+     * load != commutation is CORRECT on a geared joint and not worth warning
+     * about. Commutation needs the electrical angle, which only a motor-side
+     * encoder can give - a load-side one is 47 gear teeth away from the rotor
+     * and cannot resolve it. Position wants the load side, because that is
+     * where the joint actually is. So hip and knee legitimately read
+     * load=5 (SPI_ENCODER0) and commutation=13 (ONBOARD_ENCODER0).
+     *
+     * What IS worth saying is which one s_cmd_scale has to agree with: the
+     * LOAD encoder, since that is what pos_estimate reports.
+     */
     if (load != commut)
     {
-        printf("  %-9s !! load and commutation differ - s_cmd_scale follows"
-               " load\r\n", "");
+        printf("  %-9s    position follows load=%u; commutation on %u is"
+               " normal for a geared joint\r\n", "",
+               (unsigned)load, (unsigned)commut);
     }
 }
 
