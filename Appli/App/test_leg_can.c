@@ -158,6 +158,7 @@ typedef enum
     RUN_ENTRY,            /* absolute zero -> trajectory sample 0     */
     RUN_GAIT,             /* the trajectory                           */
     RUN_SETTLE,           /* hold the last pose, briefly              */
+    RUN_FAULT_CLEAR,      /* a drive faulted; clearing, then home     */
     RUN_RETURN_ZERO,      /* back to absolute zero                    */
     RUN_DONE              /* disarmed; nothing further is sent        */
 } run_phase_t;
@@ -166,6 +167,7 @@ static run_phase_t s_phase;
 static uint32_t    s_phase_tick;                 /* tick the phase began on */
 static float       s_phase_from[JOINT_COUNT];    /* pose it began from      */
 static uint8_t     s_run_blocked;
+static uint32_t    s_fault_mask[JOINT_COUNT];   /* what each drive reported */
 
 
 static uint8_t limits_ok(const float *entry_from)
@@ -280,6 +282,7 @@ static uint8_t limits_ok(const float *entry_from)
  */
 #define LEGTEST_GOTO_ZERO_MS         3000u
 #define LEGTEST_SETTLE_MS            1000u
+#define LEGTEST_FAULT_CLEAR_MS       2000u   /* give up clearing after */
 #define LEGTEST_RETURN_ZERO_DELAY_MS 2000u
 #define LEGTEST_RETURN_ZERO_MS       2000u
 #define LEGTEST_CAPTURE              1
@@ -331,6 +334,7 @@ static uint8_t   s_cap_dumped;
 #define ODRV_CMD_HEARTBEAT      0x001u
 #define ODRV_CMD_SET_AXIS_STATE 0x007u
 #define ODRV_CMD_GET_ENCODER    0x009u
+#define ODRV_CMD_CLEAR_ERRORS   0x018u
 #define ODRV_CMD_SET_ABS_POS    0x019u
 #define ODRV_CMD_SET_CTRL_MODE  0x00Bu
 #define ODRV_CMD_SET_INPUT_POS  0x00Cu
@@ -2032,6 +2036,162 @@ static void ramp_to(int j, float to, uint32_t ms, float a,
                         : ((to - from) / ((float)ms * 0.001f)) * s_vel_ff[j];
 }
 
+/* ===================================================================== */
+/*  Faults                                                                */
+/* ===================================================================== */
+
+/*
+ * ODriveError, from the 0.6.12 API reference. A bitmask, so several can be
+ * set at once - and the common pairing 0x08000200 is exactly that:
+ * BRAKE_RESISTOR_DISARMED together with DC_BUS_UNDER_VOLTAGE, which the docs
+ * describe as the same event seen twice ("the brake resistor was disarmed
+ * during an undervoltage condition").
+ *
+ * A raw hex code in a log is a number somebody then has to go and look up,
+ * usually while the leg is still on the bench. Printing the name costs a table.
+ */
+typedef struct
+{
+    uint32_t    mask;
+    const char *name;
+} odrv_err_t;
+
+static const odrv_err_t s_odrv_errors[] = {
+    { 0x00000001u, "INITIALIZING"               },
+    { 0x00000002u, "SYSTEM_LEVEL"               },
+    { 0x00000004u, "TIMING_ERROR"               },
+    { 0x00000008u, "MISSING_ESTIMATE"           },
+    { 0x00000010u, "BAD_CONFIG"                 },
+    { 0x00000020u, "DRV_FAULT"                  },
+    { 0x00000040u, "MISSING_INPUT"              },
+    { 0x00000100u, "DC_BUS_OVER_VOLTAGE"        },
+    { 0x00000200u, "DC_BUS_UNDER_VOLTAGE"       },
+    { 0x00000400u, "DC_BUS_OVER_CURRENT"        },
+    { 0x00000800u, "DC_BUS_OVER_REGEN_CURRENT"  },
+    { 0x00001000u, "CURRENT_LIMIT_VIOLATION"    },
+    { 0x00002000u, "MOTOR_OVER_TEMP"            },
+    { 0x00004000u, "INVERTER_OVER_TEMP"         },
+    { 0x00008000u, "VELOCITY_LIMIT_VIOLATION"   },
+    { 0x00010000u, "POSITION_LIMIT_VIOLATION"   },
+    { 0x00020000u, "REQUESTED_CURRENT_TOO_HIGH" },
+    { 0x01000000u, "WATCHDOG_TIMER_EXPIRED"     },
+    { 0x02000000u, "ESTOP_REQUESTED"            },
+    { 0x04000000u, "SPINOUT_DETECTED"           },
+    { 0x08000000u, "BRAKE_RESISTOR_DISARMED"    },
+    { 0x10000000u, "THERMISTOR_DISCONNECTED"    },
+    { 0x40000000u, "CALIBRATION_ERROR"          },
+};
+
+/*
+ * Print every bit that is set, by name, and anything left over as hex so an
+ * error this table does not know about is still visible rather than silently
+ * dropped.
+ */
+static void print_odrv_errors(uint32_t err)
+{
+    uint32_t known = 0u;
+
+    for (unsigned k = 0; k < (sizeof(s_odrv_errors) / sizeof(s_odrv_errors[0]));
+         k++)
+    {
+        if ((err & s_odrv_errors[k].mask) != 0u)
+        {
+            printf("      %s\r\n", s_odrv_errors[k].name);
+            known |= s_odrv_errors[k].mask;
+        }
+    }
+
+    if ((err & ~known) != 0u)
+    {
+        printf("      unrecognised bits 0x%08lX\r\n",
+               (unsigned long)(err & ~known));
+    }
+}
+
+/*
+ * Clear_Errors, 0x018. Host->drive, no payload, no reply.
+ *
+ * A drive latches its error and refuses closed loop until it is cleared. That
+ * is the right default - a fault that un-latches itself is one you never find
+ * out about - but it means recovery has to be asked for explicitly.
+ */
+static void send_clear_errors(int j)
+{
+    uint8_t data[4] = { 0u, 0u, 0u, 0u };
+
+    tx_enqueue(s_node_id[j], ODRV_CMD_CLEAR_ERRORS, data, 4u);
+}
+
+/*
+ * Any drive reporting a fault in its heartbeat ends the run for the WHOLE leg.
+ *
+ * Not just the joint that failed: these three are bolted to the same limb, and
+ * leaving two of them servoing to a trajectory while the third goes limp bends
+ * the leg against itself. The gait is abandoned where it is, every axis idled,
+ * the errors cleared on the drives that had them, and then the leg is brought
+ * home to zero and disarmed.
+ */
+static uint8_t check_and_handle_faults(void)
+{
+    if (s_stopped) { return 0u; }
+    if ((s_phase == RUN_FAULT_CLEAR) || (s_phase == RUN_DONE)) { return 0u; }
+
+    uint8_t any = 0u;
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        s_fault_mask[j] = 0u;
+
+        if (!s_joint_live[j]) { continue; }
+        if (s_joint[j].axis_error == 0u) { continue; }
+
+        s_fault_mask[j] = s_joint[j].axis_error;
+        any = 1u;
+    }
+
+    if (!any) { return 0u; }
+
+    printf("\r\n!! DRIVE FAULT - stopping the leg\r\n");
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (s_fault_mask[j] == 0u) { continue; }
+
+        printf("   %s (node %u), axis_error 0x%08lX, state %u:\r\n",
+               s_joint_name[j], (unsigned)s_node_id[j],
+               (unsigned long)s_fault_mask[j],
+               (unsigned)s_joint[j].axis_state);
+
+        print_odrv_errors(s_fault_mask[j]);
+    }
+
+    /* Stop commanding before anything else, then clear. */
+    s_gait_running = 0;
+    disarm_all();
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (s_fault_mask[j] == 0u) { continue; }
+
+        printf("   clearing errors on %s\r\n", s_joint_name[j]);
+        send_clear_errors(j);
+    }
+
+    for (uint32_t spin = 0u;
+         (s_txq_tail != s_txq_head) && (spin < 100000u);
+         spin++)
+    {
+        tx_pump();
+    }
+
+#if LEGTEST_CAPTURE
+    cap_dump();
+#endif
+
+    phase_enter(RUN_FAULT_CLEAR, "waiting for the errors to clear");
+    return 1u;
+}
+
 void legtest_run(void)
 {
     uint32_t report_tick = 0;
@@ -2095,6 +2255,12 @@ void legtest_run(void)
          * the drive turns into torque, so it would trail the leg rather than
          * drive it.
          * ----------------------------------------------------------------- */
+        /*
+         * Before anything computes a target: a faulted drive ends the run, so
+         * one more setpoint is never sent to a joint on its way down.
+         */
+        (void)check_and_handle_faults();
+
         if (!s_stopped && !s_run_blocked)
         {
             float all[GAIT_JOINTS], all_vel[GAIT_JOINTS];
@@ -2264,6 +2430,58 @@ void legtest_run(void)
                     phase_enter(RUN_RETURN_ZERO, "RETURNING TO ABSOLUTE ZERO");
                 }
                 break;
+
+            /* ---------------------------------------------------------- */
+            case RUN_FAULT_CLEAR:
+            {
+                /*
+                 * Errors were cleared a moment ago. Wait for the drives to say
+                 * so in their own heartbeats, then re-arm and bring the leg
+                 * home. Believing the clear worked without checking would hand
+                 * a setpoint to an axis that is still latched and still IDLE.
+                 */
+                uint8_t all_clear = 1u;
+
+                for (int j = 0; j < JOINT_COUNT; j++)
+                {
+                    if (!s_joint_live[j]) { continue; }
+                    if (s_joint[j].axis_error != 0u) { all_clear = 0u; }
+                }
+
+                if (all_clear)
+                {
+                    for (int j = 0; j < JOINT_COUNT; j++)
+                    {
+                        if (!s_joint_live[j]) { continue; }
+                        send_gains(j);
+                        send_controller_mode(j);
+                        send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
+                    }
+
+                    phase_enter(RUN_RETURN_ZERO,
+                                "errors cleared - returning to zero");
+                }
+                else if (phase_alpha(LEGTEST_FAULT_CLEAR_MS) >= 1.0f)
+                {
+                    printf("\r\n!! errors did not clear in %u ms."
+                           " Leaving the leg IDLE where it is.\r\n\r\n",
+                           (unsigned)LEGTEST_FAULT_CLEAR_MS);
+
+                    for (int j = 0; j < JOINT_COUNT; j++)
+                    {
+                        if (!s_joint_live[j]) { continue; }
+                        if (s_joint[j].axis_error == 0u) { continue; }
+
+                        printf("   %s still reports:\r\n", s_joint_name[j]);
+                        print_odrv_errors(s_joint[j].axis_error);
+                    }
+
+                    disarm_all();
+                    s_stopped = 1;
+                    s_phase   = RUN_DONE;
+                }
+                break;
+            }
 
             /* ---------------------------------------------------------- */
             case RUN_RETURN_ZERO:
