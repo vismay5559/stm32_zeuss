@@ -1794,8 +1794,15 @@ static void apply_encoder_config(void)
  */
 #define LEGTEST_ZERO_SETTLE_MS      100u
 #define LEGTEST_ZERO_WATCH_MS       200u
-#define LEGTEST_ZERO_TOL_TURNS      0.002f    /* 0.72 deg - did it take?   */
-#define LEGTEST_ZERO_DRIFT_TURNS    0.001f    /* 0.36 deg - is it moving?  */
+/*
+ * In degrees AT THE JOINT, not in encoder turns. Encoder turns are the wrong
+ * unit for a threshold because they scale with s_cmd_scale: 0.002 turns is
+ * 0.72 deg on the knee at 1:1 and 0.015 deg on the hip at 47:1, so one number
+ * meant two wildly different things and the hip was being held to a tolerance
+ * fifty times tighter than the joint it was measuring.
+ */
+#define LEGTEST_ZERO_TOL_DEG        1.0f      /* did 0x19 take?   */
+#define LEGTEST_ZERO_DRIFT_DEG      0.5f      /* is it moving?    */
 /*
  * Which joints have their zero DECLARED at boot with CAN 0x19.
  *
@@ -1916,21 +1923,24 @@ static uint8_t define_absolute_zero_one(int j)
      */
     const float per_turn_deg = 360.0f / s_cmd_scale[j];
 
-    const float off   = (first >= 0.0f) ? first : -first;
-    const float drift = last - first;
-    const float dabs  = (drift >= 0.0f) ? drift : -drift;
-    const uint8_t ok  = (off < LEGTEST_ZERO_TOL_TURNS) ? 1u : 0u;
+    const float first_deg = first * per_turn_deg;
+    const float drift_deg = (last - first) * per_turn_deg;
 
-    printf("  %-9s reference: pos_estimate=%+.6f turns (%+.2f deg)%s\r\n",
-           s_joint_name[j], (double)first, (double)(first * per_turn_deg),
+    const float off_abs   = (first_deg >= 0.0f) ? first_deg : -first_deg;
+    const float drift_abs = (drift_deg >= 0.0f) ? drift_deg : -drift_deg;
+    const uint8_t ok      = (off_abs < LEGTEST_ZERO_TOL_DEG) ? 1u : 0u;
+
+    printf("  %-9s reference: pos_estimate=%+.6f turns (%+.3f deg at the"
+           " joint)%s\r\n",
+           s_joint_name[j], (double)first, (double)first_deg,
            ok ? "  [OK]" : "  !! 0x19 DID NOT TAKE");
 
-    if (dabs > LEGTEST_ZERO_DRIFT_TURNS)
+    if (drift_abs > LEGTEST_ZERO_DRIFT_DEG)
     {
-        printf("  %-9s            !! MOVING while idle: %+.2f deg in %u ms."
+        printf("  %-9s            !! MOVING while idle: %+.3f deg in %u ms."
                "\r\n             The zero is being taken on a joint that will"
                " not stay put.\r\n",
-               s_joint_name[j], (double)(drift * per_turn_deg),
+               s_joint_name[j], (double)drift_deg,
                (unsigned)LEGTEST_ZERO_WATCH_MS);
     }
 
