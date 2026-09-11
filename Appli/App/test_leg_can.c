@@ -510,7 +510,13 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  * survive a power cycle, and that needs a reboot to take effect.
  */
 #define LEGTEST_CALIBRATE_JOINTS    { 0 }   /* index 0 = hip_pitch */
-#define LEGTEST_CALIB_TIMEOUT_MS    5000u
+/*
+ * FULL_CALIBRATION_SEQUENCE is motor calibration followed by encoder offset
+ * calibration and genuinely takes 15-25 s on an S1. 5000 ms was shorter than
+ * the routine, so a calibration that was working still ended in a timeout.
+ */
+#define LEGTEST_CALIB_TIMEOUT_MS    30000u
+#define LEGTEST_CALIB_START_MS      1500u   /* still IDLE by here = refused */
 
 /*
  * ---------------------------------------------------------------------------
@@ -564,6 +570,7 @@ typedef struct
     float    torque;
     uint32_t axis_error;
     uint8_t  axis_state;
+    uint8_t  proc_result;      /* heartbeat byte 5 - why a routine ended */
     uint32_t n_heartbeat;
     uint32_t n_encoder;
     uint32_t n_torque;
@@ -1109,8 +1116,15 @@ void legtest_on_rx(void)
             break;
 
         case ODRV_CMD_HEARTBEAT:
-            t->axis_error = le_u32(&data[0]);
-            t->axis_state = data[4];
+            t->axis_error  = le_u32(&data[0]);
+            t->axis_state  = data[4];
+            /*
+             * Byte 5 is Procedure_Result. A refused or failed routine very
+             * often leaves axis_error at 0 and reports the reason ONLY here -
+             * which is how "calibration TIMED OUT (state 1)" happens with no
+             * error to show for it. Dropping this byte is dropping the answer.
+             */
+            t->proc_result = data[5];   /* heartbeat is a fixed 8 bytes */
             t->n_heartbeat++;
             break;
 
@@ -1520,6 +1534,34 @@ static void spi_err_rate_one(uint8_t node, const char *name, float rate)
  * an error is reported rather than swallowed, because a joint that failed
  * calibration will refuse closed loop later with no obvious reason.
  */
+/*
+ * ProcedureResult, ODrive 0.6.x. Reported in heartbeat byte 5 and, unlike
+ * axis_error, it is what a REFUSED state request sets.
+ */
+static const char *proc_result_name(uint8_t r)
+{
+    switch (r)
+    {
+    case 0u:  return "SUCCESS";
+    case 1u:  return "BUSY";
+    case 2u:  return "CANCELLED";
+    case 3u:  return "DISARMED";
+    case 4u:  return "NO_RESPONSE";
+    case 5u:  return "POLE_PAIR_CPR_MISMATCH";
+    case 6u:  return "PHASE_RESISTANCE_OUT_OF_RANGE";
+    case 7u:  return "PHASE_INDUCTANCE_OUT_OF_RANGE";
+    case 8u:  return "UNBALANCED_PHASES";
+    case 9u:  return "INVALID_MOTOR_TYPE";
+    case 10u: return "ILLEGAL_HALL_STATE";
+    case 11u: return "TIMEOUT";
+    case 12u: return "HOMING_WITHOUT_ENDSTOP";
+    case 13u: return "INVALID_STATE";
+    case 14u: return "NOT_CALIBRATED";
+    case 15u: return "NOT_CONVERGING";
+    default:  return "unknown";
+    }
+}
+
 static uint8_t calibrate_joint(int j)
 {
     const uint8_t node = s_node_id[j];
@@ -1542,6 +1584,21 @@ static uint8_t calibrate_joint(int j)
 
     for (uint32_t ms = 0u; ms < LEGTEST_CALIB_TIMEOUT_MS; ms++)
     {
+        /*
+         * A drive that is going to calibrate leaves IDLE within a few
+         * heartbeats. Still IDLE after LEGTEST_CALIB_START_MS means the
+         * request was REFUSED, not that it is taking its time, so say so now
+         * with the reason instead of sitting out the whole timeout.
+         */
+        if (!started && (ms > LEGTEST_CALIB_START_MS))
+        {
+            printf("  %-9s calibration REFUSED - never left IDLE.\r\n"
+                   "            procedure_result %u (%s)\r\n",
+                   s_joint_name[j], (unsigned)s_joint[j].proc_result,
+                   proc_result_name(s_joint[j].proc_result));
+            return 0u;
+        }
+
         tx_pump();
         legtest_on_rx();
         HAL_Delay(1);
@@ -1562,15 +1619,20 @@ static uint8_t calibrate_joint(int j)
         }
         if (s_joint[j].axis_state == ODRV_AXIS_STATE_IDLE)
         {
-            printf("  %-9s calibration complete, back in IDLE\r\n",
-                   s_joint_name[j]);
-            return 1u;
+            uint8_t r = s_joint[j].proc_result;
+
+            printf("  %-9s calibration finished: procedure_result %u (%s)\r\n",
+                   s_joint_name[j], (unsigned)r, proc_result_name(r));
+            return (r == 0u) ? 1u : 0u;
         }
     }
 
-    printf("  %-9s calibration TIMED OUT after %u ms (state %u)\r\n",
+    printf("  %-9s calibration TIMED OUT after %u ms"
+           " (state %u, procedure_result %u %s)\r\n",
            s_joint_name[j], (unsigned)LEGTEST_CALIB_TIMEOUT_MS,
-           (unsigned)s_joint[j].axis_state);
+           (unsigned)s_joint[j].axis_state,
+           (unsigned)s_joint[j].proc_result,
+           proc_result_name(s_joint[j].proc_result));
     return 0u;
 }
 
@@ -1638,6 +1700,25 @@ static void apply_encoder_config(void)
  * command, closed-loop arming is blocked.
  */
 #define LEGTEST_ZERO_ABSOLUTE_AT_BOOT  1
+
+/*
+ * How the result of a 0x19 is judged.
+ *
+ * The old check read ONE encoder frame straight after the command and demanded
+ * |pos| < 1e-4 turns. Both halves were wrong. 1e-4 turns is 0.036 degrees,
+ * which is inside the noise of live telemetry - the ankle reported -0.000176
+ * and was failed for it, having zeroed perfectly. And a single frame taken
+ * immediately can be one the drive sampled BEFORE it processed the command.
+ *
+ * So: settle, then sample twice. The first sample says whether the command
+ * took at all. The gap between the two says whether the joint is creeping
+ * while the drive is idle - which is a mechanical problem wearing the disguise
+ * of a zeroing failure, and the two need telling apart.
+ */
+#define LEGTEST_ZERO_SETTLE_MS      100u
+#define LEGTEST_ZERO_WATCH_MS       200u
+#define LEGTEST_ZERO_TOL_TURNS      0.002f    /* 0.72 deg - did it take?   */
+#define LEGTEST_ZERO_DRIFT_TURNS    0.001f    /* 0.36 deg - is it moving?  */
 /*
  * Which joints have their zero DECLARED at boot with CAN 0x19.
  *
@@ -1722,14 +1803,46 @@ static uint8_t define_absolute_zero_one(int j)
         return 0u;
     }
 
-    float pos = s_joint[j].pos;
-    float pos_err = (pos >= 0.0f) ? pos : -pos;
+    /* Settle, sample, wait, sample again. */
+    for (uint32_t w = 0u; w < LEGTEST_ZERO_SETTLE_MS; w += 5u)
+    {
+        HAL_Delay(5);
+        legtest_on_rx();
+    }
+    const float first = s_joint[j].pos;
 
-    printf("  %-9s reference: pos_estimate=%+.6f turns%s\r\n",
-           s_joint_name[j], (double)pos,
-           (pos_err < 1e-4f) ? "  [OK]" : "  !! FAILED");
+    for (uint32_t w = 0u; w < LEGTEST_ZERO_WATCH_MS; w += 5u)
+    {
+        HAL_Delay(5);
+        legtest_on_rx();
+    }
+    const float last = s_joint[j].pos;
 
-    return (pos_err < 1e-4f) ? 1u : 0u;
+    /*
+     * pos is in ENCODER turns. Degrees at the joint divides by s_cmd_scale[],
+     * so a motor-side encoder does not report nine times the angle it has.
+     */
+    const float per_turn_deg = 360.0f / s_cmd_scale[j];
+
+    const float off   = (first >= 0.0f) ? first : -first;
+    const float drift = last - first;
+    const float dabs  = (drift >= 0.0f) ? drift : -drift;
+    const uint8_t ok  = (off < LEGTEST_ZERO_TOL_TURNS) ? 1u : 0u;
+
+    printf("  %-9s reference: pos_estimate=%+.6f turns (%+.2f deg)%s\r\n",
+           s_joint_name[j], (double)first, (double)(first * per_turn_deg),
+           ok ? "  [OK]" : "  !! 0x19 DID NOT TAKE");
+
+    if (dabs > LEGTEST_ZERO_DRIFT_TURNS)
+    {
+        printf("  %-9s            !! MOVING while idle: %+.2f deg in %u ms."
+               "\r\n             The zero is being taken on a joint that will"
+               " not stay put.\r\n",
+               s_joint_name[j], (double)(drift * per_turn_deg),
+               (unsigned)LEGTEST_ZERO_WATCH_MS);
+    }
+
+    return ok;
 }
 
 static void define_absolute_zero_all(void)
@@ -1930,6 +2043,21 @@ static void report(void)
     int      silent = 0;
 
     static uint32_t prev_tx_ok, prev_rx;
+    static uint8_t  primed;
+
+    /*
+     * The first window is not one second - it is everything since boot, and
+     * boot includes a bus scan, encoder config and calibration. That is what
+     * produced "bus~390%": roughly 13 s of frames divided by a 1 s window.
+     * Prime the counters on the first call and report nothing for it.
+     */
+    if (!primed)
+    {
+        primed     = 1u;
+        prev_tx_ok = s_tx_ok;
+        prev_rx    = s_rx_total;
+        return;
+    }
 
     uint32_t d_tx = s_tx_ok - prev_tx_ok;
     uint32_t d_rx = s_rx_total - prev_rx;
@@ -2770,8 +2898,25 @@ void legtest_run(void)
 #if LEGTEST_ENABLE_CLOSED_LOOP
         if ((s_tick <= LEGTEST_ARM_DELAY_MS) && ((s_tick % 1000u) == 0u))
         {
-            printf("*** ARMING in %lu s - motors will become live ***\r\n",
-                   (unsigned long)((LEGTEST_ARM_DELAY_MS - s_tick) / 1000u));
+            /*
+             * Only count down to something that is going to happen. The gate
+             * below also requires s_scan_ok and s_absolute_ref_ok, so printing
+             * "motors will become live" unconditionally announced an arming
+             * that was already blocked, and left the real reason scrolled off
+             * the top of the log.
+             */
+            if (s_scan_ok && s_absolute_ref_ok && !s_arm_blocked)
+            {
+                printf("*** ARMING in %lu s - motors will become live ***\r\n",
+                       (unsigned long)((LEGTEST_ARM_DELAY_MS - s_tick) / 1000u));
+            }
+            else
+            {
+                printf("*** NOT ARMING - %s ***\r\n",
+                       !s_scan_ok          ? "the bus scan failed"
+                     : !s_absolute_ref_ok  ? "the absolute reference setup failed"
+                                           : "arming was blocked");
+            }
         }
 
         if (!s_stopped && s_scan_ok && s_absolute_ref_ok && !s_arm_blocked &&
