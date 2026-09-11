@@ -126,35 +126,6 @@ static const float s_vel_int_gain[JOINT_COUNT] = {  8.0f,  12.0f,  1.5f };
  */
 static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
 
-/*
- * Velocity ceiling per joint, in that drive's OWN units - output turns/s where
- * the encoder is on the load side, motor turns/s where it is on the motor side.
- * A negative value leaves the drive's own setting alone.
- *
- * This exists because a load-side encoder puts the gearbox INSIDE the loop,
- * which brings a failure mode a motor-side encoder does not have:
- *
- *     the load stops responding    (a stop, stiction, a slipped encoder)
- *  -> position error grows, because the loop cannot see the motor moving
- *  -> pos_gain turns that error into a large velocity command
- *  -> the motor accelerates into it, the load still does not move, and the
- *     error is still there
- *
- * Nothing in the position loop stops that by itself, and the harder it is tuned
- * the faster it runs away. A ceiling in the DRIVE does stop it, and it holds
- * even when the control loop is the thing at fault.
- *
- * The trajectory's own peak is far below this: the hip covers 26.5 degrees in
- * about 0.6 s, roughly 0.12 output turns/s. 2.0 is sixteen times anything the
- * gait asks for and still slow enough to walk away from.
- *
- * Current limits are NOT touched. Set_Limits (0x00F) carries velocity and
- * current in one frame and would overwrite whatever is configured in the drive,
- * so this writes controller.config.vel_limit over SDO instead - one parameter,
- * nothing else disturbed.
- */
-#define LEGTEST_SET_VEL_LIMIT   1
-static const float s_vel_limit[JOINT_COUNT] = { 2.0f, 2.0f, -1.0f };
 
 /*
  * axis0.controller.config.commutation_vel_scale, written at boot.
@@ -188,7 +159,6 @@ static const float s_commut_vel_scale[JOINT_COUNT] = {
 
 static void    sdo_write_f32(uint8_t node, uint16_t ep, float v);
 static uint8_t sdo_read_f32(uint8_t node, uint16_t ep, float *out);
-static void send_limits(int j);
 
 #define LEGTEST_GAIT_RELATIVE        0  /* absolute joint trajectory */
 #define LEGTEST_MAX_SWING_DEG        30.0f
@@ -471,7 +441,6 @@ static uint8_t   s_cap_dumped;
 #define EP_JSON_FW_MINOR  6u
 #define EP_JSON_FW_REV    12u
 
-#define EP_AXIS0_VEL_LIMIT          396u   /* float, rw - controller.config.vel_limit */
 #define EP_AXIS0_COMMUT_VEL_SCALE   405u   /* float, rw - controller.config.commutation_vel_scale */
 #define EP_AXIS0_LOAD_ENCODER       294u   /* uint8, rw */
 #define EP_AXIS0_COMMUT_ENCODER     295u   /* uint8, rw */
@@ -904,7 +873,6 @@ static void send_all_gains(void)
             continue;
         }
         send_gains(j);
-        send_limits(j);
     }
 
     for (uint32_t spin = 0u;
@@ -973,16 +941,6 @@ static void send_commut_vel_scale_all(void)
     printf("\r\n");
 }
 
-static void send_limits(int j)
-{
-#if LEGTEST_SET_VEL_LIMIT
-    if (s_vel_limit[j] < 0.0f) { return; }      /* leave this drive alone */
-
-    sdo_write_f32(s_node_id[j], EP_AXIS0_VEL_LIMIT, s_vel_limit[j]);
-#else
-    (void)j;
-#endif
-}
 
 static void send_axis_state(int j, uint32_t state)
 {
@@ -2619,7 +2577,6 @@ void legtest_run(void)
                     {
                         if (!s_joint_live[j]) { continue; }
                         send_gains(j);
-                        send_limits(j);
                         send_controller_mode(j);
                         send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                     }
@@ -2776,7 +2733,6 @@ void legtest_run(void)
                     (s_joint[j].n_heartbeat > 0u))
                 {
                     send_gains(j);
-                    send_limits(j);
                     send_controller_mode(j);
                     send_axis_state(j, ODRV_AXIS_STATE_CLOSED_LOOP);
                 }
