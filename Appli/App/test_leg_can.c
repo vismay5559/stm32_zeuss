@@ -488,8 +488,12 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  * CALIBRATION OVER CAN - READ THIS BEFORE SETTING IT TO 1
  * ---------------------------------------------------------------------------
  *
- * Which joints to run FULL_CALIBRATION_SEQUENCE on at boot, by index into the
- * joint tables. -1 ends the list. { -1 } means calibrate nothing.
+ * Which joints to run FULL_CALIBRATION_SEQUENCE on at boot, by INDEX into the
+ * joint tables - not by node ID. The two are easy to confuse and they do not
+ * line up: the hip is index 0 on node 1, the knee index 1 on node 3, the ankle
+ * index 2 on node 4. So { 1 } calibrates the KNEE, not the hip.
+ *
+ * -1 ends the list. { -1 } means calibrate nothing.
  *
  * THE JOINT WILL MOVE. Encoder offset calibration spins the motor to find the
  * electrical angle, and it expects the shaft to turn freely. Through a 47:1
@@ -505,7 +509,7 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  * Results are NOT saved. LEGTEST_SDO_SAVE persists them if you want them to
  * survive a power cycle, and that needs a reboot to take effect.
  */
-#define LEGTEST_CALIBRATE_JOINTS    { -1 }
+#define LEGTEST_CALIBRATE_JOINTS    { 0 }   /* index 0 = hip_pitch */
 #define LEGTEST_CALIB_TIMEOUT_MS    5000u
 
 /*
@@ -1637,24 +1641,40 @@ static void apply_encoder_config(void)
 /*
  * Which joints have their zero DECLARED at boot with CAN 0x19.
  *
- * Only the ankle. Hip and knee now read load-side absolute encoders whose
- * reference frame is saved in the drive - pos_vel_mapper.config.offset with
- * offset_valid, written by set_abs_pos() and persisted by save_configuration().
- * The drive applies that offset at power-up, so pos_estimate is already correct
- * before the STM32 says anything, with no homing.
+ * The KNEE is 0 and should stay that way. It reads a load-side absolute
+ * encoder whose reference frame lives in the drive - pos_vel_mapper.config
+ * .offset with offset_valid, written by set_abs_pos() and persisted by
+ * save_configuration(). The drive applies that offset at power-up, so
+ * pos_estimate is already correct before the STM32 says anything, with no
+ * homing. Sending 0x19 would destroy it, replacing a calibrated reference with
+ * wherever the leg happens to be standing.
  *
- * Sending 0x19 to those two would DESTROY that: it redefines zero as wherever
- * the leg is standing right now, silently replacing a calibrated reference with
- * an arbitrary one. The whole point of the saved frame is that the firmware
- * does not need to - and must not - re-declare it.
- *
- * The ankle is different because its encoder is on the motor side of a 9:1.
- * Its +/-35 degrees is 1.75 turns of encoder, so a single-turn absolute reading
+ * The ANKLE is 1 because its encoder is on the motor side of a 9:1. Its
+ * +/-35 degrees is 1.75 turns of encoder, so a single-turn absolute reading
  * maps to several possible joint angles and no saved offset can disambiguate
  * it. Declaring zero at boot is the only thing available, and it means the
  * ankle must be placed by hand before power-up - see docs/ZEROING.md.
+ *
+ * The HIP is 1 TEMPORARILY, while the runaway is being chased. Understand what
+ * that costs before leaving it on:
+ *
+ *   - it OVERWRITES the hip's saved reference frame. Whatever zero was set with
+ *     set_abs_pos() and saved in the drive is gone, replaced by the pose the
+ *     leg is in at boot. Putting the 0 back here does not restore it; it has to
+ *     be re-established in odrivetool and saved again.
+ *   - zero therefore moves every time you power up, unless you place the leg by
+ *     hand in the same pose first. Put the hip where you want zero BEFORE
+ *     powering the STM32.
+ *   - everything downstream is measured from that new zero: the absolute
+ *     trajectory the gait plays, and the +/-30 degree hard stop in
+ *     s_limit_deg[]. A boot with the leg 10 degrees off gives the whole run a
+ *     10 degree bias and takes 10 degrees off one side of the travel.
+ *
+ * This runs AFTER run_calibration() in legtest_init(), which is the order it
+ * has to be in - FULL_CALIBRATION_SEQUENCE moves the joint and can disturb the
+ * position reference, so the zero is declared once calibration has finished.
  */
-static const uint8_t s_define_zero[JOINT_COUNT] = { 0u, 0u, 1u };
+static const uint8_t s_define_zero[JOINT_COUNT] = { 1u, 0u, 1u };
 static uint8_t s_absolute_ref_ok;
 
 static uint8_t define_absolute_zero_one(int j)
@@ -1717,11 +1737,16 @@ static void define_absolute_zero_all(void)
 #if LEGTEST_ZERO_ABSOLUTE_AT_BOOT
     s_absolute_ref_ok = 1u;
     printf("\r\nabsolute joint reference setup\r\n");
-    printf("  Hip and knee keep the reference frame saved in their drives:\r\n");
-    printf("  pos_vel_mapper offset, persisted by save_configuration.\r\n");
-    printf("  Only the ANKLE is declared here - put it at mechanical 0 deg\r\n");
-    printf("  before powering the STM32, because a motor-side encoder on a\r\n");
-    printf("  9:1 cannot hold a zero across a power cycle.\r\n");
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        printf("  %-9s : %s\r\n", s_joint_name[j],
+               s_define_zero[j]
+                 ? "zero DECLARED now, at the pose the joint is in"
+                 : "keeps the reference frame saved in its drive");
+    }
+    printf("  A declared joint must be PLACED BY HAND before power-up - the\r\n");
+    printf("  zero is wherever it is standing, and the gait and the +/-30 deg\r\n");
+    printf("  hard stop are both measured from there.\r\n");
 
     for (int j = 0; j < JOINT_COUNT; j++)
     {
@@ -1736,7 +1761,7 @@ static void define_absolute_zero_all(void)
     }
     else
     {
-        printf("absolute reference setup complete: HIP=0, KNEE=0\r\n");
+        printf("absolute reference setup complete\r\n");
     }
     printf("\r\n");
 #else
