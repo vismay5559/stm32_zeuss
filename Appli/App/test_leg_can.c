@@ -62,7 +62,24 @@ static const char *const s_mon_name[MONITOR_COUNT] = { "" };
  * test_leg_torque.c keeps a separate s_gear[] = { 47, 47, 9 } because torque
  * always has to cross the reduction, whatever the encoder is doing.
  */
-static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
+/*
+ * Encoder turns per turn of the OUTPUT shaft. It follows the ENCODER, not the
+ * gearbox: 1.0 where the encoder reads the load side, the gear ratio where it
+ * reads the motor side.
+ *
+ * The hip is 47 TEMPORARILY. Its load-side SPI encoder is not usable - with
+ * the drive idle and unpowered its reported position wandered over 24 degrees
+ * peak to peak, while the knee on an identical load=5 / commutation=13 setup
+ * held to 0.036 degrees, and FULL_CALIBRATION_SEQUENCE came back
+ * NOT_CONVERGING. Feeding that into a position loop is a complete explanation
+ * for the hip runaway, and no gain can fix a position signal that is wrong.
+ *
+ * So the hip reads its own onboard motor-side encoder until the SPI encoder is
+ * repaired. That costs load-side accuracy - everything after the 47:1, backlash
+ * included, is now outside the loop and invisible - but it gives a position
+ * signal that is real.
+ */
+static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
 
 /*
  * Controller gains, pushed to every live drive from legtest_init() so all
@@ -97,9 +114,18 @@ static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
  */
 #define GAIN_KEEP  (-1.0f)
 
+/*
+ * The hip is back on the 20 / 1.0 / 5.0 recorded in docs/ODRIVE_COMMANDS.md,
+ * which is what it was tuned to when it last read the motor-side encoder
+ * (0.06 deg RMS). 5.0 / 8.0 was tuned against the load-side encoder and does
+ * not carry across: pos_gain does, because it maps error to velocity in the
+ * same units either way, but vel_gain and vel_integrator_gain map encoder
+ * turns/s to MOTOR torque, and motor-side velocity is 47x larger for the same
+ * joint motion. Carrying 5.0 over would have asked for 47x the damping torque.
+ */
 static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 30.0f, 17.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  5.0f,  10.0f,  0.3f };
-static const float s_vel_int_gain[JOINT_COUNT] = {  8.0f,  12.0f,  1.5f };
+static const float s_vel_gain[JOINT_COUNT]     = {  1.0f,  10.0f,  0.3f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  12.0f,  1.5f };
 
 /*
  * Velocity feedforward, scaled PER JOINT.
@@ -556,7 +582,7 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  */
 #define LEGTEST_SET_ENCODER_SRC  1
 static const int s_enc_src[JOINT_COUNT] = {
-    ODRV_ENC_ID_UNKNOWN,       /* hip_pitch - configured in odrivetool */
+    ODRV_ENC_ID_ONBOARD0,      /* hip_pitch - TEMPORARY, see s_cmd_scale[] */
     ODRV_ENC_ID_UNKNOWN,       /* knee      - configured in odrivetool */
     ODRV_ENC_ID_UNKNOWN,       /* ankle     - configured in odrivetool */
 };
@@ -1598,7 +1624,18 @@ static uint8_t calibrate_joint(int j)
     printf("  %-9s (node %u) FULL_CALIBRATION_SEQUENCE - THE JOINT WILL MOVE\r\n",
            s_joint_name[j], (unsigned)node);
 
-    s_joint[j].axis_state = 0u;
+    /*
+     * Do NOT reset axis_state to 0 here. 0 is UNDEFINED, which is "not IDLE",
+     * so the sentinel itself satisfied the started test and the very next
+     * heartbeat - still reporting IDLE, because the drive had not begun - was
+     * read as the routine finishing. That is where "running: state 0
+     * (UNDEFINED)" followed instantly by a procedure_result left over from the
+     * PREVIOUS boot came from.
+     *
+     * Judge nothing until a heartbeat has arrived since the request.
+     */
+    const uint32_t hb0 = s_joint[j].n_heartbeat;
+
     s_joint[j].axis_error = 0u;
     send_axis_state(j, ODRV_AXIS_STATE_FULL_CALIB);
 
@@ -1610,6 +1647,8 @@ static uint8_t calibrate_joint(int j)
         tx_pump();
         legtest_on_rx();
         HAL_Delay(1);
+
+        if (s_joint[j].n_heartbeat == hb0) { continue; }
 
         if (s_joint[j].axis_error != 0u)
         {
