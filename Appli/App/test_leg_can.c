@@ -455,7 +455,33 @@ static uint8_t   s_cap_dumped;
  * it only stops a handful of corrupt reads from ending the run.
  */
 #define LEGTEST_SET_SPI_ERR_RATE    1
-#define LEGTEST_SPI_MAX_ERROR_RATE  0.1f
+#define LEGTEST_SPI_MAX_ERROR_RATE  0.1f   /* default, used for monitor nodes */
+
+/*
+ * Per joint, because they do not all sit on the same encoder and have not all
+ * behaved the same way.
+ *
+ * A negative value leaves that drive's own setting alone.
+ *
+ * The hip is at 0.5 - half of every SPI transaction may come back bad before
+ * the drive gives up on the estimate. That is a deliberately wide tolerance and
+ * it is worth being honest about what it does and does not buy:
+ *
+ *   - it does NOT improve the encoder. A corrupt read is still a corrupt read,
+ *     and the position it feeds the loop is still wrong.
+ *   - what it changes is only WHEN the drive gives up. At 0.1 a burst of bad
+ *     transactions ends the run with MISSING_ESTIMATE; at 0.5 the same burst is
+ *     absorbed and the gait keeps going.
+ *
+ * So this is a way to keep the leg running long enough to see the rest of a
+ * problem, not a fix for the wiring. If the hip needs 0.5 to finish a gait, the
+ * SPI link is the thing to go and look at.
+ */
+static const float s_spi_err_rate[JOINT_COUNT] = {
+    0.5f,      /* hip_pitch */
+    0.1f,      /* knee      */
+    0.1f,      /* ankle     */
+};
 
 /*
  * ---------------------------------------------------------------------------
@@ -1432,9 +1458,11 @@ static void encoder_source_all(void)
 #endif
 }
 
-static void spi_err_rate_one(uint8_t node, const char *name)
+static void spi_err_rate_one(uint8_t node, const char *name, float rate)
 {
     float before = 0.0f, after = 0.0f;
+
+    if (rate < 0.0f) { return; }      /* leave this drive alone */
 
     if (s_node_seen[node] == 0u)
     {
@@ -1451,17 +1479,16 @@ static void spi_err_rate_one(uint8_t node, const char *name)
         return;
     }
 
-    sdo_write_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE,
-                  LEGTEST_SPI_MAX_ERROR_RATE);
+    sdo_write_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE, rate);
 
     if (!sdo_read_f32(node, EP_SPI_ENC0_MAX_ERROR_RATE, &after))
     {
         printf("  node %u %-9s : wrote %.3f but could not read it back\r\n",
-               (unsigned)node, name, (double)LEGTEST_SPI_MAX_ERROR_RATE);
+               (unsigned)node, name, (double)rate);
         return;
     }
 
-    float want = LEGTEST_SPI_MAX_ERROR_RATE;
+    float want = rate;
     float d    = (after > want) ? (after - want) : (want - after);
 
     printf("  node %u %-9s : max_error_rate %.4f -> %.4f%s\r\n",
@@ -1565,21 +1592,21 @@ static void run_calibration(void)
 static void apply_encoder_config(void)
 {
 #if LEGTEST_SET_SPI_ERR_RATE
-    printf("\r\nspi_encoder0.config.max_error_rate -> %.3f  "
+    printf("\r\nspi_encoder0.config.max_error_rate, per joint  "
            "(endpoint %u, fw %u.%u.%u / hw %u.%u.%u)\r\n",
-           (double)LEGTEST_SPI_MAX_ERROR_RATE,
            (unsigned)EP_SPI_ENC0_MAX_ERROR_RATE,
            EP_JSON_FW_MAJOR, EP_JSON_FW_MINOR, EP_JSON_FW_REV,
            EP_JSON_HW_LINE, EP_JSON_HW_VER, EP_JSON_HW_VAR);
 
     for (int j = 0; j < JOINT_COUNT; j++)
     {
-        spi_err_rate_one(s_node_id[j], s_joint_name[j]);
+        spi_err_rate_one(s_node_id[j], s_joint_name[j], s_spi_err_rate[j]);
     }
 #if (MONITOR_COUNT > 0)
     for (int m = 0; m < MONITOR_COUNT; m++)
     {
-        spi_err_rate_one(s_mon_node[m], s_mon_name[m]);
+        spi_err_rate_one(s_mon_node[m], s_mon_name[m],
+                         LEGTEST_SPI_MAX_ERROR_RATE);
     }
 #endif
 
