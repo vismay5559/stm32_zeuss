@@ -156,7 +156,38 @@ static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
 #define LEGTEST_SET_VEL_LIMIT   1
 static const float s_vel_limit[JOINT_COUNT] = { 2.0f, 2.0f, -1.0f };
 
-static void sdo_write_f32(uint8_t node, uint16_t ep, float v);
+/*
+ * axis0.controller.config.commutation_vel_scale, written at boot.
+ *
+ * NaN leaves a drive's own value alone. Only the hip is set here, and the only
+ * change is the SIGN - the magnitude is exactly what the drive already had.
+ *
+ * That scale relates the commutation encoder's velocity to the load encoder's.
+ * Hip and knee read position on the load side and commutate off the onboard
+ * motor-side encoder, and those two encoders sit on opposite ends of a 47:1
+ * reduction - so whether they agree about which way is positive depends on how
+ * each is mounted, and there is no reason for them to agree by default. A sign
+ * that is wrong feeds the commutation a velocity pointing the wrong way, which
+ * is not a small error: it is the difference between damping the motor and
+ * driving it further in the direction it is already going.
+ *
+ * That is consistent with what the hip actually does - it tracks correctly for
+ * most of the stroke, then in one direction stops following and the motor runs
+ * away, which no gain change improved.
+ *
+ * Not saved to flash: this is a runtime write and a power cycle reverts it, so
+ * a wrong guess is undone by switching the drive off. Once the sign is proven
+ * right, put it in the drive with odrivetool and save_configuration() rather
+ * than leaving the firmware to reassert it on every boot.
+ */
+static const float s_commut_vel_scale[JOINT_COUNT] = {
+    -0.00101317122593718f,     /* hip_pitch - sign flipped */
+    NAN,                       /* knee      - leave alone  */
+    NAN,                       /* ankle     - leave alone  */
+};
+
+static void    sdo_write_f32(uint8_t node, uint16_t ep, float v);
+static uint8_t sdo_read_f32(uint8_t node, uint16_t ep, float *out);
 static void send_limits(int j);
 
 #define LEGTEST_GAIT_RELATIVE        0  /* absolute joint trajectory */
@@ -306,15 +337,15 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_TRACE_RX             0
 #define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
-#define LEGTEST_ENABLE_CLOSED_LOOP   1
+#define LEGTEST_ENABLE_CLOSED_LOOP   0
 #define LEGTEST_ARM_DELAY_MS         3000u
 #define LEGTEST_STOP_BUTTON          1
 #define LEGTEST_MOTION_GAIT          1
 #define LEGTEST_AMPLITUDE_TURNS      0.05f 
 #define LEGTEST_FREQ_HZ              0.25f 
-#define LEGTEST_GAIT_SPEED           0.25f
+#define LEGTEST_GAIT_SPEED           0.5f
 #define LEGTEST_GAIT_ENTRY_MS        2000u
-#define LEGTEST_GAIT_CYCLES          1u
+#define LEGTEST_GAIT_CYCLES          3u
 #define LEGTEST_GAIT_VEL_FF          1   /* master switch; per-joint scale is s_vel_ff[] */
 #define LEGTEST_GAIT_TORQUE_FF       0
 #define LEGTEST_GAIT_IDLE_AFTER      1
@@ -441,6 +472,7 @@ static uint8_t   s_cap_dumped;
 #define EP_JSON_FW_REV    12u
 
 #define EP_AXIS0_VEL_LIMIT          396u   /* float, rw - controller.config.vel_limit */
+#define EP_AXIS0_COMMUT_VEL_SCALE   405u   /* float, rw - controller.config.commutation_vel_scale */
 #define EP_AXIS0_LOAD_ENCODER       294u   /* uint8, rw */
 #define EP_AXIS0_COMMUT_ENCODER     295u   /* uint8, rw */
 #define EP_SPI_ENC0_MAX_ERROR_RATE  673u   /* float, rw */
@@ -889,6 +921,58 @@ static void send_all_gains(void)
  * Set_Limits, 0x00F: velocity limit then current limit, both float32.
  * Sent before arming, so a drive is never in closed loop without them.
  */
+/*
+ * Write commutation_vel_scale and read it back.
+ *
+ * There is no acknowledgement for an SDO write, so the read is the only proof
+ * it landed - and this is a parameter where being wrong has the motor pushing
+ * the wrong way, which is worth one extra frame to confirm.
+ */
+static void send_commut_vel_scale(int j)
+{
+    float want = s_commut_vel_scale[j];
+    float got  = 0.0f;
+
+    if (isnan(want)) { return; }
+    if (!s_joint_live[j]) { return; }
+
+    sdo_write_f32(s_node_id[j], EP_AXIS0_COMMUT_VEL_SCALE, want);
+
+    if (!sdo_read_f32(s_node_id[j], EP_AXIS0_COMMUT_VEL_SCALE, &got))
+    {
+        printf("  %-9s commutation_vel_scale: no reply on readback\r\n",
+               s_joint_name[j]);
+        return;
+    }
+
+    float d = (got > want) ? (got - want) : (want - got);
+
+    printf("  %-9s commutation_vel_scale -> %+.11f%s\r\n",
+           s_joint_name[j], (double)got,
+           (d < 1e-9f) ? "" : "   !! DID NOT TAKE");
+}
+
+static void send_commut_vel_scale_all(void)
+{
+    uint8_t any = 0u;
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        if (!isnan(s_commut_vel_scale[j])) { any = 1u; }
+    }
+    if (!any) { return; }
+
+    printf("\r\ncommutation_vel_scale (endpoint %u), runtime write - a power"
+           " cycle reverts it\r\n",
+           (unsigned)EP_AXIS0_COMMUT_VEL_SCALE);
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        send_commut_vel_scale(j);
+    }
+    printf("\r\n");
+}
+
 static void send_limits(int j)
 {
 #if LEGTEST_SET_VEL_LIMIT
@@ -1774,6 +1858,7 @@ void legtest_init(void)
 #endif
 
     bus_scan();
+    send_commut_vel_scale_all();
     encoder_source_all();
     apply_encoder_config();
     run_calibration();
