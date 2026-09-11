@@ -516,7 +516,8 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  * the routine, so a calibration that was working still ended in a timeout.
  */
 #define LEGTEST_CALIB_TIMEOUT_MS    30000u
-#define LEGTEST_CALIB_START_MS      1500u   /* still IDLE by here = refused */
+#define LEGTEST_CALIB_START_MS      3000u   /* idle AND not busy = refused */
+#define PROC_RESULT_BUSY            1u
 
 /*
  * ---------------------------------------------------------------------------
@@ -1538,6 +1539,28 @@ static void spi_err_rate_one(uint8_t node, const char *name, float rate)
  * ProcedureResult, ODrive 0.6.x. Reported in heartbeat byte 5 and, unlike
  * axis_error, it is what a REFUSED state request sets.
  */
+static const char *axis_state_name(uint8_t st)
+{
+    switch (st)
+    {
+    case 0u:  return "UNDEFINED";
+    case 1u:  return "IDLE";
+    case 2u:  return "STARTUP_SEQUENCE";
+    case 3u:  return "FULL_CALIBRATION_SEQUENCE";
+    case 4u:  return "MOTOR_CALIBRATION";
+    case 6u:  return "ENCODER_INDEX_SEARCH";
+    case 7u:  return "ENCODER_OFFSET_CALIBRATION";
+    case 8u:  return "CLOSED_LOOP_CONTROL";
+    case 9u:  return "LOCKIN_SPIN";
+    case 10u: return "ENCODER_DIR_FIND";
+    case 11u: return "HOMING";
+    case 12u: return "ENCODER_HALL_POLARITY_CALIBRATION";
+    case 13u: return "ENCODER_HALL_PHASE_CALIBRATION";
+    case 14u: return "ANTICOGGING_CALIBRATION";
+    default:  return "unknown";
+    }
+}
+
 static const char *proc_result_name(uint8_t r)
 {
     switch (r)
@@ -1584,21 +1607,6 @@ static uint8_t calibrate_joint(int j)
 
     for (uint32_t ms = 0u; ms < LEGTEST_CALIB_TIMEOUT_MS; ms++)
     {
-        /*
-         * A drive that is going to calibrate leaves IDLE within a few
-         * heartbeats. Still IDLE after LEGTEST_CALIB_START_MS means the
-         * request was REFUSED, not that it is taking its time, so say so now
-         * with the reason instead of sitting out the whole timeout.
-         */
-        if (!started && (ms > LEGTEST_CALIB_START_MS))
-        {
-            printf("  %-9s calibration REFUSED - never left IDLE.\r\n"
-                   "            procedure_result %u (%s)\r\n",
-                   s_joint_name[j], (unsigned)s_joint[j].proc_result,
-                   proc_result_name(s_joint[j].proc_result));
-            return 0u;
-        }
-
         tx_pump();
         legtest_on_rx();
         HAL_Delay(1);
@@ -1611,9 +1619,39 @@ static uint8_t calibrate_joint(int j)
         }
         if (!started)
         {
-            if (s_joint[j].axis_state == ODRV_AXIS_STATE_FULL_CALIB)
+            /*
+             * FULL_CALIBRATION_SEQUENCE is a request, not a state you can
+             * watch for. The axis reports the SUB-routine it is actually
+             * running - MOTOR_CALIBRATION (4), then ENCODER_OFFSET_CALIBRATION
+             * (7) - and may never report 3 at all. Waiting for 3 therefore
+             * never sees the start, and a calibration that is running fine
+             * gets declared refused.
+             *
+             * Anything that is not IDLE means it started.
+             */
+            if (s_joint[j].axis_state != ODRV_AXIS_STATE_IDLE)
             {
                 started = 1u;
+                printf("  %-9s running: state %u (%s)\r\n",
+                       s_joint_name[j], (unsigned)s_joint[j].axis_state,
+                       axis_state_name(s_joint[j].axis_state));
+                continue;
+            }
+
+            /*
+             * Still IDLE. procedure_result BUSY means a routine IS running and
+             * the heartbeat simply has not caught up, so that is not a refusal
+             * - only a drive that is idle, not busy, and out of time is.
+             */
+            if ((ms > LEGTEST_CALIB_START_MS) &&
+                (s_joint[j].proc_result != PROC_RESULT_BUSY))
+            {
+                printf("  %-9s calibration REFUSED - still IDLE after %u ms,"
+                       " procedure_result %u (%s)\r\n",
+                       s_joint_name[j], (unsigned)LEGTEST_CALIB_START_MS,
+                       (unsigned)s_joint[j].proc_result,
+                       proc_result_name(s_joint[j].proc_result));
+                return 0u;
             }
             continue;
         }
@@ -1765,6 +1803,21 @@ static uint8_t define_absolute_zero_one(int j)
     const uint32_t old_n_encoder = s_joint[j].n_encoder;
 
     if (!s_joint_live[j] || !s_define_zero[j]) { return 1u; }
+
+    /*
+     * Never declare a zero on an axis that is still running a routine.
+     * Calibration spins the motor, so a 0x19 sent mid-calibration lands on a
+     * position that is sweeping past - which reads exactly like the command
+     * being ignored, and is how "0x19 DID NOT TAKE" plus a joint apparently
+     * "MOVING while idle" were produced by a calibration that was working.
+     */
+    if (s_joint[j].axis_state != ODRV_AXIS_STATE_IDLE)
+    {
+        printf("  %-9s NOT zeroed - axis is in state %u (%s), not IDLE\r\n",
+               s_joint_name[j], (unsigned)s_joint[j].axis_state,
+               axis_state_name(s_joint[j].axis_state));
+        return 0u;
+    }
 
     /* Set_Absolute_Position takes a float32 position in turns. */
     put_f32(data, 0.0f);
