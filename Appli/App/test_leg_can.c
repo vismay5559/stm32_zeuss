@@ -63,23 +63,19 @@ static const char *const s_mon_name[MONITOR_COUNT] = { "" };
  * always has to cross the reduction, whatever the encoder is doing.
  */
 /*
- * Encoder turns per turn of the OUTPUT shaft. It follows the ENCODER, not the
- * gearbox: 1.0 where the encoder reads the load side, the gear ratio where it
- * reads the motor side.
+ * Output-shaft turns -> what each drive is sent.
  *
- * The hip is 47 TEMPORARILY. Its load-side SPI encoder is not usable - with
- * the drive idle and unpowered its reported position wandered over 24 degrees
- * peak to peak, while the knee on an identical load=5 / commutation=13 setup
- * held to 0.036 degrees, and FULL_CALIBRATION_SEQUENCE came back
- * NOT_CONVERGING. Feeding that into a position loop is a complete explanation
- * for the hip runaway, and no gain can fix a position signal that is wrong.
+ * The drive's position units follow ITS ENCODER, not its gearbox. HIP and
+ * KNEE read their load-side encoders, so one drive turn is one output turn and
+ * a gait value goes to them unscaled. The ANKLE still reads the motor side of
+ * its 9:1, so everything sent to it - position and velocity feedforward alike -
+ * is multiplied by nine.
  *
- * So the hip reads its own onboard motor-side encoder until the SPI encoder is
- * repaired. That costs load-side accuracy - everything after the 47:1, backlash
- * included, is now outside the loop and invisible - but it gives a position
- * signal that is real.
+ * This table is about POSITION units only. It is not a gearbox table:
+ * test_leg_torque.c keeps a separate s_gear[] = { 47, 47, 9 } because torque
+ * always has to cross the reduction, whatever the encoder is doing.
  */
-static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
+static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
 
 /*
  * Controller gains, pushed to every live drive from legtest_init() so all
@@ -114,18 +110,9 @@ static const float s_cmd_scale[JOINT_COUNT] = { 47.0f, 1.0f, 9.0f };
  */
 #define GAIN_KEEP  (-1.0f)
 
-/*
- * The hip is back on the 20 / 1.0 / 5.0 recorded in docs/ODRIVE_COMMANDS.md,
- * which is what it was tuned to when it last read the motor-side encoder
- * (0.06 deg RMS). 5.0 / 8.0 was tuned against the load-side encoder and does
- * not carry across: pos_gain does, because it maps error to velocity in the
- * same units either way, but vel_gain and vel_integrator_gain map encoder
- * turns/s to MOTOR torque, and motor-side velocity is 47x larger for the same
- * joint motion. Carrying 5.0 over would have asked for 47x the damping torque.
- */
 static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 30.0f, 17.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  1.0f,  10.0f,  0.3f };
-static const float s_vel_int_gain[JOINT_COUNT] = {  5.0f,  12.0f,  1.5f };
+static const float s_vel_gain[JOINT_COUNT]     = {  5.0f,  10.0f,  0.3f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  8.0f,  12.0f,  1.5f };
 
 /*
  * Velocity feedforward, scaled PER JOINT.
@@ -581,8 +568,26 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  * encoder needs 1.0.
  */
 #define LEGTEST_SET_ENCODER_SRC  1
+/*
+ * What each joint's LOAD encoder has to be for s_cmd_scale[] to be correct,
+ * checked against the readback every boot. -1 skips the check.
+ *
+ * This exists because the two are a matched pair and nothing else enforces it.
+ * The hip was temporarily moved to ONBOARD_ENCODER0 with a runtime SDO write,
+ * which is NOT saved to the drive - it reverts on a power cycle but survives a
+ * reflash. So a board reflashed back to scale 1 while its drive is still on the
+ * motor-side encoder would command every position 47x too small, silently, with
+ * nothing in the log saying why the leg barely moved. Or 47x too large the
+ * other way round, which is worse.
+ */
+static const int s_enc_expect[JOINT_COUNT] = {
+    5,      /* hip_pitch - SPI_ENCODER0,     load side,  scale 1 */
+    5,      /* knee      - SPI_ENCODER0,     load side,  scale 1 */
+    13,     /* ankle     - ONBOARD_ENCODER0, motor side, scale 9 */
+};
+
 static const int s_enc_src[JOINT_COUNT] = {
-    ODRV_ENC_ID_ONBOARD0,      /* hip_pitch - TEMPORARY, see s_cmd_scale[] */
+    ODRV_ENC_ID_UNKNOWN,       /* hip_pitch - configured in odrivetool */
     ODRV_ENC_ID_UNKNOWN,       /* knee      - configured in odrivetool */
     ODRV_ENC_ID_UNKNOWN,       /* ankle     - configured in odrivetool */
 };
@@ -1461,6 +1466,20 @@ static void encoder_source_one(int j)
            (s_enc_src[j] == ODRV_ENC_ID_UNKNOWN) ? "  [left alone]" : "  [set]",
            (double)s_cmd_scale[j]);
 
+    if ((s_enc_expect[j] >= 0) && ((int)load != s_enc_expect[j]))
+    {
+        printf("  %-9s    !! load encoder is %u but s_cmd_scale %.0f expects"
+               " %d.\r\n"
+               "               Every position sent to this joint would be"
+               " wrong by that ratio.\r\n"
+               "               CLOSED LOOP BLOCKED. If the drive was moved with"
+               " a runtime SDO\r\n"
+               "               write, power it off and on to put it back.\r\n",
+               s_joint_name[j], (unsigned)load, (double)s_cmd_scale[j],
+               s_enc_expect[j]);
+        s_arm_blocked = 1u;
+    }
+
     /*
      * load != commutation is CORRECT on a geared joint and not worth warning
      * about. Commutation needs the electrical angle, which only a motor-side
@@ -1806,40 +1825,24 @@ static void apply_encoder_config(void)
 /*
  * Which joints have their zero DECLARED at boot with CAN 0x19.
  *
- * The KNEE is 0 and should stay that way. It reads a load-side absolute
- * encoder whose reference frame lives in the drive - pos_vel_mapper.config
- * .offset with offset_valid, written by set_abs_pos() and persisted by
- * save_configuration(). The drive applies that offset at power-up, so
- * pos_estimate is already correct before the STM32 says anything, with no
- * homing. Sending 0x19 would destroy it, replacing a calibrated reference with
- * wherever the leg happens to be standing.
+ * Only the ankle. Hip and knee now read load-side absolute encoders whose
+ * reference frame is saved in the drive - pos_vel_mapper.config.offset with
+ * offset_valid, written by set_abs_pos() and persisted by save_configuration().
+ * The drive applies that offset at power-up, so pos_estimate is already correct
+ * before the STM32 says anything, with no homing.
  *
- * The ANKLE is 1 because its encoder is on the motor side of a 9:1. Its
- * +/-35 degrees is 1.75 turns of encoder, so a single-turn absolute reading
+ * Sending 0x19 to those two would DESTROY that: it redefines zero as wherever
+ * the leg is standing right now, silently replacing a calibrated reference with
+ * an arbitrary one. The whole point of the saved frame is that the firmware
+ * does not need to - and must not - re-declare it.
+ *
+ * The ankle is different because its encoder is on the motor side of a 9:1.
+ * Its +/-35 degrees is 1.75 turns of encoder, so a single-turn absolute reading
  * maps to several possible joint angles and no saved offset can disambiguate
  * it. Declaring zero at boot is the only thing available, and it means the
  * ankle must be placed by hand before power-up - see docs/ZEROING.md.
- *
- * The HIP is 1 TEMPORARILY, while the runaway is being chased. Understand what
- * that costs before leaving it on:
- *
- *   - it OVERWRITES the hip's saved reference frame. Whatever zero was set with
- *     set_abs_pos() and saved in the drive is gone, replaced by the pose the
- *     leg is in at boot. Putting the 0 back here does not restore it; it has to
- *     be re-established in odrivetool and saved again.
- *   - zero therefore moves every time you power up, unless you place the leg by
- *     hand in the same pose first. Put the hip where you want zero BEFORE
- *     powering the STM32.
- *   - everything downstream is measured from that new zero: the absolute
- *     trajectory the gait plays, and the +/-30 degree hard stop in
- *     s_limit_deg[]. A boot with the leg 10 degrees off gives the whole run a
- *     10 degree bias and takes 10 degrees off one side of the travel.
- *
- * This runs AFTER run_calibration() in legtest_init(), which is the order it
- * has to be in - FULL_CALIBRATION_SEQUENCE moves the joint and can disturb the
- * position reference, so the zero is declared once calibration has finished.
  */
-static const uint8_t s_define_zero[JOINT_COUNT] = { 1u, 0u, 1u };
+static const uint8_t s_define_zero[JOINT_COUNT] = { 0u, 0u, 1u };
 static uint8_t s_absolute_ref_ok;
 
 static uint8_t define_absolute_zero_one(int j)
