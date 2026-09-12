@@ -110,9 +110,9 @@ static const float s_cmd_scale[JOINT_COUNT] = { 1.0f, 1.0f, 9.0f };
  */
 #define GAIN_KEEP  (-1.0f)
 
-static const float s_pos_gain[JOINT_COUNT]     = { 20.0f, 30.0f, 17.0f };
-static const float s_vel_gain[JOINT_COUNT]     = {  5.0f,  10.0f,  0.3f };
-static const float s_vel_int_gain[JOINT_COUNT] = {  8.0f,  12.0f,  1.5f };
+static const float s_pos_gain[JOINT_COUNT]     = { 30.0f, 30.0f, 17.0f };
+static const float s_vel_gain[JOINT_COUNT]     = {  10.0f,  10.0f,  0.3f };
+static const float s_vel_int_gain[JOINT_COUNT] = {  4.0f,  12.0f,  1.5f };
 
 /*
  * Velocity feedforward, scaled PER JOINT.
@@ -2254,11 +2254,33 @@ static void report(void)
 #if LEGTEST_CAPTURE
 static void cap_dump(void)
 {
-    if (s_cap_dumped || (s_cap_n == 0u))
+    if (s_cap_dumped) { return; }
+
+    s_cap_dumped = 1;
+
+    /*
+     * Say so rather than returning silently. An empty capture and a capture
+     * that was never dumped look identical from the serial port - which is
+     * exactly how a run with the hip unplugged produced no log and no clue.
+     */
+    if (s_cap_n == 0u)
     {
+        printf("\r\n===== TRAJECTORY: NOTHING CAPTURED =====\r\n"
+               "  The gait ran but no samples were recorded. Capture needs a\r\n"
+               "  live joint in CLOSED_LOOP while the gait is running.\r\n"
+               "  Live joints:");
+
+        for (int j = 0; j < JOINT_COUNT; j++)
+        {
+            if (s_joint_live[j])
+            {
+                printf(" %s(state %u)", s_joint_name[j],
+                       (unsigned)s_joint[j].axis_state);
+            }
+        }
+        printf("\r\n\r\n");
         return;
     }
-    s_cap_dumped = 1;
 
     printf("\r\n===== TRAJECTORY, %u samples at %u Hz =====\r\n",
            (unsigned)s_cap_n, (unsigned)CAPTURE_HZ);
@@ -2986,8 +3008,31 @@ void legtest_run(void)
         }
 
 #if LEGTEST_CAPTURE
-        if ((s_cap_n < CAPTURE_MAX) && s_gait_running &&
-            (s_joint[0].axis_state == ODRV_AXIS_STATE_CLOSED_LOOP) &&
+        /*
+         * Record while ANY live joint is in closed loop.
+         *
+         * This used to name s_joint[0] - the hip - directly. Unplug the hip and
+         * its axis_state never becomes CLOSED_LOOP, so the condition was never
+         * true, nothing was recorded, and cap_dump() then returned without a
+         * word because the buffer was empty. A single-joint run gave a perfect
+         * gait and a silent log, with nothing to say the two were connected.
+         *
+         * Nothing here should be tied to one joint by index: which joints are
+         * on the bus is a property of the bench, not of the code.
+         */
+        uint8_t cap_armed = 0u;
+
+        for (int j = 0; j < JOINT_COUNT; j++)
+        {
+            if (s_joint_live[j] &&
+                (s_joint[j].axis_state == ODRV_AXIS_STATE_CLOSED_LOOP))
+            {
+                cap_armed = 1u;
+                break;
+            }
+        }
+
+        if (cap_armed && (s_cap_n < CAPTURE_MAX) && s_gait_running &&
             ((s_tick % (1000u / CAPTURE_HZ)) == 0u))
         {
             for (int j = 0; j < JOINT_COUNT; j++)
