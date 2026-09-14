@@ -207,15 +207,18 @@ static void update_health_leds(void)
  * sign wrong gives a robot that leans both hips the same way and falls over
  * sideways, which looks like a balance problem rather than a table problem.
  *
- * Joint index is bus * 5 + (node - 1), per robot_config.h:
+ * Joint indices are the NEXUS_J_* map in link_proto.h:
  *
- *     left  (bus 0): 0 hip_roll  1 hip_pitch  2 knee  3 ankle  4 unused
- *     right (bus 1): 5 hip_roll  6 hip_pitch  7 knee  8 ankle  9 unused
+ *     bus 0: 0 L hip_pitch  1 L hip_roll  2 L knee  3 L ankle  4 waist_roll
+ *     bus 1: 5 R hip_pitch  6 R hip_roll  7 R knee  8 R ankle  9 waist_pitch
  *
- * THE FIFTH JOINT ON EACH LEG HAS NO REFERENCE. The trajectory has four
- * columns and the robot has five actuators a side, so indices 4 and 9 are held
- * at zero and only the policy's residual moves them. When a five-column table
- * is generated, add the column here and the rest of this file is unchanged.
+ * Each row below says, by name, which table column drives which joint on each
+ * side. Table columns are NOT in node order (see gait_ref.h), so this is the
+ * only place that pairing is made.
+ *
+ * THE WAIST HAS NO REFERENCE. The trajectory has four leg columns and nothing
+ * for the waist, so indices 4 and 9 are held at zero - upright - and only the
+ * policy's residual moves them.
  */
 /*
  * Stride playback rate. 1.0 plays the trajectory at the speed it was optimised
@@ -228,11 +231,19 @@ static float s_ref_turns[NEXUS_NUM_JOINTS];
 
 static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
 {
-    static const uint8_t col[4] = {
-        GAIT_COL_HIP_ROLL, GAIT_COL_HIP_PITCH, GAIT_COL_KNEE, GAIT_COL_ANKLE
+    /* The right leg plays the table as generated; the left mirrors roll only. */
+    static const struct
+    {
+        uint8_t left;
+        uint8_t right;
+        uint8_t col;
+        float   left_sign;
+    } map[4] = {
+        { NEXUS_J_L_HIP_PITCH,   NEXUS_J_R_HIP_PITCH,   GAIT_COL_HIP_PITCH,  1.0f },
+        { NEXUS_J_L_HIP_ROLL,    NEXUS_J_R_HIP_ROLL,    GAIT_COL_HIP_ROLL,  -1.0f },
+        { NEXUS_J_L_KNEE_PITCH,  NEXUS_J_R_KNEE_PITCH,  GAIT_COL_KNEE,       1.0f },
+        { NEXUS_J_L_ANKLE_PITCH, NEXUS_J_R_ANKLE_PITCH, GAIT_COL_ANKLE,      1.0f },
     };
-    /* +1 keeps the right leg as generated; the left leg mirrors roll only. */
-    static const float mirror[4] = { -1.0f, 1.0f, 1.0f, 1.0f };
 
     float right[GAIT_JOINTS];
     float left[GAIT_JOINTS];
@@ -247,8 +258,8 @@ static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
 
     for (int k = 0; k < 4; k++)
     {
-        ref_turns[0 + k] = left[col[k]] * mirror[k];
-        ref_turns[5 + k] = right[col[k]];
+        ref_turns[map[k].left]  = left[map[k].col] * map[k].left_sign;
+        ref_turns[map[k].right] = right[map[k].col];
     }
 }
 
@@ -439,20 +450,14 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
     s_state.contact_ticks[1] = contact_stable_ticks(1);
 
     /*
-     * Reference angles and gait phase come from the gait library, which does
-     * not run on the STM32 yet - only the leg test plays the trajectory. Space
-     * is reserved in the packet so the Pi side can be written against the
-     * final layout now.
-     *
-     * The old note here said the Pi could tell "because phase never advances",
-     * which is indistinguishable from a gait legitimately parked at phase 0.
-     * NEXUS_STREAM_GAIT_LIVE says it outright. Set the bit when the library
-     * lands; silence that has to be inferred is not a protocol.
-     */
-    /*
      * The stride clock. It free-runs at 1 kHz whether or not the Pi is
-     * talking, so the reference is always defined and a policy that stops
-     * sending degrades to the nominal walk rather than to a held pose.
+     * talking, so the reference in the packet is always defined and the policy
+     * can see where in the stride it is before it sends anything.
+     *
+     * It does NOT move the robot on its own. Targets only reach the drives
+     * from an accepted command (reference + residual), so a Pi that stops
+     * sending leaves the last target held until the 200 ms link fault idles
+     * the actuators.
      */
     s_phase += (0.001f * APP_GAIT_SPEED) / GAIT_CYCLE_S;
     if (s_phase >= 1.0f)

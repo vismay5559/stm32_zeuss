@@ -76,6 +76,23 @@ FIELDS = [
 ]
 
 
+# The joint map: each NEXUS_J_* macro in link_proto.h against the name at that
+# index in nexus_proto.JOINT_NAMES. The packets carry no names, so this pairing
+# is the only thing stopping a plot, a policy or a log calling a hip a knee.
+JOINT_MACROS = [
+    ("NEXUS_J_L_HIP_PITCH", "left_hip_pitch"),
+    ("NEXUS_J_L_HIP_ROLL", "left_hip_roll"),
+    ("NEXUS_J_L_KNEE_PITCH", "left_knee_pitch"),
+    ("NEXUS_J_L_ANKLE_PITCH", "left_ankle_pitch"),
+    ("NEXUS_J_WAIST_ROLL", "waist_roll"),
+    ("NEXUS_J_R_HIP_PITCH", "right_hip_pitch"),
+    ("NEXUS_J_R_HIP_ROLL", "right_hip_roll"),
+    ("NEXUS_J_R_KNEE_PITCH", "right_knee_pitch"),
+    ("NEXUS_J_R_ANKLE_PITCH", "right_ankle_pitch"),
+    ("NEXUS_J_WAIST_PITCH", "waist_pitch"),
+]
+
+
 def c_offsets():
     """Compile a probe that prints offsetof() for every field."""
     lines = ['#include <stdio.h>', '#include <stddef.h>', '#include "link_proto.h"',
@@ -84,6 +101,8 @@ def c_offsets():
         lines.append(f'  printf("{name} %zu\\n", offsetof(nexus_state_t, {name}));')
     lines.append('  printf("__size__ %zu\\n", sizeof(nexus_state_t));')
     lines.append('  printf("__cmd__ %zu\\n", sizeof(nexus_cmd_t));')
+    for macro, _ in JOINT_MACROS:
+        lines.append(f'  printf("J:{macro} %d\\n", (int){macro});')
     lines.append('  return 0;}')
 
     with tempfile.TemporaryDirectory() as td:
@@ -153,6 +172,25 @@ def main():
     else:
         print(f"policy block: {P.POLICY_COUNT} float32 at offset "
               f"{P.POLICY_OFFSET}, contiguous")
+
+    # Joint map, C macros against Python names.
+    print()
+    jbad = []
+    if len(P.JOINT_NAMES) != len(JOINT_MACROS):
+        jbad.append(f"JOINT_NAMES has {len(P.JOINT_NAMES)} entries, "
+                    f"expected {len(JOINT_MACROS)}")
+    for macro, name in JOINT_MACROS:
+        idx = c["J:" + macro]
+        got = P.JOINT_NAMES[idx] if 0 <= idx < len(P.JOINT_NAMES) else None
+        if got != name:
+            jbad.append(f"{macro} = {idx}, but JOINT_NAMES[{idx}] is {got!r}")
+    if jbad:
+        bad += 1
+        print("JOINT MAP MISMATCH:")
+        for line in jbad:
+            print("  " + line)
+    else:
+        print(f"joint map: all {len(JOINT_MACROS)} NEXUS_J_* agree with JOINT_NAMES")
 
     print("\n" + ("PROTOCOL MISMATCH" if bad else "C and Python agree"))
     return 1 if bad else 0

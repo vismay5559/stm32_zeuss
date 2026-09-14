@@ -36,9 +36,45 @@
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
 
-#define NEXUS_NUM_JOINTS        10      /* 5 per leg, ODrive order            */
+#define NEXUS_NUM_JOINTS        10      /* see the joint map below            */
 #define NEXUS_NUM_ENCODERS      4       /* AS5048A, after-spring (SEA) joints */
 #define NEXUS_NUM_CONTACTS      4       /* mechanical foot switches           */
+
+/*
+ * THE JOINT MAP - the one definition of which index is which joint.
+ *
+ * Every per-joint array in both packets uses it: joint_pos, joint_vel,
+ * ref_angle, act_torque, act_error, act_state, act_flags, and the command's
+ * residual. The packet carries no names, so a reader that labels these by any
+ * other table is labelling them wrong.
+ *
+ *     index = bus * 5 + (node - 1)      bus 0 = FDCAN1, bus 1 = FDCAN2
+ *
+ *   idx  bus  node   joint
+ *    0    0    1     left_hip_pitch
+ *    1    0    2     left_hip_roll
+ *    2    0    3     left_knee_pitch
+ *    3    0    4     left_ankle_pitch
+ *    4    0    5     waist_roll
+ *    5    1    1     right_hip_pitch
+ *    6    1    2     right_hip_roll
+ *    7    1    3     right_knee_pitch
+ *    8    1    4     right_ankle_pitch
+ *    9    1    5     waist_pitch
+ *
+ * Confirmed against the wiring. The Pi side names them in the same order in
+ * nexus_proto.py JOINT_NAMES; change one, change the other.
+ */
+#define NEXUS_J_L_HIP_PITCH     0
+#define NEXUS_J_L_HIP_ROLL      1
+#define NEXUS_J_L_KNEE_PITCH    2
+#define NEXUS_J_L_ANKLE_PITCH   3
+#define NEXUS_J_WAIST_ROLL      4
+#define NEXUS_J_R_HIP_PITCH     5
+#define NEXUS_J_R_HIP_ROLL      6
+#define NEXUS_J_R_KNEE_PITCH    7
+#define NEXUS_J_R_ANKLE_PITCH   8
+#define NEXUS_J_WAIST_PITCH     9
 
 /*
  * Foot switch order, used by contact[] in the policy block and by the
@@ -84,11 +120,10 @@
  * stream_flags - which optional parts of the packet are actually being
  * produced.
  *
- * ref_angle and phase are reserved space that the STM32 fills with zeros
- * because the gait library does not run here yet. The old comment said the Pi
- * could detect this "because phase never advances", which is
- * indistinguishable from a gait legitimately parked at phase 0. A bit that
- * says so is not a guess.
+ * GAIT_LIVE: ref_angle and phase carry the reference the STM32 is playing.
+ * Robot mode sets it on every packet. It exists so a reader never has to infer
+ * a live gait from phase moving, which cannot tell a gait parked at phase 0
+ * from one that is not running.
  */
 #define NEXUS_STREAM_GAIT_LIVE  (1u << 0)   /* ref_angle and phase are real */
 
@@ -122,9 +157,10 @@ typedef struct __attribute__((packed))
                                                     what the after-spring
                                                     encoders actually measure,
                                                     not an absolute joint angle */
-    float ref_angle[NEXUS_NUM_JOINTS];       /* 152 rad, reference from the gait
-                                                    library. Zero until the
-                                                    library runs on the STM32.  */
+    float ref_angle[NEXUS_NUM_JOINTS];       /* 152 rad, OUTPUT side: the stored
+                                                    gait at `phase`, the value
+                                                    residual[] is added to.
+                                                    Waist joints read 0.        */
     float contact[NEXUS_NUM_CONTACTS];       /* 192 0.0 / 1.0, debounced, in
                                                     NEXUS_CONTACT_* order       */
     float foot_z[2];                         /* 208 m, world. [0] right,
@@ -215,8 +251,12 @@ typedef struct __attribute__((packed))
      *     drive_target[j] = ref_angle[j] + residual[j]
      *
      * Send zeros and the robot walks the stored gait unaided. The policy's job
-     * is only the correction on top, which is why a Pi that stops sending
-     * degrades to a nominal walk rather than to nonsense.
+     * is only the correction on top.
+     *
+     * The drives only move while commands keep arriving. A Pi that stops
+     * sending does NOT fall back to the stored gait: the last accepted target
+     * is held, and after 200 ms without a valid command the link fault takes
+     * the actuators away (safety.c) until the Pi sends ENABLE off, then on.
      *
      * The reference this is added to comes back in the state packet as
      * ref_angle[] (radians) with phase, so the policy can see exactly what it

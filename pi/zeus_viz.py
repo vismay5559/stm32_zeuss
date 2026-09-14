@@ -64,7 +64,7 @@ from typing import Optional
 import rerun as rr
 
 from nexus_link import NexusLink
-from nexus_proto import NexusState
+from nexus_proto import CONTACT_NAMES, JOINT_NAMES, NexusState
 
 # --------------------------------------------------------------------------
 # The estimator publishes at 1 kHz. Plots do not need that - the eye cannot use
@@ -75,11 +75,6 @@ from nexus_proto import NexusState
 # --------------------------------------------------------------------------
 DECIMATE = 5              # 1 kHz / 5 = 200 Hz of plotted data
 
-JOINT_NAMES = [
-    "L_hip_roll", "L_hip_pitch", "L_knee", "L_ankle", "L_spare",
-    "R_hip_roll", "R_hip_pitch", "R_knee", "R_ankle", "R_spare",
-]
-CONTACT_NAMES = ["L_toe", "L_heel", "R_toe", "R_heel"]
 
 
 def setup_styles() -> None:
@@ -90,8 +85,14 @@ def setup_styles() -> None:
     not repeat per frame. Styling belongs here; measurements do not.
     """
     for i, name in enumerate(JOINT_NAMES):
-        # Left leg cool, right leg warm, so a mirrored gait is obvious at a glance.
-        colour = [80, 140, 220] if i < 5 else [220, 120, 60]
+        # Left leg cool, right leg warm, waist neutral - so a mirrored gait is
+        # obvious at a glance.
+        if name.startswith("left"):
+            colour = [80, 140, 220]
+        elif name.startswith("right"):
+            colour = [220, 120, 60]
+        else:
+            colour = [170, 110, 200]
         rr.log(f"joints/pos/{i}", rr.SeriesLines(colors=colour, names=name),
                static=True)
         rr.log(f"joints/ref/{i}",

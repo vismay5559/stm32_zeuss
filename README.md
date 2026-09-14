@@ -367,7 +367,7 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 
 | Setting | Default | Notes |
 |---|---|---|
-| `s_node_id[]` | `{1,2,3,4}` | hip_roll, hip_pitch, knee, ankle. Must match `axis0.config.can.node_id` |
+| `s_node_id[]` | `{1,3,4}` | hip_pitch, knee, ankle. Must match `axis0.config.can.node_id` — see [the joint map](#the-joint-map) |
 | `LEGTEST_ENABLE_CLOSED_LOOP` | **0** | **Safety.** At 0 the axes are never commanded into closed loop, so motors stay unpowered and cannot move — positions are still transmitted, so TX is fully testable |
 | `LEGTEST_MOTION_GAIT` | 1 | 1 = play the reference gait, 0 = single-joint sine |
 | `LEGTEST_GAIT_SPEED` | **0.25** | Fraction of real time. Start low |
@@ -442,10 +442,11 @@ Two conversions happen in the generator, and both are worth knowing:
 - **Degrees → turns is just `/360`.** The spreadsheet is joint angles on the
   output shaft; each ODrive is already configured with its own gear ratio, so no
   reduction factor belongs in the firmware.
-- **Columns are reordered into node order.** The spreadsheet runs hipPitch,
-  hipRoll, knee, ankle; the CAN nodes run hip_roll(1), hip_pitch(2), knee(3),
-  ankle(4). The generator prints the resulting turn ranges so a mix-up is visible
-  before anything moves:
+- **Columns come out in a fixed order that is not the node order.** The
+  table runs hip_roll, hip_pitch, knee, ankle, while node 1 is hip_pitch.
+  Nothing depends on the two matching: every consumer picks a column by name
+  (`GAIT_COL_*`) and decides which joint it drives. The generator prints the
+  resulting turn ranges so a mix-up is visible before anything moves:
 
 ```
   slot        column           degrees            turns
@@ -1253,10 +1254,43 @@ ignore it: it means the loop stopped, and the board came back looking healthy.
 
 ## What the Pi receives
 
-One **422-byte packet every millisecond** (422 KB/s, well under 1% of USB HS).
+One **444-byte packet every millisecond** (444 KB/s, under 1% of USB HS).
 `Appli/App/link_proto.h` and `pi/nexus_proto.py` describe the same bytes;
-`tools/check_proto.py` compares every field offset and both struct sizes, so a
-mismatch is caught rather than debugged.
+`tools/check_proto.py` compares every field offset, both struct sizes and the
+joint map, so a mismatch is caught rather than debugged.
+
+The Pi side of this link is the [zeus_26](https://github.com/vismay5559/zeus_26)
+ROS 2 workspace. Its `zeus_link` package carries copies of `pi/nexus_proto.py`
+and `pi/nexus_link.py`; this repository holds the canonical ones, checked
+against the C header.
+
+### The joint map
+
+Every per-joint array in both packets — `joint_pos`, `joint_vel`, `ref_angle`,
+`act_*`, and the command's `residual` — uses one index:
+
+```
+index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
+```
+
+| index | bus | node | joint |
+|---:|---:|---:|---|
+| 0 | 0 | 1 | left_hip_pitch |
+| 1 | 0 | 2 | left_hip_roll |
+| 2 | 0 | 3 | left_knee_pitch |
+| 3 | 0 | 4 | left_ankle_pitch |
+| 4 | 0 | 5 | waist_roll |
+| 5 | 1 | 1 | right_hip_pitch |
+| 6 | 1 | 2 | right_hip_roll |
+| 7 | 1 | 3 | right_knee_pitch |
+| 8 | 1 | 4 | right_ankle_pitch |
+| 9 | 1 | 5 | waist_pitch |
+
+The packet carries no names, so this table is the only thing labelling them.
+It is defined once in C (`NEXUS_J_*` in `link_proto.h`) and once in Python
+(`JOINT_NAMES` in `pi/nexus_proto.py`), and `tools/check_proto.py` fails if the
+two disagree. The waist joints have no reference in the stored gait and read
+`ref_angle` 0.
 
 ### The policy block
 
@@ -1277,10 +1311,10 @@ obs = np.frombuffer(raw, "<f4", count=52, offset=12)
 | 4 | `joint_pos` | 10 | rad, output side | ODrive |
 | 5 | `joint_vel` | 10 | rad/s, output side | ODrive |
 | 6 | `spring_angle` | 4 | rad | after-spring encoders — **deflection** |
-| 7 | `ref_angle` | 10 | rad | gait library — **reserved, reads 0** |
+| 7 | `ref_angle` | 10 | rad, output side | stored gait at `phase` — what `residual` adds to |
 | 8 | `contact` | 4 | 0.0 / 1.0 | foot switches: L toe, L heel, R toe, R heel |
 | 9 | `foot_z` | 2 | m, world | forward kinematics — **[0] right, [1] left** |
-| 10 | `phase` | 1 | 0..1 | gait clock — **reserved, reads 0** |
+| 10 | `phase` | 1 | 0..1 | stride clock, free-running at 1 kHz |
 
 **Everything is a raw SI quantity.** The STM32 applies no policy scaling — no
 target-height subtraction, no `/10`, no clipping, no sin/cos, no normalisation.
@@ -1304,8 +1338,11 @@ Four things worth understanding:
   cares most about the foot that is off the ground. A foot whose leg cannot be
   read is sent as **NaN** with its `fk_valid` bit clear — never as 0.0, which
   reads as "resting exactly on the ground".
-- **`ref_angle` and `phase` read zero** until the gait library runs on the
-  STM32. The Pi can tell because `phase` never advances.
+- **`ref_angle` is the reference, not a command.** The stride clock runs
+  whether or not the Pi talks, so the policy can see the reference before it
+  sends anything. The drives only move on an accepted command
+  (`ref_angle + residual`); a Pi that stops sending gets the last target held
+  and, 200 ms later, a link fault that idles every axis.
 
 ### The rest of the packet
 
@@ -1762,16 +1799,6 @@ covariance settles. A converged filter built on guessed geometry is
 confidently wrong, and the covariance cannot tell you that. Measure the robot,
 set the flag, and `fusion_usable` starts meaning something.
 
-**The joint map is not confirmed.** `gait_ref.h` (generated from the drive
-configuration) and the old map in `fusion.c` disagreed about which node is
-`hip_roll` and which is `hip_pitch`. `robot_config.c` follows `gait_ref.h`
-because it is generated rather than hand-written, but one of them is wrong and
-only the robot can say which. Same gate applies.
-
-**`ref_angle` and `phase` read zero.** The gait library does not run on the
-STM32 yet; only the leg test plays the trajectory. Space is reserved in the
-packet so the Pi side can be written against the final layout now.
-
 **External flash runs in 1-line mode, not octal.** SFDP init fails at step 11
 (re-reading the SFDP header through the freshly configured octal mode) with
 `EXTMEM_DRIVER_NOR_SFDP_MEMTYPE_CHECK`. 1-line works and is the current setting
@@ -1802,6 +1829,11 @@ killing Boot, the 3-deep FDCAN TX FIFO silently dropping frames to nodes 4 and
 the USB TX buffer being overwritten mid-transfer, the pure-Python CRC that
 could not sustain 1 kHz on a Pi, and the three BNO085 protocol bugs above. Each
 has a guard, a counter, or a test so it cannot come back unnoticed.
+
+The joint map is also settled: node 1 is hip_pitch, node 2 hip_roll, node 5 the
+waist (see [the joint map](#the-joint-map)). `robot_config.c` and
+`build_reference()` had node 1 as hip_roll, taken from a comment in the gait
+generator; both now name their indices with `NEXUS_J_*`.
 
 ---
 

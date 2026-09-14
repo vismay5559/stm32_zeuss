@@ -59,6 +59,30 @@ CONTACT_R_HEEL = 3
 CONTACT_L_FOOT = 1 << 4
 CONTACT_R_FOOT = 1 << 5
 
+CONTACT_NAMES = ("left_toe", "left_heel", "right_toe", "right_heel")
+
+# THE JOINT MAP. Index -> name, identical to NEXUS_J_* in link_proto.h:
+#
+#     index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
+#
+# Every per-joint array in both packets uses it - joint_pos, joint_vel,
+# ref_angle, act_* and the command residual. The packet carries no names, so
+# this tuple is the only thing labelling them. tools/check_proto.py fails if it
+# ever disagrees with the C macros.
+JOINT_NAMES = (
+    "left_hip_pitch",     # 0  bus 0 node 1
+    "left_hip_roll",      # 1  bus 0 node 2
+    "left_knee_pitch",    # 2  bus 0 node 3
+    "left_ankle_pitch",   # 3  bus 0 node 4
+    "waist_roll",         # 4  bus 0 node 5
+    "right_hip_pitch",    # 5  bus 1 node 1
+    "right_hip_roll",     # 6  bus 1 node 2
+    "right_knee_pitch",   # 7  bus 1 node 3
+    "right_ankle_pitch",  # 8  bus 1 node 4
+    "waist_pitch",        # 9  bus 1 node 5
+)
+JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
+
 # --------------------------------------------------------------------------
 # The policy block: 52 contiguous float32 starting at byte 12, holding exactly
 # what the RL observation needs. Slice it out with numpy and skip parsing:
@@ -83,7 +107,7 @@ POLICY_FIELDS = [
     ("joint_pos", 10),      # rad, output side
     ("joint_vel", 10),      # rad/s, output side
     ("spring_angle", 4),    # rad, SPRING DEFLECTION, not absolute joint angle
-    ("ref_angle", 10),      # rad, gait library; zero until it runs on the STM32
+    ("ref_angle", 10),      # rad, output side: the stored gait at `phase`
     ("contact", 4),         # 0.0/1.0, debounced foot switches
     ("foot_z", 2),          # m, world; [0] right, [1] left
     ("phase", 1),           # 0..1 gait clock
@@ -165,7 +189,7 @@ STATE_FORMAT = (
     "10f"    # joint_pos       rad output side
     "10f"    # joint_vel       rad/s output side
     "4f"     # spring_angle    rad deflection
-    "10f"    # ref_angle       rad, reserved
+    "10f"    # ref_angle       rad, stored gait at phase
     "4f"     # contact         0.0 / 1.0
     "2f"     # foot_z          m world: right, left
     "f"      # phase           0..1
@@ -256,7 +280,7 @@ class NexusState:
     joint_pos: List[float]       # rad, output side
     joint_vel: List[float]       # rad/s, output side
     spring_angle: List[float]    # rad, SPRING DEFLECTION (not joint angle)
-    ref_angle: List[float]       # rad, gait library; zero until it runs
+    ref_angle: List[float]       # rad, stored gait at phase; residual adds to it
     contact: List[float]         # 0.0/1.0, four foot switches
     foot_z: List[float]          # m, world; [0] right, [1] left
     phase: float                 # 0..1 gait clock
@@ -342,9 +366,9 @@ class NexusState:
     def gait_live(self) -> bool:
         """True when ref_angle and phase are real.
 
-        They are reserved space filled with zeros until the gait library runs
-        on the STM32. Check this rather than watching phase for movement - a
-        gait parked at phase 0 looks identical to one that does not exist."""
+        Robot mode sets this on every packet. Check it rather than watching
+        phase for movement - a gait parked at phase 0 looks identical to one
+        that is not running."""
         return bool(self.stream_flags & STREAM_GAIT_LIVE)
 
     @property

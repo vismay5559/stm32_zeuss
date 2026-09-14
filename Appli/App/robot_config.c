@@ -3,11 +3,10 @@
 #include <math.h>
 
 /*
- * Joint index = bus * 5 + (node - 1), with gait_ref.h's node layout:
- *
- *   node 1 hip_roll   node 2 hip_pitch   node 3 knee   node 4 ankle
- *
- * Left leg is bus 0 (indices 0..4), right leg bus 1 (indices 5..9).
+ * Which telemetry index feeds each FK slot. The indices are the NEXUS_J_*
+ * joint map in link_proto.h - node 1 hip_pitch, node 2 hip_roll, node 3 knee,
+ * node 4 ankle, left leg on bus 0 and right on bus 1. Node 5 on each bus is a
+ * waist joint and is not part of either leg's chain.
  *
  * Every sign is +1 and every offset 0, which is another way of writing "not
  * measured". Both matter: the sign says whether the drive's positive
@@ -18,17 +17,17 @@
 const joint_src_t g_leg_joints[2][KIN_LEG_JOINTS] = {
     /* --- left leg, bus 0 --- */
     {
-        /* hip_pitch   */ { 1u, 1.0f, 0.0f },   /* node 2 */
-        /* hip_roll    */ { 0u, 1.0f, 0.0f },   /* node 1 */
-        /* knee_pitch  */ { 2u, 1.0f, 0.0f },   /* node 3 */
-        /* ankle_pitch */ { 3u, 1.0f, 0.0f },   /* node 4 */
+        /* hip_pitch   */ { NEXUS_J_L_HIP_PITCH,   1.0f, 0.0f },   /* node 1 */
+        /* hip_roll    */ { NEXUS_J_L_HIP_ROLL,    1.0f, 0.0f },   /* node 2 */
+        /* knee_pitch  */ { NEXUS_J_L_KNEE_PITCH,  1.0f, 0.0f },   /* node 3 */
+        /* ankle_pitch */ { NEXUS_J_L_ANKLE_PITCH, 1.0f, 0.0f },   /* node 4 */
     },
     /* --- right leg, bus 1 --- */
     {
-        /* hip_pitch   */ { 6u, 1.0f, 0.0f },   /* node 2 */
-        /* hip_roll    */ { 5u, 1.0f, 0.0f },   /* node 1 */
-        /* knee_pitch  */ { 7u, 1.0f, 0.0f },   /* node 3 */
-        /* ankle_pitch */ { 8u, 1.0f, 0.0f },   /* node 4 */
+        /* hip_pitch   */ { NEXUS_J_R_HIP_PITCH,   1.0f, 0.0f },   /* node 1 */
+        /* hip_roll    */ { NEXUS_J_R_HIP_ROLL,    1.0f, 0.0f },   /* node 2 */
+        /* knee_pitch  */ { NEXUS_J_R_KNEE_PITCH,  1.0f, 0.0f },   /* node 3 */
+        /* ankle_pitch */ { NEXUS_J_R_ANKLE_PITCH, 1.0f, 0.0f },   /* node 4 */
     },
 };
 

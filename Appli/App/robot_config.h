@@ -50,20 +50,18 @@
  * (see gait_ref.h), which is exactly the joint angle FK wants.
  *
  * ---------------------------------------------------------------------------
- * THE INDICES BELOW ARE NOT CONFIRMED.
+ * WHICH INDEX IS WHICH JOINT is defined once, in link_proto.h (NEXUS_J_*), and
+ * confirmed against the wiring:
  *
- * Two places in this repo describe the node layout and they disagree.
- * gait_ref.h - generated from the real drive configuration - says
+ *     node 1 hip_pitch   node 2 hip_roll   node 3 knee   node 4 ankle
+ *     node 5 waist       (roll on bus 0, pitch on bus 1)
  *
- *     node 1 = hip_roll   node 2 = hip_pitch   node 3 = knee   node 4 = ankle
+ * The table in robot_config.c names its indices with those macros rather than
+ * bare numbers. It used to hold node 1 = hip_roll, taken from a comment in
+ * gait_ref.h; the bench leg runs hip_pitch on node 1, and so does the robot.
  *
- * which, with joint index = bus * 5 + (node - 1), gives the table below. The
- * old map in fusion.c instead had hip_roll at index 1, where gait_ref.h puts
- * hip_pitch. gait_ref.h is followed here because it is generated rather than
- * hand-written, but ONE OF THEM IS WRONG and only the robot can say which.
- *
- * Getting this wrong produces a foot position that is confidently wrong, so it
- * is gated behind ROBOT_CONFIG_CALIBRATED with everything else.
+ * What is still NOT measured is every sign and offset in that table. They stay
+ * gated behind ROBOT_CONFIG_CALIBRATED with the geometry.
  * ---------------------------------------------------------------------------
  */
 

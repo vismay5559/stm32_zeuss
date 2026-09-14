@@ -14,11 +14,14 @@
  * is in degrees; each drive is already configured with its gear ratio, so the
  * conversion is simply /360.
  *
- * Column order is JOINT SLOT order, which follows the CAN node IDs and is not
- * the spreadsheet's column order:
+ * Column order is fixed by the generator and is NOT the CAN node order:
  *
- *   slot 0 = hip_roll  (node 1)      slot 2 = knee   (node 3)
- *   slot 1 = hip_pitch (node 2)      slot 3 = ankle  (node 4)
+ *   col 0 = hip_roll      col 2 = knee
+ *   col 1 = hip_pitch     col 3 = ankle
+ *
+ * Always pick a column with GAIT_COL_*. Which joint a column drives is decided
+ * by the consumer - app.c build_reference(), test_leg_can.c s_gait_col[] -
+ * against the joint map in link_proto.h (NEXUS_J_*).
  */
 
 /* Column index per joint, for picking one out when only some drives exist. */
