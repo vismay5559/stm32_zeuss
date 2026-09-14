@@ -220,6 +220,7 @@ typedef enum
     RUN_WAIT_ARM = 0,     /* countdown; nothing is commanded          */
     RUN_GOTO_ZERO,        /* ramp to absolute zero                    */
     RUN_ENTRY,            /* absolute zero -> trajectory sample 0     */
+    RUN_HOLD_START,       /* sit at sample 0 before the gait starts   */
     RUN_GAIT,             /* the trajectory                           */
     RUN_SETTLE,           /* hold the last pose, briefly              */
     RUN_FAULT_CLEAR,      /* a drive faulted; clearing, then home     */
@@ -328,6 +329,20 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_FREQ_HZ              0.25f 
 #define LEGTEST_GAIT_SPEED           0.5f
 #define LEGTEST_GAIT_ENTRY_MS        2000u
+/*
+ * How long to hold the trajectory's first pose before playing it.
+ *
+ * The entry ramp ends with the joints still settling onto sample 0, and
+ * starting the gait on that instant blends the tail of the ramp into the first
+ * stride. Holding separates the two, and gives a few seconds to look at the
+ * leg on its start pose - a joint that cannot hold it shows in the 1 s status
+ * lines as err growing while cmd stays put.
+ *
+ * The trajectory CSV still starts at the first gait sample, not at the hold:
+ * capture is gated on s_gait_running, which is only set on entering RUN_GAIT.
+ * 0 goes straight from the ramp into the gait, as before.
+ */
+#define LEGTEST_HOLD_START_MS        5000u
 #define LEGTEST_GAIT_CYCLES          3u
 #define LEGTEST_GAIT_VEL_FF          1   /* master switch; per-joint scale is s_vel_ff[] */
 #define LEGTEST_GAIT_TORQUE_FF       0
@@ -2790,6 +2805,32 @@ void legtest_run(void)
                 }
 
                 if (a >= 1.0f)
+                {
+                    phase_enter(RUN_HOLD_START, "AT TRAJECTORY START - holding");
+                }
+                break;
+            }
+
+            /* ---------------------------------------------------------- */
+            case RUN_HOLD_START:
+            {
+                /*
+                 * Exactly where the ramp left the joints, at zero velocity.
+                 *
+                 * The drive-fault check keeps running underneath, so a drive
+                 * that errors while holding still ends the run. The hard stop
+                 * does too, but it only judges the COMMAND - and the command
+                 * here is constant and already inside the limits - so a joint
+                 * that sags away from this pose will not trip it. Watch the
+                 * status lines.
+                 */
+                for (int j = 0; j < JOINT_COUNT; j++)
+                {
+                    target[j]     = first[j];
+                    target_vel[j] = 0.0f;
+                }
+
+                if (phase_alpha(LEGTEST_HOLD_START_MS) >= 1.0f)
                 {
                     s_gait_running = 1;
                     phase_enter(RUN_GAIT, "GAIT");
