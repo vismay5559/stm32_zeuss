@@ -16,3 +16,6 @@ __pycache__/
 # runs/ ARE tracked: they are the record of what each gain setting actually did,
 # and they are small.
 runs/*.png
+
+# Office lock files
+~$*

@@ -165,7 +165,7 @@ static const float s_vel_ff[JOINT_COUNT] = { 1.0f, 1.0f, 0.0f };
  * than leaving the firmware to reassert it on every boot.
  */
 static const float s_commut_vel_scale[JOINT_COUNT] = {
-    -0.00101317122593718f,     /* hip_pitch - sign flipped */
+    0.00101317122593718f,     /* hip_pitch - the drive's own value, sign not flipped */
     NAN,                       /* knee      - leave alone  */
     NAN,                       /* ankle     - leave alone  */
 };
@@ -321,7 +321,7 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_TRACE_RX             0
 #define LEGTEST_LISTEN_ONLY          0
 #define TRACE_LEN                    96u
-#define LEGTEST_ENABLE_CLOSED_LOOP   0
+#define LEGTEST_ENABLE_CLOSED_LOOP   1
 #define LEGTEST_ARM_DELAY_MS         3000u
 #define LEGTEST_STOP_BUTTON          1
 #define LEGTEST_MOTION_GAIT          1
@@ -506,7 +506,7 @@ static uint8_t   s_cap_dumped;
  * SPI link is the thing to go and look at.
  */
 static const float s_spi_err_rate[JOINT_COUNT] = {
-    0.5f,      /* hip_pitch */
+    0.1f,      /* hip_pitch */
     0.1f,      /* knee      */
     0.1f,      /* ankle     */
 };
@@ -537,7 +537,7 @@ static const float s_spi_err_rate[JOINT_COUNT] = {
  * Results are NOT saved. LEGTEST_SDO_SAVE persists them if you want them to
  * survive a power cycle, and that needs a reboot to take effect.
  */
-#define LEGTEST_CALIBRATE_JOINTS    { 0 }   /* index 0 = hip_pitch */
+#define LEGTEST_CALIBRATE_JOINTS    { -1 }   /* index 0 = hip_pitch */
 /*
  * FULL_CALIBRATION_SEQUENCE is motor calibration followed by encoder offset
  * calibration and genuinely takes 15-25 s on an S1. 5000 ms was shorter than
