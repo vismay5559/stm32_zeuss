@@ -133,41 +133,70 @@ sync_from_cubemx.sh              pull generated files back from the CubeMX folde
 
 ## Building
 
-Requires STM32CubeCLT (provides `arm-none-eabi-gcc`, CMake, Ninja and
-STM32CubeProgrammer).
+Requires STM32CubeCLT, or STM32CubeIDE, which bundles the same tools
+(`arm-none-eabi-gcc`, CMake, Ninja, STM32CubeProgrammer). On Linux with
+CubeIDE they are not on `PATH`; this finds them whatever the versions:
 
 ```bash
-cmake --preset Debug
-cmake --build build/Debug
+for d in /opt/st/stm32cubeide_*/plugins/com.st.stm32cube.ide.mcu.externaltools.{gnu-tools-for-stm32,ninja,cmake,cubeprogrammer}.*/tools/bin; do PATH="$d:$PATH"; done; export PATH
+```
+
+### Choosing the mode
+
+The mode is the `#define NEXUS_MODE` line in `Appli/App/nexus_mode.h` unless
+you override it. **Look at that line before building.** Test modes are
+bring-up binaries, and `NEXUS_MODE_LEG_CAN` with `LEGTEST_ENABLE_CLOSED_LOOP 1`
+arms the leg's motors at boot.
+
+**The everyday way: edit that line and rebuild.** No clean is needed -
+changing the header rebuilds the Appli in the new mode:
+
+```bash
+cmake --preset Release          # once, on a fresh clone
+cmake --build --preset Release  # after every edit
+```
+
+To pick the mode without editing the header instead, on a clean tree, with the
+variable **exported** so both steps see it:
+
+```bash
+rm -rf build Appli/build Boot/build
+export NEXUS_MODE=NEXUS_MODE_ROBOT          # or NEXUS_MODE_LEG_CAN, _IMU, _LEG_TORQUE
+cmake --preset Release
+cmake --build --preset Release
+unset NEXUS_MODE
+```
+
+All of that is needed, and each part was found by getting it wrong:
+
+- **Export it, do not prefix one command.** The top level builds Appli as an
+  `ExternalProject`, which configures during `cmake --build`, not during
+  `cmake --preset`. `NEXUS_MODE=... cmake --preset Release` sets the variable
+  for a step that never reads it; the build then prints
+  `Nexus mode: from Appli/App/nexus_mode.h` and uses the header.
+- **Clean first.** The mode is cached in `Appli/build`, so a changed variable
+  is ignored by an already-configured tree. And deleting `Appli/build` alone
+  fails: the step stamps under `build/` still say Appli is configured, and the
+  build tries to `cd` into the missing directory.
+
+**Do not mix the two.** A build run with `NEXUS_MODE` in the environment
+caches it in `Appli/build`, and from then on it silently overrides the header -
+edits to `nexus_mode.h` do nothing until `build`, `Appli/build` and
+`Boot/build` are removed.
+
+The build prints the mode (`Nexus mode: NEXUS_MODE_ROBOT (overrides
+nexus_mode.h)`). Confirm what you are about to flash:
+
+```bash
+strings Appli/build/nexus_first_Appli.elf | grep -m1 -E "APPLI: mode = |entering app_init"
+#   entering app_init()     -> ROBOT
+#   APPLI: mode = LEG_CAN   -> the leg test
 ```
 
 `--preset Debug` is for bring-up. **Flight firmware is `--preset Release`** —
 this loop has a 1 ms budget and the estimator's predict step alone is two 21x21
 matrix products, so an unoptimised build is not a slower robot, it is a
 different one.
-
-```bash
-cmake --preset Release
-cmake --build build/Release
-```
-
-Either preset builds the **robot loop** by default. A test-mode binary looks
-exactly like a dead link from the Pi's side, so selecting one is deliberate and
-goes through the environment rather than an edit to `nexus_mode.h`:
-
-```bash
-NEXUS_MODE=NEXUS_MODE_LEG_CAN cmake --preset Debug
-cmake --build build/Debug
-```
-
-(An environment variable rather than `-D` because the top-level project
-configures `Appli/` through `ExternalProject_Add`, whose arguments live in the
-CubeMX-generated `mx-generated.cmake`. A `-D` on the outer command never
-reaches the inner project; the environment does. `-D` works when configuring
-`Appli/` on its own.)
-
-The configure step prints the mode and warns when it is not `NEXUS_MODE_ROBOT`,
-and the board prints it again on the serial console at boot.
 
 Outputs, per context:
 
@@ -311,13 +340,24 @@ The ARM toolchain action is pinned to a commit rather than a moving tag.
 Two separate commands. **The Appli needs an external loader**; the Boot does not.
 
 ```bash
+# the external loader - Linux with CubeIDE
+ST_LOADER=$(ls /opt/st/stm32cubeide_*/plugins/*cubeprogrammer*/tools/bin/ExternalLoader/MX25UW25645G_NUCLEO-H7S3L8.stldr)
+# Windows with CubeCLT:
+#   C:/ST/STM32CubeCLT_1.22.0/STM32CubeProgrammer/bin/ExternalLoader/MX25UW25645G_NUCLEO-H7S3L8.stldr
+
 # Appli -> external flash at 0x70000000
-STM32_Programmer_CLI -c port=SWD mode=UR \
-  -el "C:/ST/STM32CubeCLT_1.22.0/STM32CubeProgrammer/bin/ExternalLoader/MX25UW25645G_NUCLEO-H7S3L8.stldr" \
-  -d Appli/build/nexus_first_Appli.hex -v
+STM32_Programmer_CLI -c port=SWD mode=UR -el "$ST_LOADER" \
+  -d Appli/build/nexus_first_Appli.hex -v -rst
 
 # Boot -> internal flash at 0x08000000
 STM32_Programmer_CLI -c port=SWD mode=UR -d Boot/build/nexus_first_Boot.elf -v -rst
+```
+
+The serial console is the ST-LINK's virtual COM port, 115200 8N1 -
+`/dev/ttyACM0` on Linux when it is the only one:
+
+```bash
+python3 -m serial.tools.miniterm /dev/ttyACM0 115200      # ctrl-] to quit
 ```
 
 Notes:
