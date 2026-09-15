@@ -1,6 +1,8 @@
 #include "test_leg_can.h"
 #include "gait_ref.h"
 #include "critical.h"
+#include "leg_stream.h"
+#include "link_usb.h"
 #include "main.h"
 #include <math.h>
 #include <stdio.h>
@@ -365,6 +367,13 @@ static uint8_t limits_ok(const float *entry_from)
 #define LEGTEST_RETURN_ZERO_DELAY_MS 2000u
 #define LEGTEST_RETURN_ZERO_MS       2000u
 #define LEGTEST_CAPTURE              1
+/*
+ * Stream the run to the Pi over the USB user port, 1 kHz, as the same state
+ * packet robot mode sends (leg_stream.c) - so link_check, link_node and Rerun
+ * show the leg live. Send-only: commands from the Pi are received and dropped,
+ * nothing from USB can move the leg in this mode. Costs nothing with no cable.
+ */
+#define LEGTEST_USB_STREAM           1
 #define CAPTURE_HZ                   100u
 #define CAPTURE_MAX                  2048u
 
@@ -2111,8 +2120,51 @@ void legtest_init(void)
     HAL_TIM_Base_Start(&htim2);
     HAL_TIM_Base_Start_IT(&htim6);
 
+#if LEGTEST_USB_STREAM
+    /* Moves the USB buffers into DMA-safe memory, as robot mode does. */
+    link_usb_init();
+    printf("\r\nUSB: streaming the state packet at 1 kHz on the USB user port\r\n"
+           "     (on the Pi: link_check, or rerun) - commands from it are ignored\r\n");
+#endif
+
     printf("\r\n=========== CAN-FD SINGLE LEG TEST ===========\r\n");
 }
+
+#if LEGTEST_USB_STREAM
+/* Everything the leg test knows, into one state packet, once per tick. */
+static void usb_stream_tick(void)
+{
+    static nexus_state_t       pkt;
+    leg_stream_joint_t         joints[JOINT_COUNT];
+    const leg_stream_status_t  status = {
+        .seq          = s_tick,
+        .timestamp_us = __HAL_TIM_GET_COUNTER(&htim2),
+        .gait_phase   = s_gait_phase,
+        .gait_running = s_gait_running,
+        .stopped      = s_stopped,
+        .can_dropped  = s_txq_drop,
+        .can_bus_off  = s_busoff_count,
+    };
+
+    for (int j = 0; j < JOINT_COUNT; j++)
+    {
+        joints[j].node        = s_node_id[j];
+        joints[j].scale       = s_cmd_scale[j];
+        joints[j].pos_turns   = s_joint[j].pos;
+        joints[j].vel_turns_s = s_joint[j].vel;
+        joints[j].cmd_turns   = s_joint[j].cmd;
+        joints[j].torque      = s_joint[j].torque;
+        joints[j].axis_error  = s_joint[j].axis_error;
+        joints[j].axis_state  = s_joint[j].axis_state;
+        joints[j].live        = s_joint_live[j];
+        joints[j].fresh       = (s_joint[j].n_encoder > 0u) &&
+                                ((s_tick - s_joint[j].last_rx_tick) < 50u);
+    }
+
+    leg_stream_fill(&pkt, joints, JOINT_COUNT, &status);
+    (void)link_usb_send_state(&pkt);    /* never blocks; skips if USB is busy */
+}
+#endif
 
 static const char *lec_name(uint32_t lec)
 {
@@ -3047,6 +3099,11 @@ void legtest_run(void)
             tx_slot = (tx_slot + 1) % JOINT_COUNT;
 #endif
         }
+
+#if LEGTEST_USB_STREAM
+        /* Every tick, stopped or not: the view on the Pi should show a stop. */
+        usb_stream_tick();
+#endif
 
 #if LEGTEST_CAPTURE
         /*

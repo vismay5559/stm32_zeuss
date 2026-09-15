@@ -125,6 +125,10 @@ run_suite test_safety \
     "$HERE/test_safety.c" \
     "$APP/safety.c"
 
+run_suite test_leg_stream \
+    "$HERE/test_leg_stream.c" \
+    "$APP/leg_stream.c"
+
 run_suite test_fusion \
     "$HERE/test_fusion.c" \
     "$APP/fusion.c" \

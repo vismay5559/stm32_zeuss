@@ -414,6 +414,7 @@ Configuration lives at the top of `Appli/App/test_leg_can.c`:
 | `LEGTEST_GAIT_ENTRY_MS` | 2000 | Ramp from the measured pose into the trajectory |
 | `LEGTEST_USE_CAN_FD` | **0** | Classic CAN 2.0 @ 1 Mbit. Measured: this S1 sends CLASSIC frames and will not acknowledge FD ones |
 | `LEGTEST_LISTEN_ONLY` | 0 | Never transmit. Use to verify reception without risking bus-off |
+| `LEGTEST_USB_STREAM` | 1 | Send the run to the Pi over the USB user port at 1 kHz, as the robot's state packet. Send-only. See [Testing the USB link to the Pi](#testing-the-usb-link-to-the-pi) |
 | `LEGTEST_STOP_BUTTON` | 1 | Blue USER button commands IDLE and latches. **Not an e-stop** — it rides the same CAN bus |
 | `LEGTEST_GAIT_CYCLES` | 1 | Play this many cycles then hold. 0 loops forever |
 | `LEGTEST_VEL_POKE` | 0 | Command a constant velocity instead of positions, to test whether the drive can produce torque at all |
@@ -1289,6 +1290,117 @@ ignore it: it means the loop stopped, and the board came back looking healthy.
 > `HEALTH_EXPECTED_MASK='(HEALTH_TIMING|HEALTH_IMU)' cmake --preset Debug`.
 > The configure step warns whenever it is narrowed, because subsystems outside
 > the mask cannot fault and the failsafe therefore cannot act on them.
+
+---
+
+## Testing the USB link to the Pi
+
+### What the link is
+
+The Nucleo has two USB ports, and they do different jobs:
+
+| port | what it is | used for |
+|---|---|---|
+| **ST-LINK** | debugger | flashing, and the text console (`/dev/ttyACM0` on a laptop, 115200) |
+| **USB user port** | the H7S3's USB OTG HS, embedded PHY, **480 Mbit/s** | the robot's data link to the Pi |
+
+On the user port the board is a USB *device* and the Pi is the *host*. It shows
+up as a serial port (USB CDC, `/dev/ttyACM*`, USB ID `0483:5740`) and carries
+binary packets, not text: a 444-byte state packet every millisecond out, 52-byte
+commands in. Plug it into any USB port on the Pi.
+
+What sends packets depends on the mode:
+
+| mode | packets |
+|---|---|
+| `NEXUS_MODE_ROBOT` | the full state, always |
+| `NEXUS_MODE_LEG_CAN` | **the leg test's run** — its joints, targets, torques and drive states — with `LEGTEST_USB_STREAM 1`. Commands from the Pi are received and ignored: nothing on USB can move the leg in this mode |
+| `NEXUS_MODE_IMU`, `_LEG_TORQUE` | none — the port enumerates but stays silent |
+
+In the leg test the packet is filled by `leg_stream.c` (host-tested). The bench
+leg is on FDCAN1, bus 0, so by the [joint map](#the-joint-map) its drives appear
+as the **left** leg whichever physical leg it is: node 1 → `left_hip_pitch`,
+node 3 → `left_knee_pitch`, node 4 → `left_ankle_pitch`. `ref_angle` is the
+target the test last sent; everything the test does not have — estimator, IMU,
+springs, feet — reads as absent (identity quaternions, `foot_z` NaN, fusion
+INVALID), and `stream_flags` carries `NEXUS_STREAM_LEG_TEST`.
+
+The other half of this link is the [zeus_26](https://github.com/vismay5559/zeus_26)
+workspace; the commands below run in a clone of it.
+
+### Level 1 — the cable enumerates
+
+Any mode. On the Pi (or laptop), with the user port plugged in:
+
+```bash
+lsusb | grep 0483:5740       # STMicroelectronics Virtual COM Port
+lsusb -t                     # that device's line must say 480M
+sudo dmesg | tail            # "new high-speed USB device" ... "cdc_acm ... ttyACMn"
+```
+
+| result | meaning |
+|---|---|
+| not listed | cable in the ST-LINK port, a charge-only cable, or the Appli is not running (check the console) |
+| `12M` / "full-speed" | enumerated, but not at high speed: swap the cable or port. 12 Mbit/s cannot carry 1 kHz of packets |
+| `480M` | the cable and the PHY are good |
+
+### Level 2 — packets arrive intact
+
+```bash
+cd zeus_26
+PYTHONPATH=zeus_link python3 -m zeus_link.link_check --joints
+```
+
+Healthy is **~1000 Hz, 0.000% lost, 0 junk B**; the second column says
+`LEG TEST` or `ROBOT`. No ROS needed, and it sends nothing to the board.
+
+| result | meaning |
+|---|---|
+| `no STM32 USB link found` | not enumerated — go back to level 1 |
+| 0 Hz | enumerated but silent: IMU or LEG_TORQUE mode, or the Appli is stuck |
+| junk bytes climbing | something else has the port — usually ModemManager on Ubuntu; install `zeus_bringup/config/99-zeus-stm32.rules` |
+| lost > 0 | packets the board sent and the Pi did not read in time |
+
+One leg-test detail: once a second the test prints its status over the ST-LINK
+console, which blocks for a few tens of ms. Those ticks are not sent. `seq`
+counts processed ticks, so this does not show as loss — but a plot drawn
+against `seq` runs slightly short of wall-clock time.
+
+### Level 3 — watch it live on your laptop
+
+Rerun's viewer runs on the laptop; the Pi reads the port and streams to it over
+the network. Both on the same Wi-Fi or Ethernet.
+
+**Laptop**, once, then each time:
+
+```bash
+python3 -m venv --system-site-packages ~/rerun_venv && ~/rerun_venv/bin/pip install rerun-sdk   # once
+~/rerun_venv/bin/rerun          # opens the viewer and waits
+hostname -I                     # the laptop's IP
+```
+
+**Pi**, once — the same `rerun_venv` commands, and a clone of zeus_26. Then:
+
+```bash
+cd zeus_26
+PYTHONPATH=zeus_rerun:zeus_link ~/rerun_venv/bin/python -m zeus_rerun.rerun_serial \
+    --connect <LAPTOP_IP> --degrees
+```
+
+Start the leg test. The **Joints** tab shows each joint's actual angle against
+the target, in degrees, live — the same comparison as the captured CSV plots,
+without the copy and paste. The seven joints not on the bench stay at zero.
+Use the same `rerun-sdk` version on both machines.
+
+With ROS on the Pi instead, the same view comes through `/zeus/state`:
+
+```bash
+source ~/rerun_venv/bin/activate
+ros2 launch zeus_bringup robot.launch.py rerun:=connect rerun_host:=<LAPTOP_IP> rerun_degrees:=true
+```
+
+**No Pi yet?** Plug the user port into the laptop and run level 2 there, then
+`... rerun_serial --spawn --degrees` instead of `--connect`.
 
 ---
 

@@ -152,6 +152,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/imu_bno085.c
     App/act_odrive.c
     App/link_usb.c
+    App/leg_stream.c
 )
 
 # Link directories setup

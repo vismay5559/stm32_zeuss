@@ -143,6 +143,7 @@ FK_LEFT_VALID = 1 << 1
 
 # stream_flags - which optional parts of the packet are really being produced
 STREAM_GAIT_LIVE = 1 << 0
+STREAM_LEG_TEST = 1 << 1    # from the single-leg bench test, not the robot loop
 
 ACT_TELEM_FRESH = 1 << 0
 ACT_HB_FRESH = 1 << 1

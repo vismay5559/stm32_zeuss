@@ -127,6 +127,16 @@
  */
 #define NEXUS_STREAM_GAIT_LIVE  (1u << 0)   /* ref_angle and phase are real */
 
+/*
+ * LEG_TEST: this packet comes from the single-leg bench test (NEXUS_MODE_LEG_CAN,
+ * leg_stream.c), not the robot loop. Only the joints that test drives are real -
+ * joint_pos, joint_vel, ref_angle (the target it sent) and act_* at their
+ * joint-map indices. The estimator, IMU, spring encoders and foot switches are
+ * not running: quaternions read identity, foot_z NaN, fused_valid INVALID.
+ * Commands sent back are ignored.
+ */
+#define NEXUS_STREAM_LEG_TEST   (1u << 1)
+
 typedef struct __attribute__((packed))
 {
     /* ---- header ------------------------------------------------ 0 */
