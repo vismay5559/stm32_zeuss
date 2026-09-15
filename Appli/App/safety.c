@@ -10,6 +10,22 @@ static uint8_t        s_reject_run;      /* consecutive rejections           */
 
 static uint8_t        s_have_seq;        /* has any command been accepted?   */
 static uint32_t       s_last_seq;
+
+/*
+ * Whether s_last_seq is a baseline to hold the next command against. Separate
+ * from s_have_seq, which also gates the slew limit and must not change.
+ *
+ * Cleared by an explicit ENABLE off. The Pi's counter starts from 0 whenever
+ * its link node starts, so a baseline only a reboot of this board could clear
+ * made every command from a restarted Pi look stale: rejected, which faulted
+ * the board, whose required enable-off handshake then led straight back to
+ * rejection. The robot could not be re-armed without power-cycling the STM32.
+ *
+ * ENABLE off is where a new command session starts - it is already mandatory
+ * before re-arming after a fault - so the baseline starts again there. Replays
+ * and out-of-order frames within a session are refused exactly as before.
+ */
+static uint8_t        s_seq_valid;
 static float          s_last_pos[NEXUS_NUM_JOINTS];
 
 /*
@@ -29,6 +45,7 @@ void safety_init(void)
     s_reject_run  = 0;
     s_have_seq    = 0;
     s_last_seq    = 0;
+    s_seq_valid   = 0;
     s_needs_rearm = 0;
     s_arm_wait    = 0;
     memset(s_last_pos, 0, sizeof(s_last_pos));
@@ -222,6 +239,9 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
 
         s_arm_wait = 0;
 
+        /* A new command session starts here - see s_seq_valid. */
+        s_seq_valid = 0;
+
         if (s_state == SAFETY_ARMED)
         {
             s_state = SAFETY_IDLE;
@@ -245,7 +265,7 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
      * are examined, so a stuck sender cannot keep an old target alive.
      * Signed difference handles the 32-bit wrap without a special case.
      */
-    if (s_have_seq)
+    if (s_seq_valid)
     {
         int32_t advance = (int32_t)(cmd->seq - s_last_seq);
 
@@ -286,6 +306,7 @@ uint8_t safety_accept_command(const nexus_cmd_t *cmd,
     s_reject_run = 0;
     s_last_seq   = cmd->seq;
     s_have_seq   = 1;
+    s_seq_valid  = 1;
 
     /* targets_out was filled by targets_are_sane, which is also what the slew
        limit compared against - so the two can never disagree. */

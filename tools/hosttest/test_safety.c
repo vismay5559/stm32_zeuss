@@ -322,6 +322,65 @@ static void test_replayed_and_stale_seq(void)
           "treated a wrapped sequence number as stale");
 }
 
+/*
+ * The Pi's command counter starts from 0 every time its link node starts. A
+ * sequence check that only a reboot of THIS board resets would read every
+ * command of the new session as stale - rejected until the new counter passed
+ * the old one, which after a few minutes of running is never in practice. The
+ * rejections fault the board, the enable-off handshake clears the fault, the
+ * next enabled command is rejected again, and the robot cannot be re-armed.
+ *
+ * An explicit ENABLE off is where a new command session begins, and it is
+ * already required before re-arming after a fault, so that is where the
+ * sequence baseline resets. Replays WITHIN a session stay refused.
+ */
+static void test_new_session_after_restart(void)
+{
+    printf("a restarted Pi, counting from 0 again, can re-arm after ENABLE off\n");
+
+    float t[NEXUS_NUM_JOINTS];
+
+    arm(0.0f);
+    for (int i = 0; i < 1000; i++)
+    {
+        nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+        (void)safety_accept_command(&c, s_ref, t);
+    }
+    CHECK(safety_state() == SAFETY_ARMED, "setup: not armed after 1000 commands");
+
+    /* The old session ends; the link faults while nothing is sending. */
+    safety_tick(HEALTH_LINK);
+    CHECK(safety_state() == SAFETY_FAULT, "setup: link loss did not fault");
+
+    /* New session: counter restarts, handshake first. */
+    s_seq = 0;
+    nexus_cmd_t off = make_cmd(0.0f, 0);
+    (void)safety_accept_command(&off, s_ref, t);
+    safety_tick(0);
+    CHECK(safety_state() == SAFETY_IDLE, "handshake did not return to IDLE");
+
+    nexus_cmd_t on = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&on, s_ref, t) == 1,
+          "refused the new session's first enabled command (seq %u after %u)",
+          (unsigned)on.seq, 1001u);
+    CHECK(safety_state() == SAFETY_ARMED, "new session did not re-arm");
+
+    /* Protection within the new session is unchanged. */
+    CHECK(safety_accept_command(&on, s_ref, t) == 0, "accepted a replay in the new session");
+
+    /* A routine stand-down and resume, same Pi, counter continuing: still fine. */
+    nexus_cmd_t down = make_cmd(0.0f, 0);
+    (void)safety_accept_command(&down, s_ref, t);
+    nexus_cmd_t up = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    CHECK(safety_accept_command(&up, s_ref, t) == 1, "refused resume after stand-down");
+
+    /* ...and an old frame replayed after that stand-down is not a new session. */
+    nexus_cmd_t stale = up;
+    stale.seq = up.seq - 3u;
+    CHECK(safety_accept_command(&stale, s_ref, t) == 0,
+          "accepted an older frame after a stand-down and resume");
+}
+
 static void test_sustained_garbage_faults(void)
 {
     printf("a sustained run of bad commands faults the link\n");
@@ -492,6 +551,7 @@ int main(void)
     test_rejects_nan_and_out_of_range();
     test_slew_limit();
     test_replayed_and_stale_seq();
+    test_new_session_after_restart();
     test_sustained_garbage_faults();
     test_good_command_passes_through_intact();
     test_arms_the_drives_before_commanding();

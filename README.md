@@ -1220,7 +1220,7 @@ FAULT <--------- HEALTH_LINK or HEALTH_TIMING ------ ARMED
 | | |
 |---|---|
 | Set `CMD_ENABLE` | `link.send_command(...)` does this by default. Without the flag nothing reaches the actuators. |
-| Advance `seq` | Replayed or out-of-order frames are refused. `NexusLink` handles this. |
+| Advance `seq` | Replayed or out-of-order frames are refused within a command session. A session starts at every command with `CMD_ENABLE` off, so a restarted Pi counting from 0 again is accepted after its handshake. `NexusLink` handles this. |
 | Stand down cleanly | `link.stand_down()` at the end of a run, so the axes idle instead of holding torque. |
 | Re-arm after a fault | A latched fault clears only after a command with `CMD_ENABLE` **off**, then one with it on. `stand_down()` then `send_command()`. |
 
