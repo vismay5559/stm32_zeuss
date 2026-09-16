@@ -28,20 +28,23 @@ void fusion_init(void);
 /*
  * Call once per 1 kHz tick, after the sensors have been serviced.
  *
- *   imu       latest sample; prediction runs only when BOTH the accelerometer
- *             and gyro sequence numbers have moved
- *   act       actuator telemetry, positions in turns - the source of every
- *             joint angle forward kinematics uses
- *   contacts  debounced contact bitmask from contact.c
- *   now_us    free-running microsecond counter, for the real dt
- *
- * The spring encoders are deliberately absent. They measure deflection, not
- * joint angle, and feeding them to forward kinematics is what this used to get
- * wrong; they reach the Pi as spring_angle for the torque calculation and play
- * no part in the estimate.
+ *   imu           latest sample; prediction runs only when BOTH the
+ *                 accelerometer and gyro sequence numbers have moved
+ *   act           actuator telemetry, positions in turns: the motor side of
+ *                 every leg joint, and both waist joints
+ *   spring_rad    spring deflections in NEXUS_ENC_* order, from
+ *                 robot_spring_deflection(): ADDED to the motor side of hip
+ *                 pitch and knee, since link = motor + deflection
+ *   spring_valid  enc_valid bitmask; a spring that is not valid, or reads
+ *                 beyond its travel, is treated as unknown rather than zero
+ *   contacts      debounced bitmask from contact.c - each of the four switches
+ *                 (NEXUS_CONTACT_*_BIT) is its own contact point
+ *   now_us        free-running microsecond counter, for the real dt
  */
 void fusion_tick(const imu_sample_t *imu,
                  const act_telemetry_t *act,
+                 const float spring_rad[NEXUS_NUM_ENCODERS],
+                 uint8_t spring_valid,
                  uint8_t contacts,
                  uint32_t now_us);
 
@@ -72,5 +75,8 @@ uint8_t fusion_status(void);
  * simply starting up.
  */
 uint32_t fusion_converged_ticks(void);
+
+/* How many contact points (of the four) the filter is using right now. */
+uint8_t fusion_num_contacts(void);
 
 #endif /* FUSION_H */

@@ -2,7 +2,6 @@
 #define INEKF_H
 
 #include "lie_group.h"
-#include "kinematics.h"
 
 /*
  * Contact-aided right-invariant EKF.
@@ -20,13 +19,11 @@
  * X are stored separately: the bottom rows of that matrix are always identity,
  * so carrying them buys nothing and costs a lot of multiply-by-zero.
  *
- * Contacts are a fixed pair of slots (left, right) with an active flag rather
- * than a resizing matrix. A slot that is inactive has its rows and columns in
- * P zeroed, which makes it inert in every product.
+ * Contacts are INEKF_MAX_CONTACTS fixed slots with an active flag rather than
+ * a resizing matrix. A slot that is inactive has its rows and columns in P
+ * zeroed, which makes it inert in every product. The filter does not care what
+ * a slot is; fusion.c uses one per foot switch, in NEXUS_CONTACT_* order.
  */
-
-#define INEKF_CONTACT_LEFT    0
-#define INEKF_CONTACT_RIGHT   1
 
 /* Error-state indices, in the fixed layout described in lie_group.h. */
 #define INEKF_IDX_PHI     0
@@ -44,7 +41,6 @@ typedef struct
     inekf_real_t noise_gyro_bias;     /* rad/s^2   */
     inekf_real_t noise_accel_bias;    /* m/s^3     */
     inekf_real_t noise_contact_vel;   /* m/s, foot-slip model */
-    inekf_real_t noise_encoder;       /* rad       */
 
     /* Initial covariance, standard deviations. */
     inekf_real_t init_orientation;
@@ -72,7 +68,7 @@ typedef struct
 
     inekf_real_t P[INEKF_STRIDE * INEKF_STRIDE];
 
-    /* Scratch, kept here rather than on the stack: these are 1.7 kB each and
+    /* Scratch, kept here rather than on the stack: these are 2.9 kB each and
        the 1 kHz loop runs on the main stack. */
     inekf_real_t Phi[INEKF_STRIDE * INEKF_STRIDE];
     inekf_real_t tmpA[INEKF_STRIDE * INEKF_STRIDE];
@@ -122,8 +118,15 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
                    const inekf_real_t *accel, inekf_real_t dt);
 
 /*
- * Contact management. B_p_BC is the contact position in the body frame from
- * forward kinematics; J_p is its 3x4 Jacobian w.r.t. that leg's joint angles.
+ * Contact management.
+ *
+ *   B_p_BC   contact position in the body (IMU) frame, from forward kinematics
+ *   B_cov    its 3x3 covariance in the body frame, row-major: J * Sigma_q * J^T,
+ *            the joint-angle noise pushed through the leg Jacobian
+ *
+ * The filter takes the covariance rather than the Jacobian so it does not need
+ * to know how many joints a leg has or how noisy each one is - that is
+ * fusion.c's business.
  */
 /*
  * Tell the estimator a foot has just landed, and roughly where it is.
@@ -133,7 +136,7 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
  * be called when the foot really is planted.
  */
 void inekf_add_contact(inekf_t *f, int slot,
-                       const inekf_real_t *B_p_BC, const inekf_real_t *J_p);
+                       const inekf_real_t *B_p_BC, const inekf_real_t *B_cov);
 /*
  * Tell the estimator a foot has lifted. It stops being an anchor, and the
  * estimator no longer has that particular fixed point to correct against.
@@ -155,7 +158,7 @@ void inekf_remove_contact(inekf_t *f, int slot);
  * estimate degrades while it is in the air.
  */
 void inekf_update_contact(inekf_t *f, int slot,
-                          const inekf_real_t *B_p_BC, const inekf_real_t *J_p);
+                          const inekf_real_t *B_p_BC, const inekf_real_t *B_cov);
 
 /* --- accessors --- */
 /* How high the robot's body is above the floor, in metres. */

@@ -106,12 +106,6 @@ run_suite test_health \
     "$HERE/test_health.c" \
     "$APP/health.c"
 
-run_suite test_kinematics \
-    "$HERE/test_kinematics.c" \
-    "$APP/kinematics.c" \
-    "$APP/lie_group.c" \
-    "$APP/robot_config.c"
-
 run_suite test_zeus_kinematics \
     "$HERE/test_zeus_kinematics.c" \
     "$APP/zeus_kinematics.c"
@@ -138,7 +132,7 @@ run_suite test_fusion \
     "$APP/fusion.c" \
     "$APP/inekf.c" \
     "$APP/lie_group.c" \
-    "$APP/kinematics.c" \
+    "$APP/zeus_kinematics.c" \
     "$APP/robot_config.c"
 
 run_suite test_robot_config \

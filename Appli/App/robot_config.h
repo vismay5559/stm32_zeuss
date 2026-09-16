@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include "link_proto.h"
-#include "kinematics.h"
 
 /*
  * Everything about THIS robot that the firmware cannot work out for itself.
@@ -17,6 +16,10 @@
  *
  * ---------------------------------------------------------------------------
  * NOTHING BELOW HAS BEEN MEASURED ON THE ROBOT.
+ *
+ * The leg GEOMETRY is no longer here: it comes from the robot's URDF, via
+ * tools/gen_kinematics.py into zeus_kinematics_model.h. What is left is what a
+ * CAD model cannot know - which way each sensor counts and where its zero is.
  *
  * While ROBOT_CONFIG_CALIBRATED is 0 the estimator will not report
  * NEXUS_FUSION_OK, no matter how well its covariance converges. That is
@@ -32,53 +35,80 @@
 /* ===================================================================== */
 
 /*
- * Forward kinematics needs four angles per leg, in chain order:
+ * Forward kinematics (zeus_kinematics.h) needs eight angles per leg:
  *
- *     [ hip_pitch, hip_roll, knee_pitch, ankle_pitch ]
+ *   hip_pitch, hip_roll, knee_pitch, ankle_pitch   from that leg's ODrives
+ *   hip_pitch_spring, knee_pitch_spring            from that leg's AS5047Ps
+ *   waist_pitch, waist_roll                        from the waist ODrives
  *
- * ALL FOUR COME FROM THE ODRIVES.
+ * A series-elastic joint's real angle is the motor side PLUS the spring's
+ * deflection: the ODrive's encoder sits after the gearbox but before the
+ * spring, and the AS5047P measures only how far the spring has wound up. The
+ * kinematics model has them as two joints on one axis, which is that sum.
  *
- * This is a correction. fusion.c used to take hip_pitch and knee from the
- * AS5047P encoders, but those encoders sit AFTER the series springs and
- * measure spring deflection, not an absolute joint angle - which both the
- * README ("spring_angle is deflection, not a joint angle") and app.c say
- * explicitly. Feeding a 0..2pi raw deflection in as a hip angle put the foot
- * somewhere it had never been, and the contact update then dragged the whole
- * state towards it.
+ * (An older version took hip_pitch and knee from the AS5047Ps INSTEAD of the
+ * drives, reading a deflection as a joint angle and putting the foot somewhere
+ * it had never been. The fix after that dropped the springs altogether, which
+ * is off by the deflection - a few degrees under load, centimetres at the
+ * foot. Both halves are needed.)
  *
  * The drives report output-shaft position with the gear ratio already applied
- * (see gait_ref.h), which is exactly the joint angle FK wants.
+ * (see gait_ref.h).
  *
  * ---------------------------------------------------------------------------
- * WHICH INDEX IS WHICH JOINT is defined once, in link_proto.h (NEXUS_J_*), and
- * confirmed against the wiring:
+ * WHICH INDEX IS WHICH JOINT is defined once, in link_proto.h (NEXUS_J_*,
+ * NEXUS_ENC_*), and confirmed against the wiring:
  *
  *     node 1 hip_pitch   node 2 hip_roll   node 3 knee   node 4 ankle
  *     node 5 waist       (roll on bus 0, pitch on bus 1)
  *
- * The table in robot_config.c names its indices with those macros rather than
- * bare numbers. It used to hold node 1 = hip_roll, taken from a comment in
- * gait_ref.h; the bench leg runs hip_pitch on node 1, and so does the robot.
- *
- * What is still NOT measured is every sign and offset in that table. They stay
- * gated behind ROBOT_CONFIG_CALIBRATED with the geometry.
+ * What is still NOT measured is every sign and offset in these tables. The
+ * convention they must match is the URDF's: every pitch joint positive about
+ * the robot's +Y (left), every roll joint positive about +X (forward), zero
+ * where the URDF was exported. TO MEASURE: put the robot in the URDF's zero
+ * pose, read each drive, and store the negated reading as the offset; then
+ * move each joint by hand in its positive direction and flip the sign if the
+ * reading went the other way.
  * ---------------------------------------------------------------------------
  */
 
 typedef struct
 {
     uint8_t act_index;   /* index into act_telemetry_t.pos                */
-    float   sign;        /* +1 or -1, to match the FK sign convention     */
+    float   sign;        /* +1 or -1, to match the URDF's sign convention */
     float   offset;      /* radians added after the sign: the joint zero  */
 } joint_src_t;
 
-/* Chain-order slots into the tables below. */
+/* Slots in g_leg_joints[leg][], same order as ZEUS_KIN_Q_* 0..3. */
 #define ROBOT_JOINT_HIP_PITCH    0
 #define ROBOT_JOINT_HIP_ROLL     1
 #define ROBOT_JOINT_KNEE         2
 #define ROBOT_JOINT_ANKLE        3
+#define ROBOT_LEG_MOTORS         4
 
-extern const joint_src_t g_leg_joints[2][KIN_LEG_JOINTS];   /* [0]=left [1]=right */
+extern const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS];   /* [0]=left [1]=right */
+
+/* The two waist joints, shared by both legs' chains. */
+#define ROBOT_WAIST_PITCH        0
+#define ROBOT_WAIST_ROLL         1
+
+extern const joint_src_t g_waist_joints[2];
+
+/* Each leg's spring encoders, NEXUS_ENC_* indices: [leg][0] hip, [leg][1] knee. */
+#define ROBOT_SPRING_HIP         0
+#define ROBOT_SPRING_KNEE        1
+
+extern const uint8_t g_leg_springs[2][2];
+
+/*
+ * The largest deflection a spring can physically reach. A reading beyond it is
+ * not a deflection: an unmeasured zero (the raw angle of wherever the magnet
+ * happens to sit), a slipped magnet, or a garbled read. The estimator treats
+ * such a reading as unknown rather than bending the leg by it.
+ *
+ * TO MEASURE: the spring's mechanical travel. 20 degrees is a generous guess.
+ */
+#define ROBOT_SPRING_MAX_DEFLECTION_RAD   0.35f
 
 /* ===================================================================== */
 /*  Spring encoders                                                       */
@@ -97,31 +127,19 @@ extern const joint_src_t g_leg_joints[2][KIN_LEG_JOINTS];   /* [0]=left [1]=righ
  * step straight into the torque estimate.
  *
  * TO MEASURE: unload the leg so the spring is at rest, read the raw counts
- * off the console, and put them here. One reading per encoder.
+ * off the console, and put them here. One reading per encoder. Then hold the
+ * motor in position and push the link in the joint's positive direction: the
+ * deflection must read positive, or flip the sign.
  */
 typedef struct
 {
-    uint16_t zero_counts;   /* raw AS5047P reading at zero deflection */
-    float    sign;          /* +1 or -1, so positive means wind-up     */
+    uint16_t zero_counts;   /* raw AS5047P reading at zero deflection          */
+    float    sign;          /* +1 or -1: positive when the link has turned
+                               further in its joint's positive direction than
+                               the motor side, so link = motor + deflection   */
 } spring_enc_cal_t;
 
 extern const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS];
-
-/* ===================================================================== */
-/*  Geometry                                                              */
-/* ===================================================================== */
-
-/*
- * Link lengths and hip offsets. Previously hard-coded in kin_defaults() as
- * suspiciously round numbers - 0.30 / 0.30 / 0.05 - which is what a
- * placeholder looks like. TO MEASURE: hip pivot to knee pivot, knee pivot to
- * ankle pivot, ankle pivot to the sole's contact point, and the lateral
- * offset from the IMU/body origin to each hip.
- */
-#define ROBOT_THIGH_LENGTH_M    0.30f
-#define ROBOT_SHANK_LENGTH_M    0.30f
-#define ROBOT_FOOT_HEIGHT_M     0.05f
-#define ROBOT_HIP_OFFSET_Y_M    0.05f
 
 /* Convenience for anything that wants to say "this is not trustworthy yet". */
 /*

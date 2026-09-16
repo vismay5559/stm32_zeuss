@@ -138,7 +138,7 @@ static void test_calibration_flag_matches_the_data(void)
 
     for (int leg = 0; leg < 2; leg++)
     {
-        for (int j = 0; j < KIN_LEG_JOINTS; j++)
+        for (int j = 0; j < ROBOT_LEG_MOTORS; j++)
         {
             if (g_leg_joints[leg][j].offset != 0.0f)
             {

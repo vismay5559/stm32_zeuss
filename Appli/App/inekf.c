@@ -17,7 +17,6 @@ void inekf_default_params(inekf_params_t *p)
     p->noise_gyro_bias   = 0.001f;
     p->noise_accel_bias  = 0.001f;
     p->noise_contact_vel = 0.05f;
-    p->noise_encoder     = 0.0175f;
 
     p->init_orientation  = 0.5236f;   /* 30 deg */
     p->init_velocity     = 1.0f;
@@ -56,7 +55,7 @@ void inekf_reset(inekf_t *f)
      *
      * There is deliberately no init_contact parameter. A new contact does not
      * start from a fixed prior - inekf_add_contact() gives it the position
-     * block's covariance plus the encoder noise through the leg Jacobian,
+     * block's covariance plus the kinematic measurement covariance,
      * which is what equation 32 says. The parameter that used to sit here was
      * never read by anything.
      */
@@ -311,21 +310,24 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
         }
     }
 
-    /* tmpB = Phi * P ; P = tmpB * Phi^T */
-    lg_matn_mul(f->tmpB, Phi, f->P, NDIM);
-    lg_matn_mul_bt(f->P, f->tmpB, Phi, NDIM);
-
-    /* tmpB = Phi * Qbar ; tmpA = tmpB * Phi^T  (tmpA is free again) */
-    lg_matn_mul(f->tmpB, Phi, Qb, NDIM);
-    lg_matn_mul_bt(f->tmpA, f->tmpB, Phi, NDIM);
-
+    /*
+     * Phi P Phi^T + Phi (Qbar dt) Phi^T  ==  Phi (P + Qbar dt) Phi^T.
+     *
+     * Same result, half the work: two n x n products instead of four. At 27
+     * states each product is ~20k multiply-accumulates, and this runs at
+     * 400 Hz on the same tick as up to four contact updates.
+     */
     for (int i = 0; i < NDIM; i++)
     {
         for (int j = 0; j < NDIM; j++)
         {
-            f->P[IDX(i, j)] += f->tmpA[IDX(i, j)] * dt;
+            Qb[IDX(i, j)] = f->P[IDX(i, j)] + Qb[IDX(i, j)] * dt;
         }
     }
+
+    /* tmpB = Phi * (P + Qbar dt) ; P = tmpB * Phi^T */
+    lg_matn_mul(f->tmpB, Phi, Qb, NDIM);
+    lg_matn_mul_bt(f->P, f->tmpB, Phi, NDIM);
 
     lg_matn_symmetrise(f->P, NDIM);
 }
@@ -334,8 +336,17 @@ void inekf_predict(inekf_t *f, const inekf_real_t *omega,
 /*  Contact management                                                     */
 /* --------------------------------------------------------------------- */
 
+/* The kinematic covariance, rotated from the body frame into the world:
+   N = R * B_cov * R^T. */
+static void world_cov(inekf_real_t N[9], const inekf_real_t R[9], const inekf_real_t B_cov[9])
+{
+    inekf_real_t RC[9];
+    lg_mat3_mul(RC, R, B_cov);
+    lg_mat3_mul_bt(N, RC, R);
+}
+
 void inekf_add_contact(inekf_t *f, int slot,
-                       const inekf_real_t *B_p_BC, const inekf_real_t *J_p)
+                       const inekf_real_t *B_p_BC, const inekf_real_t *B_cov)
 {
     if ((slot < 0) || (slot >= INEKF_MAX_CONTACTS) || f->active[slot])
     {
@@ -355,8 +366,8 @@ void inekf_add_contact(inekf_t *f, int slot,
      * Covariance augmentation, equation 32.
      *
      * The new contact's error starts equal to the position error, so its block
-     * inherits the position block and its cross-covariances - then the encoder
-     * noise mapped through R*J_p is added.
+     * inherits the position block and its cross-covariances - then the
+     * kinematic measurement covariance, rotated into the world, is added.
      *
      * The Python does this with an explicit F matrix; here the same result is
      * written directly, since F is only a copy of the position rows.
@@ -387,31 +398,14 @@ void inekf_add_contact(inekf_t *f, int slot,
         }
     }
 
-    /* Add R J_p Sigma_enc J_p^T R^T to the new block. */
-    inekf_real_t RJ[3 * KIN_LEG_JOINTS];
-    for (int r = 0; r < 3; r++)
-    {
-        for (int c = 0; c < KIN_LEG_JOINTS; c++)
-        {
-            inekf_real_t s = 0.0f;
-            for (int k = 0; k < 3; k++)
-            {
-                s += f->R[r * 3 + k] * J_p[k * KIN_LEG_JOINTS + c];
-            }
-            RJ[r * KIN_LEG_JOINTS + c] = s;
-        }
-    }
-    const inekf_real_t se = f->params.noise_encoder * f->params.noise_encoder;
+    /* Add R * B_cov * R^T to the new block. */
+    inekf_real_t N3[9];
+    world_cov(N3, f->R, B_cov);
     for (int r = 0; r < 3; r++)
     {
         for (int c = 0; c < 3; c++)
         {
-            inekf_real_t s = 0.0f;
-            for (int k = 0; k < KIN_LEG_JOINTS; k++)
-            {
-                s += RJ[r * KIN_LEG_JOINTS + k] * RJ[c * KIN_LEG_JOINTS + k];
-            }
-            f->P[IDX(dr + r, dr + c)] += se * s;
+            f->P[IDX(dr + r, dr + c)] += N3[r * 3 + c];
         }
     }
 
@@ -448,7 +442,7 @@ void inekf_remove_contact(inekf_t *f, int slot)
 /* --------------------------------------------------------------------- */
 
 void inekf_update_contact(inekf_t *f, int slot,
-                          const inekf_real_t *B_p_BC, const inekf_real_t *J_p)
+                          const inekf_real_t *B_p_BC, const inekf_real_t *B_cov)
 {
     if ((slot < 0) || (slot >= INEKF_MAX_CONTACTS) || !f->active[slot])
     {
@@ -507,32 +501,13 @@ void inekf_update_contact(inekf_t *f, int slot,
         }
     }
 
-    /* N = R J_p Sigma_enc J_p^T R^T - encoder noise pushed through the leg. */
-    inekf_real_t RJ[3 * KIN_LEG_JOINTS];
-    for (int r = 0; r < 3; r++)
+    /* N = R * B_cov * R^T - the joint noise, pushed through the leg by fusion.c
+       and rotated into the world here. */
+    inekf_real_t N3[9];
+    world_cov(N3, f->R, B_cov);
+    for (int i = 0; i < 9; i++)
     {
-        for (int c = 0; c < KIN_LEG_JOINTS; c++)
-        {
-            inekf_real_t s = 0.0f;
-            for (int k = 0; k < 3; k++)
-            {
-                s += f->R[r * 3 + k] * J_p[k * KIN_LEG_JOINTS + c];
-            }
-            RJ[r * KIN_LEG_JOINTS + c] = s;
-        }
-    }
-    const inekf_real_t se = f->params.noise_encoder * f->params.noise_encoder;
-    for (int r = 0; r < 3; r++)
-    {
-        for (int c = 0; c < 3; c++)
-        {
-            inekf_real_t s = 0.0f;
-            for (int k = 0; k < KIN_LEG_JOINTS; k++)
-            {
-                s += RJ[r * KIN_LEG_JOINTS + k] * RJ[c * KIN_LEG_JOINTS + k];
-            }
-            S[r * 3 + c] += se * s;
-        }
+        S[i] += N3[i];
     }
 
     /* Invert the 3x3 S by cofactors. */
@@ -628,49 +603,46 @@ void inekf_update_contact(inekf_t *f, int slot,
      *
      * The simpler P <- (I-KH)P is equivalent in exact arithmetic but loses
      * symmetry and positive-definiteness quickly in single precision. Joseph
-     * form costs one more product and is what keeps this stable at float.
+     * form is what keeps this stable at float.
+     *
+     * It is computed without ever forming I-KH as a dense matrix. H has only
+     * six non-zero columns (+I at p, -I at d_k), so both products collapse to
+     * rank-3 corrections, each O(n^2 * 3) instead of O(n^3):
+     *
+     *   M  = (I-KH) P    = P - K (H P)          H P = (P H^T)^T, since P = P^T
+     *   P' = M (I-KH)^T  = M - (M H^T) K^T
+     *   P' += K N K^T
+     *
+     * The same numbers as the dense form - tools/hosttest/test_inekf.c checks
+     * it against one - for about a tenth of the work at 27 states, which is
+     * what lets four contacts fit where two used to.
      */
-    inekf_real_t *A = f->tmpA;    /* A = I - K H */
-    lg_matn_identity(A, NDIM);
+    inekf_real_t *M = f->tmpA;
     for (int i = 0; i < NDIM; i++)
     {
-        for (int c = 0; c < 3; c++)
+        for (int j = 0; j < NDIM; j++)
         {
-            A[IDX(i, INEKF_IDX_P + c)] -= K[i][c];
-            A[IDX(i, dr + c)]          += K[i][c];
+            M[IDX(i, j)] = f->P[IDX(i, j)] - (K[i][0] * PHt[j][0] +
+                                              K[i][1] * PHt[j][1] +
+                                              K[i][2] * PHt[j][2]);
         }
     }
 
-    lg_matn_mul(f->tmpB, A, f->P, NDIM);
-    lg_matn_mul_bt(f->P, f->tmpB, A, NDIM);
-
-    /* + K N K^T.  N is the encoder term already folded into S, so recompute
-       it here from RJ rather than keeping another copy. */
-    inekf_real_t N3[9];
-    for (int r = 0; r < 3; r++)
-    {
-        for (int c = 0; c < 3; c++)
-        {
-            inekf_real_t s = 0.0f;
-            for (int k = 0; k < KIN_LEG_JOINTS; k++)
-            {
-                s += RJ[r * KIN_LEG_JOINTS + k] * RJ[c * KIN_LEG_JOINTS + k];
-            }
-            N3[r * 3 + c] = se * s;
-        }
-    }
     for (int i = 0; i < NDIM; i++)
     {
-        inekf_real_t KN[3];
+        inekf_real_t MHt[3], KN[3];
         for (int c = 0; c < 3; c++)
         {
-            KN[c] = K[i][0] * N3[0 * 3 + c] +
-                    K[i][1] * N3[1 * 3 + c] +
-                    K[i][2] * N3[2 * 3 + c];
+            MHt[c] = M[IDX(i, INEKF_IDX_P + c)] - M[IDX(i, dr + c)];
+            KN[c]  = K[i][0] * N3[0 * 3 + c] +
+                     K[i][1] * N3[1 * 3 + c] +
+                     K[i][2] * N3[2 * 3 + c];
         }
         for (int j = 0; j < NDIM; j++)
         {
-            f->P[IDX(i, j)] += KN[0] * K[j][0] + KN[1] * K[j][1] + KN[2] * K[j][2];
+            f->P[IDX(i, j)] = M[IDX(i, j)]
+                            - (MHt[0] * K[j][0] + MHt[1] * K[j][1] + MHt[2] * K[j][2])
+                            + (KN[0]  * K[j][0] + KN[1]  * K[j][1] + KN[2]  * K[j][2]);
         }
     }
 

@@ -1,7 +1,7 @@
 /*
  * Host test for fusion.c - the bridge between the sensors and the estimator.
  *
- * fusion.c, inekf.c, lie_group.c and kinematics.c touch no hardware at all:
+ * fusion.c, inekf.c, lie_group.c and zeus_kinematics.c touch no hardware at all:
  * they take structs in and produce a state estimate. That makes them the part
  * of this firmware most worth testing on a workstation, and until now the only
  * way to run a line of any of it was to flash a robot.
@@ -32,12 +32,19 @@ static int s_fail;
 
 static imu_sample_t    s_imu;
 static act_telemetry_t s_act;
+static float           s_spring[NEXUS_NUM_ENCODERS];
+static uint8_t         s_spring_valid;
 static uint32_t        s_now_us;
+
+#define ALL_SWITCHES  ((uint8_t)(NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_HEEL_BIT | \
+                                 NEXUS_CONTACT_R_TOE_BIT | NEXUS_CONTACT_R_HEEL_BIT))
 
 static void fixtures_reset(void)
 {
     memset(&s_imu, 0, sizeof(s_imu));
     memset(&s_act, 0, sizeof(s_act));
+    memset(s_spring, 0, sizeof(s_spring));
+    s_spring_valid = 0x0Fu;
     s_now_us = 0;
 
     s_imu.quat[0] = 1.0f;
@@ -62,7 +69,7 @@ static void tick(uint8_t inertial, uint8_t contacts)
         s_imu.seq++;
     }
 
-    fusion_tick(&s_imu, &s_act, contacts, s_now_us);
+    fusion_tick(&s_imu, &s_act, s_spring, s_spring_valid, contacts, s_now_us);
 }
 
 static void age_all_joints(uint16_t by)
@@ -103,7 +110,7 @@ static void test_quat_only_frames_do_not_propagate(void)
         s_imu.quat_seq++;
         s_imu.seq++;                    /* the shared counter moves too */
         s_now_us += 1000u;
-        fusion_tick(&s_imu, &s_act, 0u, s_now_us);
+        fusion_tick(&s_imu, &s_act, s_spring, s_spring_valid, 0u, s_now_us);
     }
 
     nexus_state_t after;
@@ -146,15 +153,10 @@ static void test_inertial_frames_do_propagate(void)
           "velocity did not move under a sustained 2 m/s^2 acceleration");
 }
 
-/*
- * The estimator used to take hip_pitch and knee from the spring encoders,
- * which measure deflection rather than joint angle. It now takes all four
- * joint angles from the drives - so moving a drive must move the foot, and
- * the encoders must have no say in it at all.
- */
+/* Moving a leg's drives must move that leg's foot. */
 static void test_foot_follows_the_drives(void)
 {
-    printf("foot height follows the drives, and only the drives\n");
+    printf("foot height follows the drives\n");
 
     fixtures_reset();
     fusion_init();
@@ -244,6 +246,112 @@ static void test_faulted_axis_invalidates_its_leg(void)
 }
 
 /*
+ * A series-elastic joint's real angle is the motor side plus the spring. So a
+ * knee whose drive reads 0.10 rad with 0.05 rad of spring wind-up must put the
+ * foot exactly where a rigid knee at 0.15 rad would - not at 0.10 (springs
+ * ignored) and not at 0.05 (spring read as the joint angle), which are the two
+ * ways this has been wrong before.
+ */
+static float left_foot_z_after(float knee_drive_rad, float knee_spring_rad, uint8_t valid)
+{
+    fixtures_reset();
+    fusion_init();
+
+    s_act.pos[g_leg_joints[0][ROBOT_JOINT_KNEE].act_index] = knee_drive_rad / 6.28318531f;
+    s_spring[g_leg_springs[0][ROBOT_SPRING_KNEE]] = knee_spring_rad;
+    s_spring_valid = valid;
+    tick(1, 0);
+
+    nexus_state_t st;
+    memset(&st, 0, sizeof(st));
+    fusion_fill_state(&st);
+    return st.foot_z[1];                    /* [1] = left */
+}
+
+static void test_spring_deflection_adds_to_the_drive(void)
+{
+    printf("a spring's deflection adds to its drive's angle\n");
+
+    float rigid   = left_foot_z_after(0.15f, 0.00f, 0x0Fu);
+    float sprung  = left_foot_z_after(0.10f, 0.05f, 0x0Fu);
+    float ignored = left_foot_z_after(0.10f, 0.00f, 0x0Fu);
+
+    CHECK(fabsf(sprung - rigid) < 1e-5f,
+          "drive 0.10 + spring 0.05 put the left foot at %f, a rigid 0.15 at %f",
+          (double)sprung, (double)rigid);
+    CHECK(fabsf(ignored - rigid) > 1e-4f,
+          "setup: 0.05 rad of knee made no difference to the foot");
+}
+
+static void test_an_unreadable_spring_is_not_believed(void)
+{
+    printf("an invalid or impossible spring reading is not bent into the leg\n");
+
+    float rigid = left_foot_z_after(0.10f, 0.00f, 0x0Fu);
+
+    /* The encoder says 0.05 but its valid bit is clear. */
+    uint8_t without_left_knee = (uint8_t)(0x0Fu & ~(1u << NEXUS_ENC_L_KNEE_PITCH));
+    float invalid = left_foot_z_after(0.10f, 0.05f, without_left_knee);
+    CHECK(fabsf(invalid - rigid) < 1e-5f,
+          "an invalid spring reading still moved the foot (%f vs %f)",
+          (double)invalid, (double)rigid);
+
+    /* Valid, but a full radian: no spring winds up that far. This is what an
+       unmeasured encoder zero looks like. */
+    float impossible = left_foot_z_after(0.10f, 1.0f, 0x0Fu);
+    CHECK(fabsf(impossible - rigid) < 1e-5f,
+          "a 1 rad 'deflection' was bent into the leg (%f vs %f)",
+          (double)impossible, (double)rigid);
+}
+
+/* The waist sits between the IMU and both legs. */
+static void test_a_faulted_waist_invalidates_both_legs(void)
+{
+    printf("a faulted waist axis invalidates both legs\n");
+
+    fixtures_reset();
+    fusion_init();
+    tick(1, 0);
+
+    s_act.axis_error[g_waist_joints[ROBOT_WAIST_PITCH].act_index] = 0x20u;
+    tick(1, 0);
+
+    nexus_state_t st;
+    memset(&st, 0, sizeof(st));
+    fusion_fill_state(&st);
+
+    CHECK(st.fk_valid == 0u,
+          "fk_valid = 0x%02X with the waist pitch axis faulted, expected 0", st.fk_valid);
+}
+
+/* Toe and heel are separate contact points, each keyed off its own switch. */
+static void test_each_switch_is_its_own_contact(void)
+{
+    printf("each foot switch is its own contact point\n");
+
+    fixtures_reset();
+    fusion_init();
+
+    tick(1, (uint8_t)(NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_FOOT));
+    CHECK(fusion_num_contacts() == 1u, "left toe alone gave %u contacts", fusion_num_contacts());
+
+    tick(1, (uint8_t)(NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_HEEL_BIT | NEXUS_CONTACT_L_FOOT));
+    CHECK(fusion_num_contacts() == 2u, "left toe and heel gave %u contacts", fusion_num_contacts());
+
+    tick(1, (uint8_t)(ALL_SWITCHES | NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT));
+    CHECK(fusion_num_contacts() == 4u, "all four switches gave %u contacts", fusion_num_contacts());
+
+    /* Heel lifts, toe stays: the per-foot bit is still set, but only one
+       point is still planted. */
+    tick(1, (uint8_t)(NEXUS_CONTACT_R_TOE_BIT | NEXUS_CONTACT_R_FOOT));
+    CHECK(fusion_num_contacts() == 1u, "right toe alone gave %u contacts", fusion_num_contacts());
+
+    /* The per-foot bit on its own is not a contact point. */
+    tick(1, (uint8_t)(NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT));
+    CHECK(fusion_num_contacts() == 0u, "foot bits alone gave %u contacts", fusion_num_contacts());
+}
+
+/*
  * The whole point of the calibration gate: a filter can converge beautifully
  * onto geometry that does not match the robot, and the Pi cannot tell the
  * difference from the covariance alone.
@@ -256,7 +364,7 @@ static void test_never_reports_ok_while_uncalibrated(void)
     fusion_init();
 
     /* Stand on both feet and run for well past the convergence hold time. */
-    uint8_t both = (uint8_t)(NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
+    uint8_t both = (uint8_t)(ALL_SWITCHES | NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
 
     for (int i = 0; i < 3000; i++)
     {
@@ -293,7 +401,7 @@ static void test_no_nan_in_a_healthy_run(void)
     fixtures_reset();
     fusion_init();
 
-    uint8_t both = (uint8_t)(NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
+    uint8_t both = (uint8_t)(ALL_SWITCHES | NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
 
     for (int i = 0; i < 1000; i++)
     {
@@ -330,6 +438,10 @@ int main(void)
     test_foot_follows_the_drives();
     test_stale_leg_reports_nan_not_zero();
     test_faulted_axis_invalidates_its_leg();
+    test_spring_deflection_adds_to_the_drive();
+    test_an_unreadable_spring_is_not_believed();
+    test_a_faulted_waist_invalidates_both_legs();
+    test_each_switch_is_its_own_contact();
     test_never_reports_ok_while_uncalibrated();
     test_no_nan_in_a_healthy_run();
 

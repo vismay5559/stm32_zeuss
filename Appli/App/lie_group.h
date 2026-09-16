@@ -42,12 +42,12 @@
 
 typedef float inekf_real_t;
 
-/* Two feet. */
-#define INEKF_MAX_CONTACTS   2
+/* Four contact points: toe and heel of each foot, NEXUS_CONTACT_* order. */
+#define INEKF_MAX_CONTACTS   4
 
 /* Side length of the group matrix X: N + 5. */
 #define INEKF_X_DIM(n)       ((n) + 5)
-#define INEKF_X_MAX          INEKF_X_DIM(INEKF_MAX_CONTACTS)          /* 7  */
+#define INEKF_X_MAX          INEKF_X_DIM(INEKF_MAX_CONTACTS)          /* 9  */
 
 /*
  * Error-state dimension: 3(N+3) pose/contact terms + 6 bias terms.
@@ -55,7 +55,7 @@ typedef float inekf_real_t;
  */
 #define INEKF_POSE_DIM(n)    (3 * ((n) + 3))
 #define INEKF_ERR_DIM(n)     (INEKF_POSE_DIM(n) + 6)
-#define INEKF_ERR_MAX        INEKF_ERR_DIM(INEKF_MAX_CONTACTS)        /* 21 */
+#define INEKF_ERR_MAX        INEKF_ERR_DIM(INEKF_MAX_CONTACTS)        /* 27 */
 
 /*
  * Every error-state matrix is stored row-major with a FIXED stride of

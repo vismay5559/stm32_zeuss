@@ -141,7 +141,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/watchdog.c
     App/robot_config.c
     App/lie_group.c
-    App/kinematics.c
     App/zeus_kinematics.c
     App/inekf.c
     App/fusion.c

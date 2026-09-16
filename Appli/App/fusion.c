@@ -1,6 +1,6 @@
 #include "fusion.h"
-#include "kinematics.h"
 #include "robot_config.h"
+#include "zeus_kinematics.h"
 #include <math.h>
 #include <string.h>
 
@@ -9,16 +9,17 @@
 /* ===================================================================== */
 
 /*
- * Which drive is which joint, the link lengths, and the encoder zeros all
- * live in robot_config.h now. They used to be spread across this file and
- * kinematics.c as placeholders that the estimator then believed completely.
+ * Which drive and encoder is which joint, and their signs and zeros, live in
+ * robot_config.h. The leg geometry comes from the URDF, through
+ * zeus_kinematics.h: each leg has two contact points, toe and heel, one per
+ * foot switch, both seen from the IMU through the waist and the whole leg.
  *
- * The important change is not where they live but what they are: forward
- * kinematics now takes ALL FOUR joint angles per leg from the ODrives.
- * hip_pitch and knee used to come from the AS5047P encoders, which sit after
- * the series springs and measure DEFLECTION - a small signed wind-up, not an
- * absolute joint angle. Both the README and app.c say so explicitly; only
- * this file disagreed, and it was the one feeding the filter.
+ * Per leg the kinematics take eight angles. Four are the leg's drives, two are
+ * the waist drives (they move the IMU relative to both legs), and two are the
+ * spring deflections of hip pitch and knee - ADDED to those joints' motor
+ * side, because the drives measure before the spring and the AS5047Ps measure
+ * only the spring. robot_config.h has the history of getting that wrong both
+ * ways.
  */
 
 #define TURNS_TO_RAD   6.28318531f
@@ -58,9 +59,29 @@
 #define IMU_STALE_TICKS   50u
 
 /* ===================================================================== */
+/*  JOINT NOISE                                                           */
+/* ===================================================================== */
+
+/*
+ * How far each joint angle is trusted, as a standard deviation in radians.
+ * fusion.c pushes these through the leg Jacobian to get how far each contact
+ * point is trusted, which is what the filter weighs against the IMU.
+ *
+ * They are not just sensor resolution. The drives' encoders resolve far finer
+ * than a degree, but an uncalibrated zero, backlash and a flexing link all
+ * show up at the foot as angle error too, so the motor figure is deliberately
+ * loose. Tune on recorded data, not by datasheet.
+ */
+#define NOISE_MOTOR_RAD            0.0175f   /* 1 deg: drives and waist         */
+#define NOISE_SPRING_RAD           0.005f    /* 0.3 deg: AS5047P, 14-bit        */
+
+/* A spring that cannot be read could be anywhere within its travel. Using 0
+   with this much doubt is honest; using 0 as if it were measured is not. */
+#define NOISE_SPRING_UNKNOWN_RAD   (0.5f * ROBOT_SPRING_MAX_DEFLECTION_RAD)
+
+/* ===================================================================== */
 
 static inekf_t      s_f;
-static kin_params_t s_kin;
 
 static uint32_t s_prev_accel_seq;
 static uint32_t s_prev_gyro_seq;
@@ -68,7 +89,7 @@ static uint32_t s_last_imu_us;
 static uint16_t s_imu_idle;
 static uint8_t  s_have_imu_time;
 
-static uint8_t  s_foot_down[2];        /* what the filter currently believes */
+static uint8_t  s_down[INEKF_MAX_CONTACTS];   /* what the filter currently believes */
 static uint8_t  s_ground_anchored;     /* has the z datum been established?   */
 static uint32_t s_converged_ticks;
 static uint8_t  s_status;
@@ -78,15 +99,13 @@ static uint8_t  s_status;
 void fusion_init(void)
 {
     inekf_init(&s_f, NULL);
-    kin_defaults(&s_kin);
 
     s_prev_accel_seq  = 0;
     s_prev_gyro_seq   = 0;
     s_last_imu_us     = 0;
     s_imu_idle        = 0;
     s_have_imu_time   = 0;
-    s_foot_down[0]    = 0;
-    s_foot_down[1]    = 0;
+    memset(s_down, 0, sizeof(s_down));
     s_converged_ticks = 0;
     s_ground_anchored = 0;
     s_status          = NEXUS_FUSION_INVALID;
@@ -112,77 +131,132 @@ static void anchor_ground(const inekf_real_t *p_body)
     s_ground_anchored = 1;
 }
 
-/* Gather one leg's four joint angles from the drives. */
-static void leg_angles(const joint_src_t *map,
-                       const act_telemetry_t *act,
-                       float *q_out)
+/* One drive-sourced angle, in the URDF's convention. */
+static float drive_angle(const joint_src_t *src, const act_telemetry_t *act)
 {
-    for (int j = 0; j < KIN_LEG_JOINTS; j++)
-    {
-        float raw = act->pos[map[j].act_index] * TURNS_TO_RAD;
-
-        q_out[j] = map[j].sign * raw + map[j].offset;
-    }
-}
-
-/* Are all four angles for this leg coming from working, talking drives? */
-static uint8_t leg_sources_ok(const joint_src_t *map, const act_telemetry_t *act)
-{
-    for (int j = 0; j < KIN_LEG_JOINTS; j++)
-    {
-        uint8_t idx = map[j].act_index;
-
-        /* An axis in a fault state is not reporting a trustworthy angle. */
-        if (act->axis_error[idx] != 0u)
-        {
-            return 0;
-        }
-
-        /*
-         * Nor is one that has stopped reporting at all. When a bus goes quiet
-         * act->pos simply stops changing: the last value persists and
-         * axis_error stays 0, so without this the FK produces a confident foot
-         * position from angles that are seconds old.
-         */
-        if (act->pos_age[idx] > ACT_POS_STALE_TICKS)
-        {
-            return 0;
-        }
-    }
-    return 1;
+    return src->sign * (act->pos[src->act_index] * TURNS_TO_RAD) + src->offset;
 }
 
 /*
- * Did any of this leg's joints report a NEW position since the last tick?
+ * Is this drive reporting an angle worth believing?
  *
- * The contact update used to run every tick at 1 kHz while the underlying
- * joint angles only change at the drives' telemetry rate. Feeding the same
- * measurement into a Kalman update over and over, each time with independent
- * noise, shrinks the covariance far faster than the information justifies -
- * and an over-tight P makes the convergence gate in update_status() pass early
- * and stay passed, which is the wrong direction for a gate whose whole job is
- * to say "you may trust this now".
- *
- * pos_age is zeroed in the FDCAN ISR and aged once per tick in
- * act_tick_1khz(), which runs before this, so zero means "arrived since the
- * last tick" - exactly the "is this a new measurement" question.
+ * Not if its axis is in a fault state. Nor if it has stopped reporting at all:
+ * when a bus goes quiet act->pos simply stops changing - the last value
+ * persists and axis_error stays 0 - so without the age check the kinematics
+ * would produce a confident foot position from angles that are seconds old.
  */
-static uint8_t leg_has_new_measurement(const joint_src_t *map,
-                                       const act_telemetry_t *act)
+static uint8_t drive_ok(const joint_src_t *src, const act_telemetry_t *act)
 {
-    for (int j = 0; j < KIN_LEG_JOINTS; j++)
-    {
-        if (act->pos_age[map[j].act_index] == 0u)
-        {
-            return 1;
-        }
-    }
-    return 0;
+    return (act->axis_error[src->act_index] == 0u) &&
+           (act->pos_age[src->act_index] <= ACT_POS_STALE_TICKS);
 }
 
-/* Foot position in the body frame, refreshed every tick for foot_z. */
-static inekf_real_t s_foot_body[2][3];
-static uint8_t      s_foot_ok[2];
+typedef struct
+{
+    float   q[ZEUS_KIN_NQ];
+    float   var[ZEUS_KIN_NQ];      /* per-joint variance, rad^2             */
+    uint8_t ok;                    /* every drive in the chain is believable */
+    uint8_t fresh;                 /* some drive in the chain reported anew  */
+} leg_input_t;
+
+/*
+ * Gather one leg's eight angles.
+ *
+ * "fresh" answers whether this tick carries a NEW measurement, and only the
+ * drives count. The contact update used to run every tick while the drives
+ * report slower than that; feeding the same angles into a Kalman update over
+ * and over, each time as if its noise were independent, shrinks the covariance
+ * far faster than the information justifies - and an over-tight P passes the
+ * convergence gate early. The spring encoders are read every tick, but a leg
+ * whose drives have not moved on has not told the filter anything new.
+ * (pos_age is zeroed in the FDCAN ISR and aged in act_tick_1khz(), which runs
+ * before this, so zero means "arrived since the last tick".)
+ */
+static void leg_input(int leg,
+                      const act_telemetry_t *act,
+                      const float spring_rad[NEXUS_NUM_ENCODERS],
+                      uint8_t spring_valid,
+                      leg_input_t *in)
+{
+    static const uint8_t motor_q[ROBOT_LEG_MOTORS] = {
+        [ROBOT_JOINT_HIP_PITCH] = ZEUS_KIN_Q_HIP_PITCH,
+        [ROBOT_JOINT_HIP_ROLL]  = ZEUS_KIN_Q_HIP_ROLL,
+        [ROBOT_JOINT_KNEE]      = ZEUS_KIN_Q_KNEE_PITCH,
+        [ROBOT_JOINT_ANKLE]     = ZEUS_KIN_Q_ANKLE_PITCH,
+    };
+    static const uint8_t waist_q[2] = {
+        [ROBOT_WAIST_PITCH] = ZEUS_KIN_Q_WAIST_PITCH,
+        [ROBOT_WAIST_ROLL]  = ZEUS_KIN_Q_WAIST_ROLL,
+    };
+    static const uint8_t spring_q[2] = {
+        [ROBOT_SPRING_HIP]  = ZEUS_KIN_Q_HIP_PITCH_SPRING,
+        [ROBOT_SPRING_KNEE] = ZEUS_KIN_Q_KNEE_PITCH_SPRING,
+    };
+
+    const float motor_var = NOISE_MOTOR_RAD * NOISE_MOTOR_RAD;
+
+    in->ok    = 1u;
+    in->fresh = 0u;
+
+    for (int j = 0; j < ROBOT_LEG_MOTORS; j++)
+    {
+        const joint_src_t *src = &g_leg_joints[leg][j];
+
+        in->q[motor_q[j]]   = drive_angle(src, act);
+        in->var[motor_q[j]] = motor_var;
+        in->ok    = (uint8_t)(in->ok & drive_ok(src, act));
+        in->fresh = (uint8_t)(in->fresh | (act->pos_age[src->act_index] == 0u));
+    }
+
+    for (int j = 0; j < 2; j++)
+    {
+        const joint_src_t *src = &g_waist_joints[j];
+
+        in->q[waist_q[j]]   = drive_angle(src, act);
+        in->var[waist_q[j]] = motor_var;
+        in->ok    = (uint8_t)(in->ok & drive_ok(src, act));
+        in->fresh = (uint8_t)(in->fresh | (act->pos_age[src->act_index] == 0u));
+    }
+
+    for (int k = 0; k < 2; k++)
+    {
+        uint8_t e = g_leg_springs[leg][k];
+        float   d = spring_rad[e];
+
+        if (((spring_valid & (1u << e)) != 0u) && (fabsf(d) <= ROBOT_SPRING_MAX_DEFLECTION_RAD))
+        {
+            in->q[spring_q[k]]   = d;
+            in->var[spring_q[k]] = NOISE_SPRING_RAD * NOISE_SPRING_RAD;
+        }
+        else
+        {
+            in->q[spring_q[k]]   = 0.0f;
+            in->var[spring_q[k]] = NOISE_SPRING_UNKNOWN_RAD * NOISE_SPRING_UNKNOWN_RAD;
+        }
+    }
+}
+
+/* Covariance of a contact point in the body frame: J * diag(var) * J^T. */
+static void point_cov(float C[9], const float J[3 * ZEUS_KIN_NQ], const float var[ZEUS_KIN_NQ])
+{
+    for (int r = 0; r < 3; r++)
+    {
+        for (int c = r; c < 3; c++)
+        {
+            float s = 0.0f;
+            for (int i = 0; i < ZEUS_KIN_NQ; i++)
+            {
+                s += J[r * ZEUS_KIN_NQ + i] * var[i] * J[c * ZEUS_KIN_NQ + i];
+            }
+            C[r * 3 + c] = s;
+            C[c * 3 + r] = s;
+        }
+    }
+}
+
+/* Toe and heel in the body frame, refreshed every tick for foot_z. */
+static float   s_point_body[2][ZEUS_KIN_POINTS][3];
+static uint8_t s_leg_ok[2];
 
 static void update_status(void)
 {
@@ -256,8 +330,7 @@ static void update_status(void)
     if (!sane)
     {
         inekf_reset(&s_f);          /* start over rather than emit garbage */
-        s_foot_down[0] = 0;
-        s_foot_down[1] = 0;
+        memset(s_down, 0, sizeof(s_down));
         s_ground_anchored = 0;
         s_converged_ticks = 0;
         s_status = NEXUS_FUSION_INVALID;
@@ -309,6 +382,8 @@ static void update_status(void)
 
 void fusion_tick(const imu_sample_t *imu,
                  const act_telemetry_t *act,
+                 const float spring_rad[NEXUS_NUM_ENCODERS],
+                 uint8_t spring_valid,
                  uint8_t contacts,
                  uint32_t now_us)
 {
@@ -355,73 +430,71 @@ void fusion_tick(const imu_sample_t *imu,
     }
 
     /* ---- 2. contact events and updates ------------------------------- */
-    const uint8_t foot_mask[2] = { NEXUS_CONTACT_L_FOOT, NEXUS_CONTACT_R_FOOT };
-    const joint_src_t *maps[2] = { g_leg_joints[0], g_leg_joints[1] };
-    const inekf_real_t *hips[2] = { s_kin.left_hip_offset, s_kin.right_hip_offset };
-
     for (int leg = 0; leg < 2; leg++)
     {
-        uint8_t down = (contacts & foot_mask[leg]) ? 1u : 0u;
-        uint8_t ok   = leg_sources_ok(maps[leg], act);
+        leg_input_t in;
+        leg_input(leg, act, spring_rad, spring_valid, &in);
 
         /*
-         * A foot with unreadable joint angles is treated as lifted. Anchoring
-         * a contact from a bad forward-kinematic position is worse than having
-         * no contact at all: the filter would pull the whole state towards a
-         * point that does not exist.
+         * Which of this leg's two points are planted. A leg with unreadable
+         * joint angles has none: anchoring a contact from a bad forward-
+         * kinematic position is worse than having no contact at all, because
+         * the filter would pull the whole state towards a point that does not
+         * exist.
          */
-        if (!ok)
+        uint8_t down[ZEUS_KIN_POINTS];
+        uint8_t any_down = 0u;
+
+        for (int k = 0; k < ZEUS_KIN_POINTS; k++)
         {
-            down = 0;
+            int slot = ZEUS_KIN_CONTACT(leg, k);
+
+            down[k]  = (uint8_t)(in.ok && ((contacts & (1u << (unsigned)slot)) != 0u));
+            any_down = (uint8_t)(any_down | down[k]);
         }
 
-        float q[KIN_LEG_JOINTS], p_body[3], J[3 * KIN_LEG_JOINTS];
-
         /*
-         * Compute forward kinematics every tick, not only when the foot is
-         * planted. The contact update needs it when down, but foot_z is
-         * reported continuously - a foot height that goes stale the moment the
-         * leg leaves the ground would be worse than useless to a gait policy,
-         * which cares most about the swing foot.
+         * Kinematics every tick, not only when planted: foot_z is reported
+         * continuously, and a swing foot is the one a gait policy cares about
+         * most. The Jacobian is only wanted when a point is planted.
          */
-        leg_angles(maps[leg], act, q);
+        float p_body[ZEUS_KIN_POINTS][3];
+        float J[ZEUS_KIN_POINTS][3 * ZEUS_KIN_NQ];
 
-        /*
-         * The Jacobian is only wanted when this foot is planted, and it costs
-         * eight extra FK evaluations - more than the position. A swing foot is
-         * evaluated purely for foot_z, so it asks for the position alone.
-         */
-        uint8_t want_jacobian = down;
+        (void)zeus_kin_foot((zeus_kin_side_t)leg, in.q, p_body, any_down ? J : NULL);
 
-        kin_foot(&s_kin, hips[leg], q, p_body, want_jacobian ? J : NULL);
+        memcpy(s_point_body[leg], p_body, sizeof(p_body));
+        s_leg_ok[leg] = in.ok;
 
-        s_foot_body[leg][0] = p_body[0];
-        s_foot_body[leg][1] = p_body[1];
-        s_foot_body[leg][2] = p_body[2];
-        s_foot_ok[leg]      = ok;
-
-        if (down && !s_foot_down[leg])
+        for (int k = 0; k < ZEUS_KIN_POINTS; k++)
         {
-            if (!s_ground_anchored)
+            int slot = ZEUS_KIN_CONTACT(leg, k);
+
+            if (down[k] && !s_down[slot])
             {
-                anchor_ground(p_body);
+                float C[9];
+                point_cov(C, J[k], in.var);
+
+                if (!s_ground_anchored)
+                {
+                    anchor_ground(p_body[k]);
+                }
+                /* Touchdown. The kinematics at THIS instant fix where the
+                   point is anchored in the world. */
+                inekf_add_contact(&s_f, slot, p_body[k], C);
+                s_down[slot] = 1u;
             }
-            /* Touchdown. The FK at THIS instant fixes where the foot is
-               anchored in the world, so it must use the angles from this tick
-               and not a stale copy. */
-            inekf_add_contact(&s_f, leg, p_body, J);
-            s_foot_down[leg] = 1;
-        }
-        else if (!down && s_foot_down[leg])
-        {
-            inekf_remove_contact(&s_f, leg);
-            s_foot_down[leg] = 0;
-        }
-        else if (down && leg_has_new_measurement(maps[leg], act))
-        {
-            /* Only on a genuinely new measurement - see the note on
-               leg_has_new_measurement(). */
-            inekf_update_contact(&s_f, leg, p_body, J);
+            else if (!down[k] && s_down[slot])
+            {
+                inekf_remove_contact(&s_f, slot);
+                s_down[slot] = 0u;
+            }
+            else if (down[k] && in.fresh)
+            {
+                float C[9];
+                point_cov(C, J[k], in.var);
+                inekf_update_contact(&s_f, slot, p_body[k], C);
+            }
         }
     }
 
@@ -482,9 +555,11 @@ void fusion_fill_state(nexus_state_t *st)
     }
 
     /*
-     * Foot height in the world: body position plus the foot offset rotated out
-     * of the body frame. Since fused_pos[2] is anchored so the first contact
-     * sits at z = 0, this reads as height above the stance ground.
+     * Foot height in the world: the LOWER of toe and heel, each being body
+     * position plus its offset rotated out of the body frame. Since
+     * fused_pos[2] is anchored so the first contact sits at z = 0, this reads
+     * as height above the stance ground - 0 for a planted foot however it is
+     * tilted, positive for a lifted one.
      *
      * Table order is right then left; leg 0 is left internally.
      */
@@ -497,13 +572,20 @@ void fusion_fill_state(nexus_state_t *st)
         for (int i = 0; i < 2; i++)
         {
             int leg = leg_of[i];
-            const inekf_real_t *b = s_foot_body[leg];
 
-            if (s_foot_ok[leg])
+            if (s_leg_ok[leg])
             {
-                /* Third row of R times the body-frame offset. */
-                st->foot_z[i] = (float)(s_f.p[2] +
-                                        R[6] * b[0] + R[7] * b[1] + R[8] * b[2]);
+                float lowest = 0.0f;
+
+                for (int k = 0; k < ZEUS_KIN_POINTS; k++)
+                {
+                    const float *b = s_point_body[leg][k];
+                    /* Third row of R times the body-frame offset. */
+                    float z = s_f.p[2] + R[6] * b[0] + R[7] * b[1] + R[8] * b[2];
+
+                    lowest = (k == 0 || z < lowest) ? z : lowest;
+                }
+                st->foot_z[i] = lowest;
                 st->fk_valid |= (uint8_t)(1u << i);
             }
             else
@@ -535,4 +617,9 @@ uint8_t fusion_status(void)
 uint32_t fusion_converged_ticks(void)
 {
     return s_converged_ticks;
+}
+
+uint8_t fusion_num_contacts(void)
+{
+    return (uint8_t)inekf_num_contacts(&s_f);
 }

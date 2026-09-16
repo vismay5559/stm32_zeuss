@@ -375,6 +375,7 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
 
     /* ---- after-spring encoders -------------------------------------- */
     uint16_t enc_raw[NEXUS_NUM_ENCODERS];
+    float    spring_rad[NEXUS_NUM_ENCODERS];   /* aligned copy for fusion.c */
     uint8_t  enc_valid;
 
     enc_get(enc_raw, &enc_valid);
@@ -394,7 +395,8 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
          *
          * The zeros live in robot_config.h and have not been measured yet.
          */
-        s_state.spring_angle[e] = robot_spring_deflection((uint8_t)e, enc_raw[e]);
+        spring_rad[e] = robot_spring_deflection((uint8_t)e, enc_raw[e]);
+        s_state.spring_angle[e] = spring_rad[e];
     }
     s_state.enc_valid = enc_valid;
 
@@ -479,7 +481,7 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
 
     /* Estimate before packing, so the packet carries this tick's fused state
        rather than the previous one. */
-    fusion_tick(&imu, &act, s_state.contacts, s_state.timestamp_us);
+    fusion_tick(&imu, &act, spring_rad, enc_valid, s_state.contacts, s_state.timestamp_us);
     fusion_fill_state(&s_state);
 
     /* ---- actuator diagnostics --------------------------------------- */

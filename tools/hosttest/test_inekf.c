@@ -224,17 +224,17 @@ static void test_contacts_are_counted_as_they_come_and_go(void)
     CHECK(inekf_num_contacts(&f) == 0, "a fresh filter already has contacts");
 
     const inekf_real_t foot[3] = { 0.0f, 0.05f, -0.65f };
-    inekf_real_t J[12];
-    memset(J, 0, sizeof(J));
+    inekf_real_t C[9];
+    memset(C, 0, sizeof(C));
 
-    inekf_add_contact(&f, 0, foot, J);
+    inekf_add_contact(&f, 0, foot, C);
     CHECK(inekf_num_contacts(&f) == 1, "one foot down was not counted");
 
-    inekf_add_contact(&f, 1, foot, J);
+    inekf_add_contact(&f, 1, foot, C);
     CHECK(inekf_num_contacts(&f) == 2, "two feet down were not counted");
 
     /* Adding the same slot twice must not count it twice. */
-    inekf_add_contact(&f, 1, foot, J);
+    inekf_add_contact(&f, 1, foot, C);
     CHECK(inekf_num_contacts(&f) == 2,
           "the same foot was counted twice (%d)", inekf_num_contacts(&f));
 
@@ -281,15 +281,15 @@ static void test_a_planted_foot_pulls_the_drift_back(void)
 
     /* Plant a foot and keep telling the filter it has not moved. */
     const inekf_real_t foot[3] = { 0.0f, 0.05f, -0.65f };
-    inekf_real_t J[12];
-    memset(J, 0, sizeof(J));
+    inekf_real_t C[9];
+    memset(C, 0, sizeof(C));
 
-    inekf_add_contact(&f, 0, foot, J);
+    inekf_add_contact(&f, 0, foot, C);
 
     for (int i = 0; i < 1000; i++)
     {
         inekf_predict(&f, w, a, DT);
-        inekf_update_contact(&f, 0, foot, J);
+        inekf_update_contact(&f, 0, foot, C);
     }
 
     inekf_real_t v_after[3];
@@ -304,6 +304,183 @@ static void test_a_planted_foot_pulls_the_drift_back(void)
     {
         CHECK(v_after[k] == v_after[k], "velocity %d became NaN after updates", k);
     }
+}
+
+/*
+ * The contact update's covariance step is computed as rank-3 corrections
+ * rather than dense matrix products, because at 27 states the dense form was
+ * too slow for four contacts in one tick. The two must give the same numbers,
+ * so this repeats the update the textbook way - build H, K, I-KH as full
+ * matrices, multiply - and compares every element of P.
+ */
+#define N_ERR  INEKF_ERR_MAX
+
+static void dense_mul(double *C, const double *A, const double *B, int n, int m, int k)
+{
+    for (int i = 0; i < n; i++)
+    {
+        for (int j = 0; j < k; j++)
+        {
+            double s = 0.0;
+            for (int t = 0; t < m; t++)
+            {
+                s += A[i * m + t] * B[t * k + j];
+            }
+            C[i * k + j] = s;
+        }
+    }
+}
+
+static void test_the_fast_update_matches_the_dense_one(void)
+{
+    printf("the contact update's covariance matches a dense reference\n");
+
+    inekf_t f;
+    start(&f);
+
+    /* Build up a full, correlated covariance: move, tilt, and plant two
+       contacts so every block of P is populated. */
+    inekf_real_t w[3] = { 0.3f, -0.2f, 0.1f };
+    inekf_real_t a[3] = { 0.5f, 0.2f, GRAV };
+    for (int i = 0; i < 300; i++)
+    {
+        inekf_predict(&f, w, a, DT);
+    }
+    const inekf_real_t toe[3]  = {  0.10f, 0.08f, -0.63f };
+    const inekf_real_t heel[3] = { -0.10f, 0.08f, -0.63f };
+    const inekf_real_t C[9] = { 4e-4f, 1e-5f, 2e-5f,
+                                1e-5f, 3e-4f, -1e-5f,
+                                2e-5f, -1e-5f, 5e-4f };
+    inekf_add_contact(&f, 0, toe, C);
+    inekf_add_contact(&f, 1, heel, C);
+    for (int i = 0; i < 50; i++)
+    {
+        inekf_predict(&f, w, a, DT);
+    }
+
+    /* The reference, in double precision, from the state before the update. */
+    static double P[N_ERR * N_ERR], H[3 * N_ERR], PHt[N_ERR * 3], S[9], Si[9];
+    static double K[N_ERR * 3], A[N_ERR * N_ERR], T1[N_ERR * N_ERR], T2[N_ERR * N_ERR];
+    static double Ref[N_ERR * N_ERR], N[9], RC[9], KN[N_ERR * 3];
+
+    const int slot = 1;
+    const int dr   = INEKF_IDX_D(slot);
+
+    for (int i = 0; i < N_ERR * N_ERR; i++)
+    {
+        P[i] = (double)f.P[i];
+    }
+    memset(H, 0, sizeof(H));
+    for (int c = 0; c < 3; c++)
+    {
+        H[c * N_ERR + INEKF_IDX_P + c] =  1.0;
+        H[c * N_ERR + dr + c]          = -1.0;
+    }
+
+    /* N = R C R^T */
+    double Rd[9], Cd[9];
+    for (int i = 0; i < 9; i++)
+    {
+        Rd[i] = (double)f.R[i];
+        Cd[i] = (double)C[i];
+    }
+    dense_mul(RC, Rd, Cd, 3, 3, 3);
+    for (int r = 0; r < 3; r++)
+    {
+        for (int c = 0; c < 3; c++)
+        {
+            double s = 0.0;
+            for (int t = 0; t < 3; t++)
+            {
+                s += RC[r * 3 + t] * Rd[c * 3 + t];
+            }
+            N[r * 3 + c] = s;
+        }
+    }
+
+    /* PHt = P H^T,  S = H P H^T + N */
+    for (int i = 0; i < N_ERR; i++)
+    {
+        for (int c = 0; c < 3; c++)
+        {
+            double s = 0.0;
+            for (int t = 0; t < N_ERR; t++)
+            {
+                s += P[i * N_ERR + t] * H[c * N_ERR + t];
+            }
+            PHt[i * 3 + c] = s;
+        }
+    }
+    dense_mul(S, H, PHt, 3, N_ERR, 3);
+    for (int i = 0; i < 9; i++)
+    {
+        S[i] += N[i];
+    }
+
+    double det = S[0] * (S[4] * S[8] - S[5] * S[7]) - S[1] * (S[3] * S[8] - S[5] * S[6]) +
+                 S[2] * (S[3] * S[7] - S[4] * S[6]);
+    Si[0] =  (S[4] * S[8] - S[5] * S[7]) / det;
+    Si[1] = -(S[1] * S[8] - S[2] * S[7]) / det;
+    Si[2] =  (S[1] * S[5] - S[2] * S[4]) / det;
+    Si[3] = -(S[3] * S[8] - S[5] * S[6]) / det;
+    Si[4] =  (S[0] * S[8] - S[2] * S[6]) / det;
+    Si[5] = -(S[0] * S[5] - S[2] * S[3]) / det;
+    Si[6] =  (S[3] * S[7] - S[4] * S[6]) / det;
+    Si[7] = -(S[0] * S[7] - S[1] * S[6]) / det;
+    Si[8] =  (S[0] * S[4] - S[1] * S[3]) / det;
+    dense_mul(K, PHt, Si, N_ERR, 3, 3);
+
+    /* A = I - K H ;  Ref = A P A^T + K N K^T */
+    dense_mul(A, K, H, N_ERR, 3, N_ERR);
+    for (int i = 0; i < N_ERR * N_ERR; i++)
+    {
+        A[i] = -A[i];
+    }
+    for (int i = 0; i < N_ERR; i++)
+    {
+        A[i * N_ERR + i] += 1.0;
+    }
+    dense_mul(T1, A, P, N_ERR, N_ERR, N_ERR);
+    for (int i = 0; i < N_ERR; i++)
+    {
+        for (int j = 0; j < N_ERR; j++)
+        {
+            double s = 0.0;
+            for (int t = 0; t < N_ERR; t++)
+            {
+                s += T1[i * N_ERR + t] * A[j * N_ERR + t];
+            }
+            T2[i * N_ERR + j] = s;
+        }
+    }
+    dense_mul(KN, K, N, N_ERR, 3, 3);
+    for (int i = 0; i < N_ERR; i++)
+    {
+        for (int j = 0; j < N_ERR; j++)
+        {
+            double s = 0.0;
+            for (int c = 0; c < 3; c++)
+            {
+                s += KN[i * 3 + c] * K[j * 3 + c];
+            }
+            Ref[i * N_ERR + j] = T2[i * N_ERR + j] + s;
+        }
+    }
+
+    /* The filter's own update, from the same state. */
+    const inekf_real_t heel_seen[3] = { -0.095f, 0.083f, -0.628f };
+    inekf_update_contact(&f, slot, heel_seen, C);
+
+    double worst = 0.0, scale = 0.0;
+    for (int i = 0; i < N_ERR * N_ERR; i++)
+    {
+        double e = fabs((double)f.P[i] - 0.5 * (Ref[i] + Ref[(i / N_ERR) + (i % N_ERR) * N_ERR]));
+        worst = (e > worst) ? e : worst;
+        scale = (fabs(Ref[i]) > scale) ? fabs(Ref[i]) : scale;
+    }
+    printf("  worst element difference %.2e (largest element %.2e)\n", worst, scale);
+    CHECK(worst <= 1e-5 * scale,
+          "the fast covariance update differs from the dense one by %.3e", worst);
 }
 
 static void test_reset_returns_it_to_knowing_nothing(void)
@@ -321,9 +498,9 @@ static void test_reset_returns_it_to_knowing_nothing(void)
     }
 
     const inekf_real_t foot[3] = { 0.0f, 0.05f, -0.65f };
-    inekf_real_t J[12];
-    memset(J, 0, sizeof(J));
-    inekf_add_contact(&f, 0, foot, J);
+    inekf_real_t C[9];
+    memset(C, 0, sizeof(C));
+    inekf_add_contact(&f, 0, foot, C);
 
     inekf_reset(&f);
 
@@ -386,6 +563,7 @@ int main(void)
     test_the_orientation_stays_a_rotation();
     test_contacts_are_counted_as_they_come_and_go();
     test_a_planted_foot_pulls_the_drift_back();
+    test_the_fast_update_matches_the_dense_one();
     test_reset_returns_it_to_knowing_nothing();
     test_an_impossible_time_step_is_refused();
 
