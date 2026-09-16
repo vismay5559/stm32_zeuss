@@ -290,7 +290,7 @@ def reference(urdf_path: str, prov: dict):
 
     poses = [np.zeros(NQ)]
     for _ in range(N_REF - 1):
-        q = rng.uniform(-0.8, 0.8, NQ)
+        q = rng.uniform(-0.78, 0.78, NQ)         # inside the +/-45 deg limits
         q[4:6] = rng.uniform(-0.15, 0.15, 2)            # springs deflect a little
         q[6:8] = rng.uniform(-0.3, 0.3, 2)
         poses.append(q)

@@ -4,7 +4,7 @@
  * Leg geometry for zeus_kinematics.c. Include it from there only.
  *
  * model   zeus_26/zeus_description/urdf/zeus.urdf
- * sha256  8f091b94ad7efb072d8393c48a33a8a5c2fc7aa95abe838f06def8760f1f4fc7
+ * sha256  2a2cf77ed7de0196e3858ea766e9753b6c6babd396090859fce2c7311c7cd526
  * tools   pin 4.1.0, numpy 2.5.3
  */
 
@@ -134,6 +134,6 @@ static const zk_leg_t zk_legs[2] = {
     },
 };
 
-const char zeus_kin_model_sha[] = "8f091b94ad7efb07";
+const char zeus_kin_model_sha[] = "2a2cf77ed7de0196";
 
 #endif /* ZEUS_KINEMATICS_MODEL_H */
