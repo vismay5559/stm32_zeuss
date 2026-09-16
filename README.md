@@ -109,7 +109,6 @@ Appli/App/            ← the actual robot code
    critical.h           ISR-safe copy helper
 
    lie_group.c/.h       SE_K(3) Lie group maths (fixed size)
-   kinematics.c/.h      leg forward kinematics + Jacobian (hand-measured, being replaced)
    zeus_kinematics.c/.h toe/heel FK + exact Jacobian from the URDF (model: GENERATED -
                         see tools/gen_kinematics.py)
    inekf.c/.h           contact-aided right-invariant EKF
@@ -220,7 +219,7 @@ strings Appli/build/nexus_first_Appli.elf | grep -m1 -E "APPLI: mode = |entering
 ```
 
 `--preset Debug` is for bring-up. **Flight firmware is `--preset Release`** —
-this loop has a 1 ms budget and the estimator's predict step alone is two 21x21
+this loop has a 1 ms budget and the estimator's predict step alone is two 27x27
 matrix products, so an unoptimised build is not a slower robot, it is a
 different one.
 
@@ -258,15 +257,14 @@ covers today:
 | --- | --- |
 | `test_contact` | switch debouncing, and that each switch owns the right bit |
 | `test_safety` | the arm/idle/fault transitions and every command-rejection rule |
-| `test_fusion` | the sensor-to-filter bridge |
+| `test_fusion` | the sensor-to-filter bridge: springs add to their drives, an unreadable spring is not believed, a faulted waist invalidates both legs, each foot switch is its own contact |
 | `test_robot_config` | spring deflection, sensor-zero wrap-around, calibration flag |
 | `test_watchdog` | start, refresh, and the stopped-clock case |
 | `test_lie_group` | rotations stay rotations, and the Gamma coefficients against a double-precision reference |
-| `test_kinematics` | leg geometry, reach limits, and that the Jacobian predicts what the FK actually does |
 | `test_zeus_kinematics` | toe and heel positions and Jacobians from the URDF model, against Pinocchio in double precision |
 | `test_health` | fault thresholds, which subsystem is blamed, latching, and the blink code |
 | `test_gait_ref` | phase wrap, interpolation, the seam, and the two documented table steps |
-| `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
+| `test_inekf` | still, free fall, a known spin, contact correction, a refused time step, and the fast covariance update against a dense reference |
 | `test_link_usb` | frame reassembly across any split, checksum rejection, and the busy-cable drop |
 | `test_act_odrive` | the interpolated ramp, the speed-hint clamp, arm and stop, a blocked wire, and where a reply is filed |
 | `test_enc_as5047p` | left chain then right chain in the right slots, the check digit over every bit position, a sensor's error flag and clearing its error register, and a read that never comes back |
@@ -350,7 +348,9 @@ zeus.urdf ─► tools/gen_kinematics.py ─► Appli/App/zeus_kinematics_model.
 
 `zeus_kinematics.c` walks those tables on the board: forward kinematics and
 the exact Jacobian for both points of a leg in a few hundred float operations,
-~2 KB of flash. Nothing from Python runs on the robot.
+~2 KB of flash. Nothing from Python runs on the robot. `fusion.c` calls it every
+tick for both legs; how well the result estimates the robot's motion is
+checked against a simulated walk (see *State estimation*).
 
 After the model changes (new export, IMU moved, contact points moved):
 
@@ -1541,8 +1541,9 @@ Four things worth understanding:
   deflection × spring constant, computed on the Pi where the constant is tunable.
   It is a **signed** value in ±π, referenced to a mechanical zero in
   `robot_config.h` — not the raw 0..2π angle it used to be, which stepped by a
-  full turn for any joint resting near the wrap point. The estimator does **not**
-  use it: forward kinematics takes all four joint angles per leg from the drives.
+  full turn for any joint resting near the wrap point. The estimator **adds** it
+  to the drive's angle for hip pitch and knee: the drive measures before the
+  spring, the encoder only the spring, and the link's real angle is the sum.
 - **`vel_hdg` is in the heading frame, not the world.** Forward means where the
   robot faces. Yaw is the one part of the pose the filter cannot observe, so it
   drifts — but the same drifting yaw defines both the velocity and the frame, so
@@ -1773,16 +1774,29 @@ the RL policy.
 | File | Contents |
 |---|---|
 | `lie_group.c` | SO(3) exponential, Gamma0-3, fixed-stride matrix helpers |
-| `kinematics.c` | Leg FK (0.30 m thigh/shank, 0.05 m foot) + 3x4 Jacobian |
+| `zeus_kinematics.c` | Toe and heel position in the IMU frame + exact 3x8 Jacobian, from the URDF |
 | `inekf.c` | Predict, contact update, contact add/remove |
+| `fusion.c` | Sensors in, estimate out: joint angles, contacts, noise, status |
 
 State is `X` in SE_{N+2}(3) with `R, v, p` and one world position per contact,
-IMU bias `theta` in R^6, and a 21x21 right-invariant error covariance.
+IMU bias `theta` in R^6, and a 27x27 right-invariant error covariance. There are
+four contact points - the toe and heel of each foot, one per foot switch - and
+each is added when its switch closes and removed when it opens, so a rolling
+foot hands over from heel to toe instead of pretending the whole foot is
+planted.
+
+Per leg the kinematics take eight angles: that leg's four drives, the two
+spring deflections (added to hip pitch and knee - the drives measure before the
+spring), and both waist drives, which move the IMU relative to the legs. Each
+joint's noise is pushed through the Jacobian into a 3x3 covariance for the
+contact point. A spring encoder that is not valid, or reads beyond
+`ROBOT_SPRING_MAX_DEFLECTION_RAD`, is treated as unknown (0 with a wide
+variance) rather than bent into the leg.
 
 ### Deliberate differences from the Python
 
 **Fixed-size, no allocator.** The Python reshapes `X` and `P` with numpy every
-time a foot lands or lifts. Everything here is declared at its two-contact
+time a foot lands or lifts. Everything here is declared at its four-contact
 maximum with an active flag per slot; error-state matrices keep a constant
 stride so indices never move, and inactive contact blocks are zeroed so they
 are inert in every product.
@@ -1792,11 +1806,20 @@ traffic, and covariance propagation is the hot path. Joseph-form updates plus
 explicit symmetrisation every step keep it stable. `inekf_real_t` is the one
 switch if that ever stops holding.
 
-**Central differences for the Jacobian.** The Python uses forward differences
-with `eps=1e-6`, which is fine at float64 but broken at float32: FK output is
-order 0.5 m, so a 1e-6 rad step moves it ~1e-7 m - right at float resolution.
-Central differences with `eps=1e-3` are O(h^2), so a step clear of the noise
-floor is still more accurate.
+**An exact Jacobian.** The Python differentiates forward kinematics
+numerically, which at float32 sits right at the resolution floor.
+`zeus_kinematics.c` computes each column as `axis x (point - joint origin)`
+along the chain it has already walked - exact, and no extra FK.
+
+**Four contacts for the price of two.** Going from 21 to 27 states makes every
+dense product ~2.1x dearer. Two changes pay for it without changing a single
+number: prediction computes `Phi (P + Qbar dt) Phi^T` (two products, not four),
+and the contact update's Joseph form is written as rank-3 corrections, since
+`H` has only six non-zero columns, instead of dense `(I-KH) P (I-KH)^T`. The
+host test checks the fast update against a dense one. Worst-case tick by count
+of multiply-accumulates: ~67k with four contacts, against ~74k for the old
+two-contact code. **Not yet measured on the board** - `loop_us_max` in the
+state packet is the number to watch.
 
 ### Checked against the paper
 
@@ -1851,7 +1874,7 @@ Both are worth fixing in the Python too if it stays in use.
 Checked on the host against independent references, not against the Python:
 
 - `Gamma1` against a numerically integrated `exp(phi*s) ds` (1e-4)
-- FK against hand-computable poses; Jacobian against analytic cross products
+- Toe/heel kinematics against Pinocchio reading the same URDF (0.2 um, 96 poses)
 - Free fall for 1 s gives exactly -9.81 m/s and -4.905 m
 - **An injected 20 cm position error decays to 1.1 mm under contact updates** -
   this is what validates the innovation and `H` sign convention; with either
@@ -1864,10 +1887,62 @@ Checked on the host against independent references, not against the Python:
 - The `phi`-position cross-covariance is non-zero once the body has moved off
   the origin, which a diagonal `Q_bar` could never produce
 
-**The filter is not yet wired into the control loop.** `inekf.c` builds and is
-tested, but nothing calls it, so the `fused_*` fields of `nexus_state_t` are
-still transmitted as zeros. Wiring it up needs joint angles from the encoders
-and ODrives, neither of which has produced real data yet.
+### Against a simulated walk
+
+Unit tests say the pieces behave; they cannot say the estimate is right,
+because on the robot nobody knows the true motion. `tools/sim/` makes a walk
+whose true motion is known exactly and runs the **real** `fusion.c`,
+`inekf.c` and `zeus_kinematics.c` on the sensor data it produces:
+
+```
+zeus.urdf ─► gen_walk.py ─► what the IMU, drives, springs and switches would read ─► replay (fusion.c) ─► evaluate.py
+                        └─► the true torso motion ──────────────────────────────────────────────────────────┘
+```
+
+The walk is kinematic, built from the URDF: the stance foot is fixed to the
+world and the torso moves however the joint angles make it, so a closed
+switch's contact point really is still. It has what the estimator must cope
+with: heel strike and toe-off (switches go heel, both, toe), spring wind-up on
+the stance leg, hip-roll sway, waist motion, 400 Hz IMU with noise and constant
+biases, drives reporting at 500 Hz.
+
+```bash
+python3 -m venv ~/kin_venv && ~/kin_venv/bin/pip install -r tools/requirements-kinematics.txt   # once
+PY=~/kin_venv/bin/python EVAL_PY=python3 env -u PYTHONPATH tools/sim/run.sh --plot   # writes tools/sim/out/estimate.png
+tools/sim/run.sh --check                                                               # what CI runs
+tools/sim/run.sh -- --steps 30 --seed 7 --accel-bias 0 0 0                            # after -- : gen_walk.py options
+```
+
+Results on the current URDF, 16 steps, 3.9 m, judged after 2 s:
+
+| | error |
+|---|---|
+| tilt (roll/pitch) | 0.24 deg rms |
+| velocity, body frame | 0.011 m/s rms, 0.035 max |
+| IMU height | 10 mm rms, 13 mm drift over 3.9 m |
+| foot height | 10 mm rms |
+| yaw | +0.7 deg over 14.6 s (unobservable, reported only) |
+
+Almost all of the tilt and height error is one thing: the accelerometer's
+horizontal bias (0.03 and -0.02 m/s^2 in the simulation) cannot be told apart
+from a tilt of 0.2 deg, so the filter never learns it - exactly as the paper's
+observability analysis says. That tilt then places each new foothold slightly
+high, which is the slow height drift. With the horizontal bias set to zero, the
+same walk gives 0.08 deg tilt, 3 mm height rms and 0.4 mm of drift. On the robot this makes a
+level-surface accelerometer calibration worth having.
+
+`--check` fails CI beyond roughly two to three times these numbers. It was
+checked by corrupting the simulated sensors: a flipped knee sign (42 cm height
+error), spring deflections dropped (11 cm) or marked invalid (13 cm), and a
+3 deg waist zero error (14 cm) all fail. **Losing the spring encoders costs
+over ten centimetres of height in four metres** - they are not optional for
+the estimate. Toe and heel switches swapped does not fail: velocity error rises
+50%, but the filter's foot-slip allowance absorbs it.
+
+What this does not test: impacts and foot slip (the walk has neither), the
+real sensors' noise, anything the URDF gets wrong about the real robot, and
+timing on the board. The URDF is currently the older design with hip roll as
+the parent.
 
 ## Diagnostics
 
@@ -2001,10 +2076,12 @@ not this machine's real joint travel. They need measuring on the robot — a
 limit that is wrong in the loose direction only fails to stop a sick robot,
 which is why they start there rather than tight.
 
-**The robot has never been measured.** Link lengths, hip offsets, per-joint
-signs and offsets, and the encoder zeros are all placeholders, now gathered in
-`Appli/App/robot_config.h`. Until they are measured, forward kinematics is
-wrong by however wrong they are.
+**The robot has never been measured.** The leg geometry now comes from the
+URDF - but that URDF is an older design (hip roll as the parent), and the
+per-joint signs and offsets and the spring encoder zeros in
+`Appli/App/robot_config.h` are all placeholders. Until the real design is
+exported and those are measured, forward kinematics is wrong by however wrong
+they are.
 
 The filter no longer trusts it blindly: while `ROBOT_CONFIG_CALIBRATED` is `0`
 the estimator reports `CONVERGING` forever and never `OK`, however well its

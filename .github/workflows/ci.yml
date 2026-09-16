@@ -12,6 +12,13 @@
 #                                        board such a write simply lands on
 #                                        whatever variable is next and nothing
 #                                        says a word.
+#   estimator   - is the estimate right? Simulates a walk from the robot's
+#                                        URDF (zeus_26) with exact ground truth,
+#                                        runs the real fusion.c on the sensor
+#                                        data that walk produces, and fails if
+#                                        tilt, velocity or height are off. Also
+#                                        fails if zeus_kinematics_model.h was
+#                                        not regenerated after a URDF change.
 #   firmware    - does it still build?   Cross-compiles for the STM32H7RS with
 #                                        arm-none-eabi-gcc. Nothing else checks
 #                                        this: a change can pass every host test
@@ -80,6 +87,47 @@ jobs:
           CC: clang
           SAN: '1'
         run: tools/hosttest/run.sh
+
+  estimator:
+    name: Estimator vs simulated walk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The URDF lives in the Pi workspace repo.
+      - uses: actions/checkout@v4
+        with:
+          repository: vismay5559/zeus_26
+          path: zeus_26
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pinocchio
+        run: pip install -r tools/requirements-kinematics.txt
+
+      # The generated tables carry the sha256 of the URDF they came from. If
+      # zeus_26 has a newer URDF, the firmware is still walking the old robot.
+      - name: Kinematics tables match the URDF
+        run: |
+          urdf=zeus_26/zeus_description/urdf/zeus.urdf
+          want=$(sha256sum "$urdf" | cut -d' ' -f1)
+          have=$(grep -m1 -o 'sha256  [0-9a-f]*' Appli/App/zeus_kinematics_model.h | cut -d' ' -f3)
+          if [ "$want" != "$have" ]; then
+            echo "zeus_kinematics_model.h was generated from a different zeus.urdf"
+            echo "  tables: $have"
+            echo "  URDF:   $want"
+            echo "run: python tools/gen_kinematics.py --urdf <zeus_26>/zeus_description/urdf/zeus.urdf"
+            exit 1
+          fi
+          echo "tables match $urdf ($want)"
+
+      - name: Simulated walk through fusion.c
+        env:
+          URDF: zeus_26/zeus_description/urdf/zeus.urdf
+          OUT: sim_out
+        run: tools/sim/run.sh --check
 
   firmware:
     name: Firmware build (arm-none-eabi)
