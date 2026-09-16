@@ -85,7 +85,9 @@ Appli/App/            ← the actual robot code
    critical.h           ISR-safe copy helper
 
    lie_group.c/.h       SE_K(3) Lie group maths (fixed size)
-   kinematics.c/.h      leg forward kinematics + Jacobian
+   kinematics.c/.h      leg forward kinematics + Jacobian (hand-measured, being replaced)
+   zeus_kinematics.c/.h toe/heel FK + exact Jacobian from the URDF (model: GENERATED -
+                        see tools/gen_kinematics.py)
    inekf.c/.h           contact-aided right-invariant EKF
    fusion.c/.h          bridges sensors <-> filter; fills the policy block
    gait_ref.c/.h        reference trajectory (GENERATED - see tools/gen_gait.py)
@@ -237,6 +239,7 @@ covers today:
 | `test_watchdog` | start, refresh, and the stopped-clock case |
 | `test_lie_group` | rotations stay rotations, and the Gamma coefficients against a double-precision reference |
 | `test_kinematics` | leg geometry, reach limits, and that the Jacobian predicts what the FK actually does |
+| `test_zeus_kinematics` | toe and heel positions and Jacobians from the URDF model, against Pinocchio in double precision |
 | `test_health` | fault thresholds, which subsystem is blamed, latching, and the blink code |
 | `test_gait_ref` | phase wrap, interpolation, the seam, and the two documented table steps |
 | `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
@@ -308,6 +311,40 @@ unused, which fails under `-Werror`; a harness that counts only failed
 assertions reads that as "the mutation survived".
 
 ---
+
+## Kinematics from the URDF
+
+The estimator needs each toe and heel contact point relative to the IMU, and
+its Jacobian. Rather than measuring lengths by hand, the geometry comes from
+the CAD:
+
+```
+Fusion 360 export ─► zeus_26/zeus_description/scripts/clean_urdf.py ─► zeus.urdf
+zeus.urdf ─► tools/gen_kinematics.py ─► Appli/App/zeus_kinematics_model.h      (tables, committed)
+                                     └► tools/hosttest/zeus_kinematics_ref.h   (Pinocchio's answers)
+```
+
+`zeus_kinematics.c` walks those tables on the board: forward kinematics and
+the exact Jacobian for both points of a leg in a few hundred float operations,
+~2 KB of flash. Nothing from Python runs on the robot.
+
+After the model changes (new export, IMU moved, contact points moved):
+
+```bash
+python3 -m venv ~/kin_venv && ~/kin_venv/bin/pip install -r tools/requirements-kinematics.txt   # once
+env -u PYTHONPATH ~/kin_venv/bin/python tools/gen_kinematics.py      # reads ../zeus_26/.../zeus.urdf
+tools/hosttest/run.sh                                                # C against Pinocchio
+```
+
+`env -u PYTHONPATH` matters when ROS is sourced: ROS's eigenpy breaks
+Pinocchio's. `--check` exits 1 if the committed files are stale;
+`--urdf path` reads another model. The firmware logs which model it has as
+`zeus_kin_model_sha`, the first 16 hex digits of the URDF's sha256.
+
+Per leg, `q` is hip pitch, hip roll, knee pitch, ankle pitch (motor side),
+hip and knee spring deflection, then waist pitch and roll - by name
+(`ZEUS_KIN_Q_*`), so a re-export that nests the joints differently changes the
+tables, not the API.
 
 ## Continuous integration
 

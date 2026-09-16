@@ -112,6 +112,10 @@ run_suite test_kinematics \
     "$APP/lie_group.c" \
     "$APP/robot_config.c"
 
+run_suite test_zeus_kinematics \
+    "$HERE/test_zeus_kinematics.c" \
+    "$APP/zeus_kinematics.c"
+
 run_suite test_lie_group \
     "$HERE/test_lie_group.c" \
     "$APP/lie_group.c"

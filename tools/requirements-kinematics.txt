@@ -1,0 +1,4 @@
+# tools/gen_kinematics.py only - the firmware build needs none of this.
+# Install into a venv, never with pip --user on a ROS machine.
+pin==4.1.0
+numpy

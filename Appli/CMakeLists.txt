@@ -142,6 +142,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/robot_config.c
     App/lie_group.c
     App/kinematics.c
+    App/zeus_kinematics.c
     App/inekf.c
     App/fusion.c
     App/gait_ref.c
