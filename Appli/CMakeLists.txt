@@ -149,7 +149,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/test_leg_can.c
     App/test_leg_torque.c
     App/test_imu.c
-    App/enc_as5048a.c
+    App/enc_as5047p.c
     App/imu_bno085.c
     App/act_odrive.c
     App/link_usb.c

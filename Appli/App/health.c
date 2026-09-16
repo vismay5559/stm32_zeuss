@@ -1,7 +1,7 @@
 #include "health.h"
 #include "app.h"
 #include "imu_bno085.h"
-#include "enc_as5048a.h"
+#include "enc_as5047p.h"
 #include "act_odrive.h"
 #include "link_usb.h"
 #include "link_proto.h"

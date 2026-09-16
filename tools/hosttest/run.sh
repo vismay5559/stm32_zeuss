@@ -77,11 +77,11 @@ run_suite() {
     echo
 }
 
-run_suite test_enc_as5048a \
-    "$HERE/test_enc_as5048a.c" \
+run_suite test_enc_as5047p \
+    "$HERE/test_enc_as5047p.c" \
     "$HERE/stub/hal_stub.c" \
     "$HERE/stub/spi_stub.c" \
-    "$APP/enc_as5048a.c"
+    "$APP/enc_as5047p.c"
 
 run_suite test_act_odrive \
     "$HERE/test_act_odrive.c" \

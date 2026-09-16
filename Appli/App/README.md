@@ -64,7 +64,7 @@ will act on commands. Idle means they will not, no matter what arrives.
 Once per tick, in this order:
 
 1. **Sensors are read** — the movement sensor (`imu_bno085`), the joint motors
-   (`act_odrive`), the spring sensors (`enc_as5048a`), the foot switches
+   (`act_odrive`), the spring sensors (`enc_as5047p`), the foot switches
    (`contact`).
 2. **Position is worked out** — `fusion` hands the readings to `inekf`, the
    estimator, which answers "here is where I think the robot is, and here is

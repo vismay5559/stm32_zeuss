@@ -1,16 +1,19 @@
 #include "main.h"
 #include <string.h>
 
+GPIO_TypeDef host_gpiod = { 'D' };
 GPIO_TypeDef host_gpioe = { 'E' };
 GPIO_TypeDef host_gpiof = { 'F' };
 
 /* One level bit per (port, pin). Idle HIGH, because the switches pull to
    ground and the MCU pull-ups hold the line high when nothing is pressed. */
+static uint32_t s_level_d = 0xFFFFFFFFu;
 static uint32_t s_level_e = 0xFFFFFFFFu;
 static uint32_t s_level_f = 0xFFFFFFFFu;
 
 static uint32_t *bank(GPIO_TypeDef *port)
 {
+    if (port == GPIOD) { return &s_level_d; }
     return (port == GPIOF) ? &s_level_f : &s_level_e;
 }
 
@@ -33,6 +36,7 @@ void host_press(GPIO_TypeDef *port, uint16_t pin, int pressed)
 
 void host_release_all(void)
 {
+    s_level_d = 0xFFFFFFFFu;
     s_level_e = 0xFFFFFFFFu;
     s_level_f = 0xFFFFFFFFu;
 }

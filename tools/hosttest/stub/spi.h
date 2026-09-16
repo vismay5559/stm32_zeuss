@@ -4,7 +4,7 @@
 /*
  * Host stand-in for the SPI half of the HAL.
  *
- * enc_as5048a.c reads the four spring encoders over SPI, and the peripheral
+ * enc_as5047p.c reads the four spring encoders over SPI, and the peripheral
  * fills the buffer by itself while the processor gets on with something else.
  * That "by itself" is the whole reason this file has to model anything: the
  * driver starts a read, and the answer arrives later, from an interrupt. A

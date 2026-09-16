@@ -37,7 +37,7 @@
 #define NEXUS_MSG_COMMAND       0x02u
 
 #define NEXUS_NUM_JOINTS        10      /* see the joint map below            */
-#define NEXUS_NUM_ENCODERS      4       /* AS5048A, after-spring (SEA) joints */
+#define NEXUS_NUM_ENCODERS      4       /* AS5047P, after-spring (SEA) joints */
 #define NEXUS_NUM_CONTACTS      4       /* mechanical foot switches           */
 
 /*
@@ -84,6 +84,16 @@
 #define NEXUS_CONTACT_L_HEEL    1
 #define NEXUS_CONTACT_R_TOE     2
 #define NEXUS_CONTACT_R_HEEL    3
+
+/*
+ * Spring encoder order, used by spring_angle[] and the `enc_valid` bitmask
+ * (bit i = index i). Two AS5047P daisy chains, one per leg; enc_as5047p.h
+ * has the wiring.
+ */
+#define NEXUS_ENC_L_HIP_PITCH   0
+#define NEXUS_ENC_L_KNEE_PITCH  1
+#define NEXUS_ENC_R_HIP_PITCH   2
+#define NEXUS_ENC_R_KNEE_PITCH  3
 
 /* Bitmask positions in `contacts`, same order, plus the derived per-foot bits
    the STM32 computes by OR-ing each foot's two switches. */

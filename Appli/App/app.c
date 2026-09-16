@@ -4,7 +4,7 @@
 #include "link_proto.h"
 #include "link_usb.h"
 #include "imu_bno085.h"
-#include "enc_as5048a.h"
+#include "enc_as5047p.h"
 #include "act_odrive.h"
 #include "contact.h"
 #include "critical.h"

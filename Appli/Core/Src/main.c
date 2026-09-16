@@ -28,7 +28,7 @@
 #include "test_leg_torque.h"
 #include "test_imu.h"
 #include "imu_bno085.h"
-#include "enc_as5048a.h"
+#include "enc_as5047p.h"
 #include "act_odrive.h"
 /* USER CODE END Includes */
 
@@ -552,7 +552,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPION_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(enc_cs_GPIO_Port, enc_cs_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(enc_cs_left_GPIO_Port, enc_cs_left_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(enc_cs_right_GPIO_Port, enc_cs_right_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : L_TOE_Pin R_TOE_Pin R_HEEL_Pin L_HEEL_Pin */
   GPIO_InitStruct.Pin = L_TOE_Pin|R_TOE_Pin|R_HEEL_Pin|L_HEEL_Pin;
@@ -560,12 +563,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : enc_cs_Pin */
-  GPIO_InitStruct.Pin = enc_cs_Pin;
+  /*Configure GPIO pin : enc_cs_left_Pin */
+  GPIO_InitStruct.Pin = enc_cs_left_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(enc_cs_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(enc_cs_left_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : enc_cs_right_Pin */
+  GPIO_InitStruct.Pin = enc_cs_right_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(enc_cs_right_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

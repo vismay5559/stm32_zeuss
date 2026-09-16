@@ -4,7 +4,7 @@
  * The numbers in robot_config.h are placeholders and a test cannot say
  * anything about whether they match the robot. What it CAN pin down is the
  * conversion around them: spring deflection is a small signed quantity either
- * side of a mechanical zero, and the raw AS5048A count is an unsigned 0..2pi
+ * side of a mechanical zero, and the raw AS5047P count is an unsigned 0..2pi
  * angle that wraps. Getting that wrong puts a 6.28 rad step into the torque
  * the Pi computes, once per revolution, for any joint whose rest position
  * happens to sit near the wrap point.

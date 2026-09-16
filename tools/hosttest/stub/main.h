@@ -25,9 +25,11 @@ typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET = 1 } GPIO_PinState;
 
 typedef struct { int id; } GPIO_TypeDef;
 
+extern GPIO_TypeDef host_gpiod;
 extern GPIO_TypeDef host_gpioe;
 extern GPIO_TypeDef host_gpiof;
 
+#define GPIOD  (&host_gpiod)
 #define GPIOE  (&host_gpioe)
 #define GPIOF  (&host_gpiof)
 
@@ -36,6 +38,7 @@ extern GPIO_TypeDef host_gpiof;
 #define GPIO_PIN_3  0x0008u
 #define GPIO_PIN_4  0x0010u
 #define GPIO_PIN_5  0x0020u
+#define GPIO_PIN_14 0x4000u
 
 #define L_TOE_Pin        GPIO_PIN_2
 #define L_TOE_GPIO_Port  GPIOE
@@ -45,8 +48,10 @@ extern GPIO_TypeDef host_gpiof;
 #define R_TOE_GPIO_Port  GPIOE
 #define R_HEEL_Pin       GPIO_PIN_5
 #define R_HEEL_GPIO_Port GPIOE
-#define enc_cs_Pin       GPIO_PIN_1
-#define enc_cs_GPIO_Port GPIOF
+#define enc_cs_left_Pin        GPIO_PIN_1
+#define enc_cs_left_GPIO_Port  GPIOF
+#define enc_cs_right_Pin       GPIO_PIN_14
+#define enc_cs_right_GPIO_Port GPIOD
 
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void          HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState v);

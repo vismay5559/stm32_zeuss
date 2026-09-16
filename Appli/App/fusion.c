@@ -15,7 +15,7 @@
  *
  * The important change is not where they live but what they are: forward
  * kinematics now takes ALL FOUR joint angles per leg from the ODrives.
- * hip_pitch and knee used to come from the AS5048A encoders, which sit after
+ * hip_pitch and knee used to come from the AS5047P encoders, which sit after
  * the series springs and measure DEFLECTION - a small signed wind-up, not an
  * absolute joint angle. Both the README and app.c say so explicitly; only
  * this file disagreed, and it was the one feeding the filter.

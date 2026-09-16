@@ -22,7 +22,7 @@
  * q, per leg, in ZEUS_KIN_Q_* order (rad):
  *
  *   - hip pitch and knee are series-elastic. The drive reports the motor side
- *     (HIP_PITCH, KNEE_PITCH), the AS5048A reports the spring's deflection
+ *     (HIP_PITCH, KNEE_PITCH), the AS5047P reports the spring's deflection
  *     (the *_SPRING entries), and the leg's real angle is their sum. Passing 0
  *     for a spring treats it as rigid.
  *   - the waist joints move the torso, and the IMU bolted to it, relative to

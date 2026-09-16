@@ -28,10 +28,34 @@ subsystem up at a time.
 | Board | NUCLEO-H7S3L8 |
 | External flash | Macronix MX25UW25645G, 256 Mbit octal, on XSPI2 |
 | IMU | BNO085, SHTP over UART1 @ 3 Mbaud, 400 Hz |
-| Encoders | 4 × AS5048A, daisy-chained on SPI1 @ 6.25 MHz, 1 kHz |
+| Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: two daisy chains (one per leg), one CS each |
 | Actuators | 10 × ODrive S1 — 5 per bus on 2 × FDCAN |
 | Contacts | 4 × mechanical foot switches (toe/heel, both feet) |
 | Host link | USB High Speed (480 Mbit), CDC |
+
+### Spring encoder wiring
+
+Two AS5047P daisy chains share SPI1; each leg has its own chip select.
+
+| STM32 pin | Nucleo | Signal | Goes to |
+|---|---|---|---|
+| PB3 | — | SPI1_SCK | CLK of all four sensors |
+| PD7 | — | SPI1_MOSI | MOSI of both **hip** sensors |
+| PB4 | — | SPI1_MISO | MISO of both **knee** sensors |
+| PF1 | — | `enc_cs_left` | CSn of both left sensors |
+| PD14 | Arduino **D10** | `enc_cs_right` | CSn of both right sensors |
+
+Within each leg: **hip MISO → knee MOSI**. So each chain runs
+MOSI → hip → knee → MISO. All sensors also need 3.3 V and GND.
+
+| `spring_angle[i]` | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| spring | left hip pitch | left knee pitch | right hip pitch | right knee pitch |
+
+The order within a chain comes from the wiring, not the code: the sensor
+nearest MISO answers first. After wiring, press each spring by hand and check
+the right `spring_angle` moves. If a leg's hip and knee come out swapped, swap
+that leg's two entries in `s_slot[]` in `Appli/App/enc_as5047p.c`.
 
 ### Verified clock tree
 
@@ -77,7 +101,7 @@ Appli/App/            ← the actual robot code
    app.c                1 kHz control loop, health LEDs
    health.c/.h          subsystem health + red-LED blink codes
    imu_bno085.c         BNO085 SHTP-over-UART driver
-   enc_as5048a.c        AS5048A SPI encoder driver
+   enc_as5047p.c        AS5047P SPI encoder driver
    act_odrive.c         ODrive CANSimple, software TX queue
    contact.c            foot switch debouncing
    link_usb.c           framing/CRC for the Pi link
@@ -245,7 +269,7 @@ covers today:
 | `test_inekf` | still, free fall, a known spin, contact correction, and a refused time step |
 | `test_link_usb` | frame reassembly across any split, checksum rejection, and the busy-cable drop |
 | `test_act_odrive` | the interpolated ramp, the speed-hint clamp, arm and stop, a blocked wire, and where a reply is filed |
-| `test_enc_as5048a` | the check digit over every bit position, a sensor's own error flag, and a read that never comes back |
+| `test_enc_as5047p` | left chain then right chain in the right slots, the check digit over every bit position, a sensor's error flag and clearing its error register, and a read that never comes back |
 | `check_proto.py` | that `link_proto.h` and `nexus_proto.py` agree byte for byte |
 
 The App sources are built against a stub HAL in `tools/hosttest/stub/`, so a

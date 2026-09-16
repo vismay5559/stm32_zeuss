@@ -43,7 +43,7 @@ const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS] = {
     { 0u, 1.0f },
 };
 
-#define ENC_COUNTS       16384u          /* AS5048A is 14-bit over a full turn */
+#define ENC_COUNTS       16384u          /* AS5047P is 14-bit over a full turn */
 #define ENC_MASK         (ENC_COUNTS - 1u)
 #define ENC_TO_RAD       (6.28318531f / (float)ENC_COUNTS)
 #define TWO_PI           6.28318531f

@@ -49,6 +49,14 @@ NUM_JOINTS = 10
 NUM_ENCODERS = 4
 NUM_CONTACTS = 4
 
+# Spring encoder order in spring_angle[] and the `enc_valid` bitmask, as
+# NEXUS_ENC_* in link_proto.h: two AS5047P daisy chains, one per leg.
+ENC_L_HIP_PITCH = 0
+ENC_L_KNEE_PITCH = 1
+ENC_R_HIP_PITCH = 2
+ENC_R_KNEE_PITCH = 3
+SPRING_NAMES = ("left_hip_pitch", "left_knee_pitch", "right_hip_pitch", "right_knee_pitch")
+
 # Foot switch order in contact[] and in the `contacts` bitmask.
 CONTACT_L_TOE = 0
 CONTACT_L_HEEL = 1
@@ -106,7 +114,7 @@ POLICY_FIELDS = [
     ("vel_hdg", 3),         # m/s, heading frame: lateral, forward, vertical
     ("joint_pos", 10),      # rad, output side
     ("joint_vel", 10),      # rad/s, output side
-    ("spring_angle", 4),    # rad, SPRING DEFLECTION, not absolute joint angle
+    ("spring_angle", 4),    # rad, SPRING DEFLECTION, SPRING_NAMES order
     ("ref_angle", 10),      # rad, output side: the stored gait at `phase`
     ("contact", 4),         # 0.0/1.0, debounced foot switches
     ("foot_z", 2),          # m, world; [0] right, [1] left

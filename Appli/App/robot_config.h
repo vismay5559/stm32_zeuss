@@ -39,7 +39,7 @@
  * ALL FOUR COME FROM THE ODRIVES.
  *
  * This is a correction. fusion.c used to take hip_pitch and knee from the
- * AS5048A encoders, but those encoders sit AFTER the series springs and
+ * AS5047P encoders, but those encoders sit AFTER the series springs and
  * measure spring deflection, not an absolute joint angle - which both the
  * README ("spring_angle is deflection, not a joint angle") and app.c say
  * explicitly. Feeding a 0..2pi raw deflection in as a hip angle put the foot
@@ -85,7 +85,7 @@ extern const joint_src_t g_leg_joints[2][KIN_LEG_JOINTS];   /* [0]=left [1]=righ
 /* ===================================================================== */
 
 /*
- * The AS5048A is 14-bit over a full turn and reports an absolute 0..2pi
+ * The AS5047P is 14-bit over a full turn and reports an absolute 0..2pi
  * angle. Spring deflection is a small SIGNED quantity either side of a
  * mechanical zero, so the raw reading has to be referenced and wrapped:
  *
@@ -101,7 +101,7 @@ extern const joint_src_t g_leg_joints[2][KIN_LEG_JOINTS];   /* [0]=left [1]=righ
  */
 typedef struct
 {
-    uint16_t zero_counts;   /* raw AS5048A reading at zero deflection */
+    uint16_t zero_counts;   /* raw AS5047P reading at zero deflection */
     float    sign;          /* +1 or -1, so positive means wind-up     */
 } spring_enc_cal_t;
 
