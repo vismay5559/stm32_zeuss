@@ -51,6 +51,8 @@ static int s_fail;
 /* The command numbers, spelled the same way the ODrive manual does. */
 #define CMD_HEARTBEAT     0x001u
 #define CMD_SET_STATE     0x007u
+#define CMD_SET_POS_GAIN  0x01Au
+#define CMD_SET_VEL_GAINS 0x01Bu
 #define CMD_GET_ENCODER   0x009u
 #define CMD_SET_INPUT_POS 0x00Cu
 #define CMD_CLEAR_ERRORS  0x018u
@@ -947,6 +949,146 @@ static void test_the_emergency_stop_bypasses_everything(void)
           "the backlog waiting on the ordinary queue was lost");
 }
 
+/*
+ * THE GAINS THE DRIVES ARE GIVEN
+ *
+ * Each ODrive closes its own position and velocity loops; this board only
+ * sends targets. Which gains those loops use decides whether a joint tracks
+ * or lags, so they cannot be left to whatever happens to be saved in each
+ * drive: the board writes them on every arm, and the Pi can replace them
+ * between runs while tuning.
+ */
+static void test_arming_writes_the_gains_to_every_drive(void)
+{
+    printf("arming writes the gain table to every drive\n");
+
+    fresh_board();
+    act_request_arm();
+
+    CHECK(count_of_cmd(CMD_SET_POS_GAIN) == (uint32_t)NEXUS_NUM_JOINTS,
+          "%u position gains were sent, expected one per joint",
+          count_of_cmd(CMD_SET_POS_GAIN));
+    CHECK(count_of_cmd(CMD_SET_VEL_GAINS) == (uint32_t)NEXUS_NUM_JOINTS,
+          "%u velocity gains were sent, expected one per joint",
+          count_of_cmd(CMD_SET_VEL_GAINS));
+
+    /* The values are the table in robot_config.c, not zeros or leftovers. */
+    const host_can_frame_t *f = sent_to(NEXUS_J_L_HIP_PITCH, CMD_SET_POS_GAIN);
+    CHECK(f != NULL && get_f32(f->data) == g_drive_gains[NEXUS_J_L_HIP_PITCH].pos_gain,
+          "left hip pitch got pos_gain %f, expected %f",
+          f ? (double)get_f32(f->data) : -1.0,
+          (double)g_drive_gains[NEXUS_J_L_HIP_PITCH].pos_gain);
+
+    f = sent_to(NEXUS_J_R_ANKLE_PITCH, CMD_SET_VEL_GAINS);
+    CHECK(f != NULL && get_f32(f->data) == g_drive_gains[NEXUS_J_R_ANKLE_PITCH].vel_gain &&
+              get_f32(&f->data[4]) == g_drive_gains[NEXUS_J_R_ANKLE_PITCH].vel_int_gain,
+          "right ankle got the wrong velocity gains");
+
+    /*
+     * And again on the next arm. A drive that browned out and rebooted comes
+     * back with its own saved gains; if the board only wrote them once at
+     * startup, the robot would be running gains nobody chose.
+     */
+    host_can_forget_sent();
+    act_request_arm();
+    CHECK(count_of_cmd(CMD_SET_POS_GAIN) == (uint32_t)NEXUS_NUM_JOINTS,
+          "the second arm sent %u position gains, expected one per joint",
+          count_of_cmd(CMD_SET_POS_GAIN));
+}
+
+static void test_the_pi_can_replace_the_gains_between_runs(void)
+{
+    printf("gains from the Pi are written now and kept for the next arm\n");
+
+    fresh_board();
+
+    drive_gains_t g[NEXUS_NUM_JOINTS];
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        g[j].pos_gain     = 12.0f + (float)j;
+        g[j].vel_gain     = 0.5f;
+        g[j].vel_int_gain = 2.5f;
+    }
+
+    CHECK(act_set_gains(g) == 1u, "gains were refused on an idle board");
+
+    const host_can_frame_t *f = sent_to(3, CMD_SET_POS_GAIN);
+    CHECK(f != NULL && get_f32(f->data) == 15.0f,
+          "joint 3 got pos_gain %f, expected 15", f ? (double)get_f32(f->data) : -1.0);
+
+    drive_gains_t back[NEXUS_NUM_JOINTS];
+    act_get_gains(back);
+    CHECK(back[3].pos_gain == 15.0f && back[3].vel_int_gain == 2.5f,
+          "the board did not keep the gains it was given");
+
+    /* The next arm uses them, not the compiled-in table. */
+    host_can_forget_sent();
+    act_request_arm();
+    f = sent_to(3, CMD_SET_POS_GAIN);
+    CHECK(f != NULL && get_f32(f->data) == 15.0f,
+          "arming went back to the built-in gains");
+}
+
+static void test_gains_are_refused_while_the_robot_is_driving(void)
+{
+    printf("gains are refused while the robot is being driven\n");
+
+    fresh_board();
+    act_request_arm();
+    all_drives_report_running();
+    set_all_targets(0.5f);              /* now driving */
+    ticks(1);
+
+    drive_gains_t g[NEXUS_NUM_JOINTS];
+    act_get_gains(g);
+    float before = g[0].pos_gain;
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        g[j].pos_gain = 99.0f;
+    }
+
+    host_can_forget_sent();
+    CHECK(act_set_gains(g) == 0u,
+          "a gain change was accepted mid-stride - a step change in torque "
+          "with a leg's weight behind it");
+    CHECK(count_of_cmd(CMD_SET_POS_GAIN) == 0u, "gain frames went out anyway");
+
+    act_get_gains(g);
+    CHECK(g[0].pos_gain == before,
+          "the refused gains were kept anyway (%f)", (double)g[0].pos_gain);
+
+    /* Stop driving and the same change is accepted. */
+    act_disarm();
+    CHECK(act_set_gains(g) == 1u, "gains were still refused after disarming");
+}
+
+static void test_the_target_that_went_out_can_be_read_back(void)
+{
+    printf("what each drive was told is reported back for tuning\n");
+
+    fresh_board();
+
+    float sent[NEXUS_NUM_JOINTS];
+    CHECK(act_get_sent_targets(sent) == 0u,
+          "a board that is not driving claims it is");
+
+    act_request_arm();
+    all_drives_report_running();
+    set_all_targets(1.0f);
+    ticks(1);
+
+    CHECK(act_get_sent_targets(sent) == 1u, "a driving board claims it is not");
+
+    const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
+    CHECK(f != NULL && NEAR(sent[0], get_f32(f->data), 1e-6f),
+          "joint 0 reports %f as its target but %f went on the wire",
+          (double)sent[0], f ? (double)get_f32(f->data) : -1.0);
+
+    act_disarm();
+    CHECK(act_get_sent_targets(sent) == 0u,
+          "a disarmed board still claims to be driving");
+}
+
 int main(void)
 {
     printf("act_odrive.c host tests\n");
@@ -970,6 +1112,10 @@ int main(void)
     test_a_reading_is_handed_over_once_and_then_ages();
     test_a_wire_that_shuts_itself_down_is_restarted();
     test_the_emergency_stop_bypasses_everything();
+    test_arming_writes_the_gains_to_every_drive();
+    test_the_pi_can_replace_the_gains_between_runs();
+    test_gains_are_refused_while_the_robot_is_driving();
+    test_the_target_that_went_out_can_be_read_back();
 
     printf("-----------------------\n");
     if (s_fail)

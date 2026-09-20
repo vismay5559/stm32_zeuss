@@ -31,6 +31,23 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
     },
 };
 
+/*
+ * Starting gains, per joint, in the NEXUS_J_* order. Hip pitch and knee carry
+ * the bench leg's tuned numbers; the ankle is behind a 9:1 so its velocity
+ * gain is far smaller; hip roll has never been tuned and starts where hip
+ * pitch did.
+ */
+const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch   */ { 30.0f, 10.0f, 50.0f },
+    /* L hip_roll    */ { 30.0f, 10.0f, 50.0f },
+    /* L knee_pitch  */ { 30.0f, 10.0f, 50.0f },
+    /* L ankle_pitch */ { 17.0f,  0.3f,  1.5f },
+    /* R hip_pitch   */ { 30.0f, 10.0f, 50.0f },
+    /* R hip_roll    */ { 30.0f, 10.0f, 50.0f },
+    /* R knee_pitch  */ { 30.0f, 10.0f, 50.0f },
+    /* R ankle_pitch */ { 17.0f,  0.3f,  1.5f },
+};
+
 const uint8_t g_leg_springs[2][2] = {
     { NEXUS_ENC_L_HIP_PITCH, NEXUS_ENC_L_KNEE_PITCH },
     { NEXUS_ENC_R_HIP_PITCH, NEXUS_ENC_R_KNEE_PITCH },

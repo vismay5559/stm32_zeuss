@@ -17,11 +17,15 @@ extern USBD_HandleTypeDef hUsbDeviceHS;
 static uint8_t s_rx_dma[LINK_RX_DMA_SIZE] NEXUS_DMA_BUFFER;
 static uint8_t s_tx_dma[sizeof(nexus_state_t)] NEXUS_DMA_BUFFER;
 
-static uint8_t  s_acc[sizeof(nexus_cmd_t)];
+static uint8_t  s_acc[NEXUS_RX_MAX];
 static uint16_t s_acc_len;
 static uint8_t  s_sync_seen;
 
 static nexus_cmd_t s_cmd;
+static nexus_gains_t s_gains;
+static volatile uint8_t s_gains_ready;
+static uint32_t s_gains_count;
+static uint16_t s_want;          /* bytes expected for the frame being read */
 static volatile uint8_t s_cmd_ready;
 
 /* Commands accepted from the Pi. Used to detect a dead link. */
@@ -136,25 +140,67 @@ static void feed(uint8_t b)
         return;
     }
 
+    /*
+     * The third byte says what this is, and different messages are different
+     * lengths. Deciding here - rather than assuming every frame is a command -
+     * is what lets the rare gains message share the same reader without the
+     * 250 Hz command path paying for it.
+     */
+    if (s_acc_len == 2u)
+    {
+        if (b == (uint8_t)NEXUS_MSG_COMMAND)
+        {
+            s_want = (uint16_t)sizeof(nexus_cmd_t);
+        }
+        else if (b == (uint8_t)NEXUS_MSG_GAINS)
+        {
+            s_want = (uint16_t)sizeof(nexus_gains_t);
+        }
+        else
+        {
+            /* Not a message this board knows. Start looking for sync again -
+               and this byte may itself be the start of the next frame, so it
+               is tested rather than thrown away. */
+            s_acc_len = (b == (uint8_t)(NEXUS_SYNC & 0xFFu)) ? 1u : 0u;
+            s_acc[0]  = b;
+            return;
+        }
+    }
+
     s_acc[s_acc_len++] = b;
 
-    if (s_acc_len < sizeof(nexus_cmd_t))
+    if (s_acc_len < s_want)
     {
         return;
     }
 
-    nexus_cmd_t *c   = (nexus_cmd_t *)s_acc;
-    uint16_t     crc = nexus_crc16(s_acc, sizeof(nexus_cmd_t) - sizeof(uint16_t));
+    uint16_t crc = nexus_crc16(s_acc, (uint32_t)(s_want - sizeof(uint16_t)));
 
-    if ((c->crc == crc) && (c->msg_id == NEXUS_MSG_COMMAND) &&
-        (c->version == NEXUS_PROTO_VERSION))
+    if (s_acc[2] == (uint8_t)NEXUS_MSG_COMMAND)
     {
-        memcpy(&s_cmd, c, sizeof(s_cmd));
-        s_cmd_ready = 1;
-        s_cmd_count++;
+        nexus_cmd_t *c = (nexus_cmd_t *)s_acc;
+
+        if ((c->crc == crc) && (c->version == NEXUS_PROTO_VERSION))
+        {
+            memcpy(&s_cmd, c, sizeof(s_cmd));
+            s_cmd_ready = 1;
+            s_cmd_count++;
+        }
+    }
+    else
+    {
+        nexus_gains_t *g = (nexus_gains_t *)s_acc;
+
+        if ((g->crc == crc) && (g->version == NEXUS_PROTO_VERSION))
+        {
+            memcpy(&s_gains, g, sizeof(s_gains));
+            s_gains_ready = 1;
+            s_gains_count++;
+        }
     }
 
     s_acc_len = 0;
+    s_want    = 0;
 }
 
 void link_usb_on_rx(uint8_t *buf, uint32_t len)
@@ -168,6 +214,30 @@ void link_usb_on_rx(uint8_t *buf, uint32_t len)
 uint32_t link_usb_cmd_count(void)
 {
     return s_cmd_count;
+}
+
+uint32_t link_usb_gains_count(void)
+{
+    return s_gains_count;
+}
+
+uint8_t link_usb_take_gains(nexus_gains_t *out)
+{
+    if (!s_gains_ready)
+    {
+        return 0;
+    }
+
+    /* Same reason as the command below: feed() writes s_gains from the USB
+       ISR, and half of one gains message spliced onto half of another would
+       be applied to the drives without anything noticing. */
+    uint32_t primask = critical_enter();
+
+    memcpy(out, &s_gains, sizeof(*out));
+    s_gains_ready = 0;
+
+    critical_exit(primask);
+    return 1;
 }
 
 uint8_t link_usb_take_command(nexus_cmd_t *out)

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "link_proto.h"
+#include "robot_config.h"
 
 /* ODrive axis states, from CANSimple's Heartbeat and Set_Axis_State. */
 #define ODRV_AXIS_STATE_UNDEFINED            0u
@@ -60,6 +61,31 @@ void act_on_rx(uint8_t bus_index);
  * instructions first, and this function trusts what it is given completely.
  */
 void act_set_targets(const float target_pos[NEXUS_NUM_JOINTS]);
+
+/*
+ * What each drive was last actually told, in output-shaft turns - the
+ * interpolated value act_tick_1khz() put on the wire, not the target it was
+ * working towards. Returns 0 if nothing is being driven, in which case the
+ * values are stale.
+ *
+ * This is the number to plot a measured position against when tuning: it has
+ * been through the reference, the residual, the safety envelope, the slew
+ * limit and the interpolator, which is everything between the policy and the
+ * motor.
+ */
+uint8_t act_get_sent_targets(float out[NEXUS_NUM_JOINTS]);
+
+/*
+ * Replace the gains written to the drives, and write them now.
+ *
+ * Returns 0 - changing nothing - if the robot is driving; gains are a
+ * between-runs thing. The table is re-sent on every arm, so a drive that
+ * reboots comes back with these rather than its own saved values.
+ */
+uint8_t act_set_gains(const drive_gains_t gains[NEXUS_NUM_JOINTS]);
+
+/* The gains currently in force. */
+void act_get_gains(drive_gains_t out[NEXUS_NUM_JOINTS]);
 /*
  * The regular motor work: send out the current targets and ask for fresh
  * readings back. Call once per heartbeat.

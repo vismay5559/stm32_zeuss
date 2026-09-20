@@ -24,7 +24,8 @@
  *
  * at the joint-map index of each drive (bus 0: index = node - 1). Everything
  * else reads as absent, not as a plausible zero: quaternions are identity,
- * foot_z is NaN with fk_valid clear, fused_valid is INVALID, and stream_flags
+ * foot_z and act_target are NaN with fk_valid clear, fused_valid is INVALID,
+ * and stream_flags
  * carries NEXUS_STREAM_LEG_TEST so a reader can tell this packet from the
  * robot's.
  *

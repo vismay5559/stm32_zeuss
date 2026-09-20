@@ -37,6 +37,14 @@ void leg_stream_fill(nexus_state_t *st,
     st->imu_quat[0] = 1.0f;
     st->foot_z[0]   = (float)NAN;
     st->foot_z[1]   = (float)NAN;
+
+    /* The leg test drives the joints itself, without the interpolator or the
+       safety envelope, so there is no "what the drive was told" to report.
+       NaN rather than 0, which would plot as a command of zero. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        st->act_target[j] = (float)NAN;
+    }
     st->fk_valid    = 0u;
     st->fused_valid = NEXUS_FUSION_INVALID;
 

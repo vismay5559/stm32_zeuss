@@ -31,10 +31,11 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     7u      /* v7: 8 joints, no waist (see the joint map) */
+#define NEXUS_PROTO_VERSION     8u      /* v8: act_target, and gains from the Pi      */
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
+#define NEXUS_MSG_GAINS         0x03u   /* Pi -> board, rare: drive gains     */
 
 #define NEXUS_NUM_JOINTS        8       /* see the joint map below            */
 #define NEXUS_NUM_ENCODERS      4       /* AS5047P, after-spring (SEA) joints */
@@ -215,16 +216,30 @@ typedef struct __attribute__((packed))
     float    act_torque[NEXUS_NUM_JOINTS];   /* 240 Nm, estimate                */
     uint32_t act_error[NEXUS_NUM_JOINTS];    /* 272 raw ODrive axis_error       */
 
-    /* ---- estimator internals ---------------------------------- 304 */
-    float    fused_pos[3];                   /* 304 m, world. [2] duplicates
+    /*
+     * WHAT THE DRIVE WAS TOLD, this tick, rad on the output side - the
+     * interpolated target act_odrive actually put on the wire, after the
+     * reference, the policy's residual, the safety envelope and the slew
+     * limit have all had their say.
+     *
+     * ref_angle + residual is what the Pi ASKED for; this is what the joint
+     * was ACTUALLY commanded, and it is the only honest thing to plot a
+     * measured joint_pos against when tuning a drive's gains. NaN while
+     * nothing is being driven, so a plot shows a gap rather than a flat line
+     * that looks like a held command.
+     */
+    float    act_target[NEXUS_NUM_JOINTS];   /* 304 rad, OUTPUT side, or NaN    */
+
+    /* ---- estimator internals ---------------------------------- 336 */
+    float    fused_pos[3];                   /* 336 m, world. [2] duplicates
                                                     pelvis_z; [0] and [1] drift
                                                     and are for logging only.   */
-    float    fused_vel[3];                   /* 316 m/s, WORLD frame, before the
+    float    fused_vel[3];                   /* 348 m/s, WORLD frame, before the
                                                     heading rotation            */
-    float    fused_gyro_bias[3];             /* 328 rad/s, estimated            */
-    float    fused_accel_bias[3];            /* 340 m/s^2, estimated            */
+    float    fused_gyro_bias[3];             /* 360 rad/s, estimated            */
+    float    fused_accel_bias[3];            /* 372 m/s^2, estimated            */
 
-    /* ---- diagnostics ------------------------------------------ 352 *
+    /* ---- diagnostics ------------------------------------------ 384 *
      *
      * These used to go out only on the serial console, in a line that cost
      * ~9.5 ms of a 1 ms control loop every two seconds - a diagnostic that
@@ -232,25 +247,25 @@ typedef struct __attribute__((packed))
      * reading this packet at 1 kHz, so they belong here, where they can be
      * plotted against everything else that happened at the same moment.
      */
-    uint32_t overruns;                       /* 352 ticks missed, cumulative    */
-    uint32_t usb_dropped;                    /* 356 state packets skipped       */
-    uint16_t can_dropped[2];                 /* 360 TX frames dropped, per bus  */
-    uint16_t loop_us_max;                    /* 364 worst cycle since last sent */
-    uint16_t enc_stalls;                     /* 366 SPI transfers abandoned     */
-    uint8_t  can_bus_off[2];                 /* 368 bus-off events, saturating  */
-    uint8_t  stream_flags;                   /* 370 NEXUS_STREAM_*              */
-    uint8_t  reserved0;                      /* 371 keeps the next field even   */
+    uint32_t overruns;                       /* 384 ticks missed, cumulative    */
+    uint32_t usb_dropped;                    /* 388 state packets skipped       */
+    uint16_t can_dropped[2];                 /* 392 TX frames dropped, per bus  */
+    uint16_t loop_us_max;                    /* 396 worst cycle since last sent */
+    uint16_t enc_stalls;                     /* 398 SPI transfers abandoned     */
+    uint8_t  can_bus_off[2];                 /* 400 bus-off events, saturating  */
+    uint8_t  stream_flags;                   /* 402 NEXUS_STREAM_*              */
+    uint8_t  reserved0;                      /* 403 keeps the next field even   */
 
-    /* ---- 2-byte fields ---------------------------------------- 372 */
-    uint16_t contact_ticks[2];               /* 372 ticks each foot held state  */
+    /* ---- 2-byte fields ---------------------------------------- 404 */
+    uint16_t contact_ticks[2];               /* 404 ticks each foot held state  */
 
-    /* ---- 1-byte fields ---------------------------------------- 376 */
-    uint8_t  act_state[NEXUS_NUM_JOINTS];    /* 376 raw ODrive axis_state       */
-    uint8_t  act_flags[NEXUS_NUM_JOINTS];    /* 384 per-joint freshness         */
-    uint8_t  enc_valid;                      /* 392 bit per encoder             */
-    uint8_t  contacts;                       /* 393 switch + derived foot bits  */
-    uint8_t  fused_valid;                    /* 394 NEXUS_FUSION_*              */
-    uint8_t  health;                         /* 395 health.h bitmask            */
+    /* ---- 1-byte fields ---------------------------------------- 408 */
+    uint8_t  act_state[NEXUS_NUM_JOINTS];    /* 408 raw ODrive axis_state       */
+    uint8_t  act_flags[NEXUS_NUM_JOINTS];    /* 416 per-joint freshness         */
+    uint8_t  enc_valid;                      /* 424 bit per encoder             */
+    uint8_t  contacts;                       /* 425 switch + derived foot bits  */
+    uint8_t  fused_valid;                    /* 426 NEXUS_FUSION_*              */
+    uint8_t  health;                         /* 427 health.h bitmask            */
 
     /*
      * Which foot_z entries are real measurements: bit 0 = foot_z[0] (right),
@@ -259,15 +274,25 @@ typedef struct __attribute__((packed))
      * without checking one of them. It used to be sent as 0.0, which reads as
      * "exactly on the ground".
      */
-    uint8_t  fk_valid;                       /* 396 bit per foot                */
+    uint8_t  fk_valid;                       /* 428 bit per foot                */
 
     /* NEXUS_SAFETY_* - whether the board is allowed to be driving, and why
        not. Lets the Pi see a fault it caused, and see that a stand-down or a
        re-arm handshake was actually acted on. */
-    uint8_t  safety_state;                   /* 397                             */
+    uint8_t  safety_state;                   /* 429                             */
 
-    uint16_t crc;                            /* 398 CRC16-CCITT over 0..397     */
-} nexus_state_t;                             /* 400 total                       */
+    /*
+     * The seq of the last gains message this board APPLIED (low byte). The Pi
+     * sends gains, watches this change, and knows they landed. It does not
+     * change when a gains message is refused - which is what happens if the
+     * robot is armed, since retuning a drive mid-stride is not something to
+     * allow by accident.
+     */
+    uint8_t  gains_seq;                      /* 430                             */
+    uint8_t  reserved1;                      /* 431 keeps the crc even          */
+
+    uint16_t crc;                            /* 432 CRC16-CCITT over 0..431     */
+} nexus_state_t;                             /* 434 total                       */
 
 typedef struct __attribute__((packed))
 {
@@ -306,6 +331,36 @@ typedef struct __attribute__((packed))
     uint16_t flags;                          /* 40 */
     uint16_t crc;                            /* 42 */
 } nexus_cmd_t;                               /* 44 total                        */
+
+/*
+ * DRIVE GAINS, Pi -> board. Sent rarely, by hand or by a tuning script; the
+ * board applies them to every drive over CAN and re-applies them on every arm,
+ * so a drive that reboots comes back with the gains that were being tuned
+ * rather than whatever is in its own memory.
+ *
+ * Refused unless the robot is disarmed - see gains_seq above. The defaults
+ * live in robot_config.h, so a board with no Pi attached still arms with known
+ * gains.
+ *
+ * The ODrive's own loops: pos_gain is (turn/s)/turn, vel_gain is Nm/(turn/s),
+ * vel_integrator_gain is Nm/turn. A negative value means "leave this drive's
+ * saved value alone", the same convention the bench leg test uses.
+ */
+typedef struct __attribute__((packed))
+{
+    uint16_t sync;                           /*   0 */
+    uint8_t  msg_id;                         /*   2 NEXUS_MSG_GAINS */
+    uint8_t  version;                        /*   3 */
+    uint32_t seq;                            /*   4 echoed in state as gains_seq */
+    float    pos_gain[NEXUS_NUM_JOINTS];     /*   8 */
+    float    vel_gain[NEXUS_NUM_JOINTS];     /*  40 */
+    float    vel_int_gain[NEXUS_NUM_JOINTS]; /*  72 */
+    uint16_t crc;                            /* 104 CRC16-CCITT over 0..103     */
+} nexus_gains_t;                             /* 106 total                       */
+
+/* The longest message the board can receive, for the reader's buffer. */
+#define NEXUS_RX_MAX  (sizeof(nexus_gains_t) > sizeof(nexus_cmd_t) \
+                       ? sizeof(nexus_gains_t) : sizeof(nexus_cmd_t))
 
 /*
  * Work out the check number for a message.

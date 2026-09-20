@@ -37,7 +37,7 @@ from typing import Callable, Deque, List, Optional, Sequence
 
 import serial
 
-from nexus_proto import (CMD_ENABLE, NUM_JOINTS, NexusCommand, NexusState,
+from nexus_proto import (CMD_ENABLE, NUM_JOINTS, NexusCommand, NexusGains, NexusState,
                          STATE_SIZE)
 
 
@@ -106,6 +106,9 @@ class NexusLink:
 
         self._tx_lock = threading.Lock()
         self._cmd_seq = 0
+        # Starts at 1, and skips 0 on wrap: the board's gains_seq powers on at
+        # 0, so a message sent with seq 0 would look applied before it landed.
+        self._gains_seq = 1
 
         self.stats = LinkStats()
 
@@ -269,6 +272,31 @@ class NexusLink:
             cmd = NexusCommand(seq=self._cmd_seq, residual=list(residual), flags=flags)
             self._cmd_seq = (self._cmd_seq + 1) & 0xFFFFFFFF
             self._ser.write(cmd.pack())
+
+    def send_gains(self, pos_gain: Sequence[float], vel_gain: Sequence[float],
+                   vel_int_gain: Sequence[float]) -> int:
+        """Send drive gains to the board. Returns the seq it was sent with.
+
+        Between runs only. The board refuses a change while it is driving and
+        says so by NOT advancing `gains_seq` in the state packet - so the
+        caller watches for `gains_seq == returned_seq & 0xFF` to know they
+        landed. A negative gain leaves that drive's own saved value alone.
+
+        These are not saved in the drives. They survive a drive reboot, because
+        the board re-sends them on every arm, but not a board reboot: settled
+        values belong in robot_config.c."""
+        if self._ser is None:
+            raise RuntimeError("link not started")
+
+        with self._tx_lock:
+            seq = self._gains_seq
+            self._gains_seq = (self._gains_seq + 1) & 0xFFFFFFFF
+            if (self._gains_seq & 0xFF) == 0:
+                self._gains_seq += 1
+            self._ser.write(NexusGains(seq=seq, pos_gain=list(pos_gain),
+                                       vel_gain=list(vel_gain),
+                                       vel_int_gain=list(vel_int_gain)).pack())
+        return seq
 
     def stand_down(self, residual: Optional[Sequence[float]] = None) -> None:
         """Hand the actuators back: send a command with CMD_ENABLE clear.

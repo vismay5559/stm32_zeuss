@@ -56,6 +56,18 @@ void    link_usb_on_rx(uint8_t *buf, uint32_t len);
 uint8_t link_usb_take_command(nexus_cmd_t *out);
 
 /*
+ * Pick up a drive-gains message from the Pi, if one has arrived.
+ *
+ * Returns 1 and fills in `out` when there is one, 0 when there is not. These
+ * arrive rarely - somebody tuning, not a control loop - and act_odrive decides
+ * whether the robot is in a state where they may be applied.
+ */
+uint8_t link_usb_take_gains(nexus_gains_t *out);
+
+/* How many good gains messages have arrived in total. */
+uint32_t link_usb_gains_count(void);
+
+/*
  * How many good instructions have arrived from the Pi in total.
  *
  * If this stops climbing, the Pi has gone quiet - which the safety system

@@ -107,6 +107,45 @@ extern const uint8_t g_leg_springs[2][2];
 #define ROBOT_SPRING_MAX_DEFLECTION_RAD   0.35f
 
 /* ===================================================================== */
+/*  Drive gains                                                           */
+/* ===================================================================== */
+
+/*
+ * Each ODrive closes its own position and velocity loops at 8 kHz; this board
+ * only sends targets. These are the gains it writes to every drive when it
+ * arms, so a drive that has been swapped, reflashed or rebooted comes up with
+ * the gains that are in git rather than whatever is saved in that particular
+ * drive.
+ *
+ * The Pi can override them while the robot is disarmed (NEXUS_MSG_GAINS) -
+ * that is the tuning loop - but what is here is what the robot arms with after
+ * a power cycle. When a value is settled, put it here.
+ *
+ * Units are the ODrive's own:
+ *   pos_gain            (turn/s) per turn of error
+ *   vel_gain            Nm per (turn/s) of error
+ *   vel_integrator_gain Nm per turn of accumulated error
+ *
+ * A NEGATIVE value means "leave this drive's own saved value alone", which is
+ * how a joint is taken out of the loop while tuning its neighbour.
+ *
+ * TO MEASURE: every one of these. The starting values are the bench leg's
+ * (test_leg_can.c) - hip pitch and knee ran 30 / 10 / 50, the 9:1 ankle 17 /
+ * 0.3 / 1.5 - repeated for both legs and guessed for hip roll. Tune them with
+ * the robot on a stand, one joint at a time: see the README.
+ */
+#define ROBOT_GAIN_KEEP   (-1.0f)
+
+typedef struct
+{
+    float pos_gain;
+    float vel_gain;
+    float vel_int_gain;
+} drive_gains_t;
+
+extern const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS];
+
+/* ===================================================================== */
 /*  Spring encoders                                                       */
 /* ===================================================================== */
 

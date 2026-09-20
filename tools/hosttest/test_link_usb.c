@@ -47,6 +47,24 @@ static void build_command(nexus_cmd_t *c, uint32_t seq)
     c->crc = nexus_crc16((const uint8_t *)c, sizeof(*c) - sizeof(uint16_t));
 }
 
+static void build_gains(nexus_gains_t *g, uint32_t seq)
+{
+    memset(g, 0, sizeof(*g));
+    g->sync    = NEXUS_SYNC;
+    g->msg_id  = NEXUS_MSG_GAINS;
+    g->version = NEXUS_PROTO_VERSION;
+    g->seq     = seq;
+
+    for (int i = 0; i < NEXUS_NUM_JOINTS; i++)
+    {
+        g->pos_gain[i]     = 20.0f + (float)i;
+        g->vel_gain[i]     = 1.0f + 0.1f * (float)i;
+        g->vel_int_gain[i] = 5.0f;
+    }
+
+    g->crc = nexus_crc16((const uint8_t *)g, sizeof(*g) - sizeof(uint16_t));
+}
+
 /*
  * link_usb_init() deliberately does NOT reset the received/dropped counters:
  * health.c decides the Pi has gone quiet by watching link_usb_cmd_count()
@@ -358,6 +376,101 @@ static void test_a_busy_cable_drops_the_report_rather_than_splicing_it(void)
           (unsigned long)sent->seq);
 }
 
+/*
+ * Two message types now share one reader, and they are different lengths. The
+ * reader decides how many bytes to expect from the id in the third byte; if it
+ * ever assumed the command's length again, a gains message would be cut short
+ * and the bytes after it read as a frame of their own.
+ */
+static void test_a_gains_message_arrives_intact(void)
+{
+    printf("a gains message, which is longer than a command, arrives whole\n");
+
+    nexus_gains_t sent, got;
+
+    reset_link();
+    build_gains(&sent, 77u);
+
+    CHECK(link_usb_take_gains(&got) == 0u, "gains appeared before any were sent");
+
+    feed_in_chunks((const uint8_t *)&sent, sizeof(sent), 7u);
+
+    CHECK(link_usb_take_gains(&got) == 1u, "a whole gains message was not accepted");
+    CHECK(got.seq == 77u, "gains seq came back as %u", (unsigned)got.seq);
+    CHECK(got.pos_gain[0] == 20.0f && got.vel_gain[NEXUS_NUM_JOINTS - 1] == 1.7f,
+          "gains values did not survive: pos_gain[0] %f, vel_gain[last] %f",
+          (double)got.pos_gain[0], (double)got.vel_gain[NEXUS_NUM_JOINTS - 1]);
+    CHECK(link_usb_take_gains(&got) == 0u, "the same gains were handed over twice");
+}
+
+static void test_a_gains_message_does_not_disturb_commands(void)
+{
+    printf("a gains message between two commands costs neither of them\n");
+
+    nexus_cmd_t c1, c2, got;
+    nexus_gains_t g;
+
+    reset_link();
+    build_command(&c1, 1u);
+    build_gains(&g, 2u);
+    build_command(&c2, 3u);
+
+    feed_in_chunks((const uint8_t *)&c1, sizeof(c1), 5u);
+    CHECK(link_usb_take_command(&got) == 1u && got.seq == 1u, "first command lost");
+
+    feed_in_chunks((const uint8_t *)&g, sizeof(g), 5u);
+    feed_in_chunks((const uint8_t *)&c2, sizeof(c2), 5u);
+
+    CHECK(link_usb_take_command(&got) == 1u && got.seq == 3u,
+          "the command after a gains message was lost or misread (seq %u)",
+          (unsigned)got.seq);
+
+    nexus_gains_t gg;
+    CHECK(link_usb_take_gains(&gg) == 1u && gg.seq == 2u, "the gains message itself was lost");
+}
+
+static void test_a_gains_message_with_the_wrong_version_is_refused(void)
+{
+    printf("gains from a Pi running a different protocol are refused\n");
+
+    nexus_gains_t g, got;
+
+    reset_link();
+    build_gains(&g, 9u);
+    g.version = (uint8_t)(NEXUS_PROTO_VERSION + 1u);
+    g.crc = nexus_crc16((const uint8_t *)&g, sizeof(g) - sizeof(uint16_t));
+
+    feed_in_chunks((const uint8_t *)&g, sizeof(g), 11u);
+    CHECK(link_usb_take_gains(&got) == 0u, "gains from the wrong version were accepted");
+
+    /* And a corrupted one. */
+    build_gains(&g, 10u);
+    ((uint8_t *)&g)[20] ^= 0x40u;
+    feed_in_chunks((const uint8_t *)&g, sizeof(g), 11u);
+    CHECK(link_usb_take_gains(&got) == 0u, "a corrupted gains message was accepted");
+}
+
+static void test_an_unknown_message_id_does_not_swallow_the_next(void)
+{
+    printf("a message this board does not know costs only itself\n");
+
+    nexus_cmd_t c, got;
+    uint8_t junk[8];
+
+    reset_link();
+    junk[0] = (uint8_t)(NEXUS_SYNC & 0xFFu);
+    junk[1] = (uint8_t)((NEXUS_SYNC >> 8) & 0xFFu);
+    junk[2] = 0x7Fu;                       /* no such message id */
+    memset(&junk[3], 0xAA, sizeof(junk) - 3u);
+
+    build_command(&c, 5u);
+    link_usb_on_rx(junk, sizeof(junk));
+    feed_in_chunks((const uint8_t *)&c, sizeof(c), 6u);
+
+    CHECK(link_usb_take_command(&got) == 1u && got.seq == 5u,
+          "the command after an unknown message id was lost");
+}
+
 int main(void)
 {
     printf("link_usb.c host tests\n");
@@ -372,6 +485,10 @@ int main(void)
     test_back_to_back_commands_both_arrive();
     test_a_state_packet_is_sent_with_a_valid_checksum();
     test_a_busy_cable_drops_the_report_rather_than_splicing_it();
+    test_a_gains_message_arrives_intact();
+    test_a_gains_message_does_not_disturb_commands();
+    test_a_gains_message_with_the_wrong_version_is_refused();
+    test_an_unknown_message_id_does_not_swallow_the_next();
 
     printf("---------------------\n");
     if (s_fail)

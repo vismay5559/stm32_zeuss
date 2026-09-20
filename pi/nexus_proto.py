@@ -40,10 +40,11 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 7
+PROTO_VERSION = 8
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
+MSG_GAINS = 0x03        # Pi -> board, rare: drive gains
 
 NUM_JOINTS = 8
 NUM_ENCODERS = 4
@@ -219,6 +220,7 @@ STATE_FORMAT = (
     # ---------------- actuator diagnostics ----------------
     "8f"     # act_torque      Nm
     "8I"     # act_error
+    "8f"     # act_target      rad, what the drive was told, NaN when idle
     # ---------------- estimator internals ----------------
     "3f"     # fused_pos       m world
     "3f"     # fused_vel       m/s world, before heading rotation
@@ -242,6 +244,8 @@ STATE_FORMAT = (
     "B"      # health
     "B"      # fk_valid        bit per foot_z entry
     "B"      # safety_state    SAFETY_*
+    "B"      # gains_seq       echo of the last gains message applied
+    "B"      # reserved1
     "H"      # crc
 )
 STATE_SIZE = struct.calcsize(STATE_FORMAT)
@@ -312,6 +316,12 @@ class NexusState:
     # ---- actuator diagnostics -------------------------------------------
     act_torque: List[float]      # Nm
     act_error: List[int]
+    act_target: List[float]      # rad, what the drive was actually told; NaN
+                                 # while nothing is being driven. ref_angle +
+                                 # residual is what was ASKED for; this is what
+                                 # the joint got, after the safety envelope,
+                                 # the slew limit and the interpolator - the
+                                 # thing to plot joint_pos against when tuning.
 
     # ---- estimator internals --------------------------------------------
     fused_pos: List[float]       # m, world; [0],[1] drift, logging only
@@ -336,6 +346,9 @@ class NexusState:
     health: int
     fk_valid: int                # bit per foot_z entry; see foot_z_right/left
     safety_state: int            # SAFETY_*
+    gains_seq: int               # low byte of the last gains message applied;
+                                 # unchanged means the board refused it
+    reserved1: int
 
     # ---- convenience ----------------------------------------------------
 
@@ -493,6 +506,7 @@ class NexusState:
             imu_seq=take(1)[0],
             act_torque=take(NUM_JOINTS),
             act_error=take(NUM_JOINTS),
+            act_target=take(NUM_JOINTS),
             fused_pos=take(3),
             fused_vel=take(3),
             fused_gyro_bias=take(3),
@@ -514,6 +528,8 @@ class NexusState:
             health=take(1)[0],
             fk_valid=take(1)[0],
             safety_state=take(1)[0],
+            gains_seq=take(1)[0],
+            reserved1=take(1)[0],
         )
 
     @classmethod
@@ -565,6 +581,56 @@ class NexusCommand:
         body = struct.pack(
             COMMAND_FORMAT[:-1],       # everything except the trailing crc
             SYNC, MSG_COMMAND, PROTO_VERSION, self.seq, *pos, self.flags,
+        )
+        return body + struct.pack("<H", crc16(body))
+
+
+GAINS_FORMAT = (
+    "<"
+    "H"      # sync
+    "B"      # msg_id
+    "B"      # version
+    "I"      # seq             echoed back in the state packet as gains_seq
+    "8f"     # pos_gain        (turn/s) per turn
+    "8f"     # vel_gain        Nm per (turn/s)
+    "8f"     # vel_int_gain    Nm per turn
+    "H"      # crc
+)
+GAINS_SIZE = struct.calcsize(GAINS_FORMAT)
+
+
+@dataclass
+class NexusGains:
+    """
+    Drive gains, Pi -> board. Sent between runs, never in a control loop.
+
+    The board writes these to every ODrive over CAN and re-sends them on each
+    arm, so a drive that reboots comes back with the gains being tuned rather
+    than its own saved ones. It REFUSES them while the robot is driving: watch
+    `gains_seq` in the state packet, which only moves when a message was
+    applied.
+
+    A negative gain means "leave that drive's saved value alone".
+    """
+
+    seq: int = 0
+    pos_gain: Optional[List[float]] = None
+    vel_gain: Optional[List[float]] = None
+    vel_int_gain: Optional[List[float]] = None
+
+    def pack(self) -> bytes:
+        def col(v, name):
+            out = list(v) if v is not None else [-1.0] * NUM_JOINTS
+            if len(out) != NUM_JOINTS:
+                raise ValueError(f"{name} must have {NUM_JOINTS} entries")
+            return out
+
+        body = struct.pack(
+            GAINS_FORMAT[:-1],
+            SYNC, MSG_GAINS, PROTO_VERSION, self.seq,
+            *col(self.pos_gain, "pos_gain"),
+            *col(self.vel_gain, "vel_gain"),
+            *col(self.vel_int_gain, "vel_int_gain"),
         )
         return body + struct.pack("<H", crc16(body))
 

@@ -86,7 +86,8 @@ run_suite test_enc_as5047p \
 run_suite test_act_odrive \
     "$HERE/test_act_odrive.c" \
     "$HERE/stub/fdcan_stub.c" \
-    "$APP/act_odrive.c"
+    "$APP/act_odrive.c" \
+    "$APP/robot_config.c"
 
 run_suite test_link_usb \
     "$HERE/test_link_usb.c" \

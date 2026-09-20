@@ -14,6 +14,7 @@
 #include "watchdog.h"
 #include "nexus_mode.h"
 #include "fusion.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -228,6 +229,7 @@ static void update_health_leds(void)
 
 static float s_phase;
 static float s_ref_turns[NEXUS_NUM_JOINTS];
+static uint8_t s_gains_seq;   /* echo of the last gains message applied */
 
 static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
 {
@@ -407,6 +409,19 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
         s_state.joint_vel[j] = act.vel[j] * TURNS_TO_RAD;
     }
 
+    /*
+     * What each drive was actually told this tick - the number to plot
+     * joint_pos against when tuning. NaN while nothing is being driven: a
+     * held-over target would look like a command the joint is ignoring.
+     */
+    float sent_turns[NEXUS_NUM_JOINTS];
+    uint8_t driving = act_get_sent_targets(sent_turns);
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_state.act_target[j] = driving ? (sent_turns[j] * TURNS_TO_RAD) : (float)NAN;
+    }
+
     /* ---- contacts: four switches, as floats for the observation ------ */
     uint8_t sw = contact_switches();
 
@@ -448,6 +463,8 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
     s_state.enc_stalls = (stalls > 0xFFFFu) ? 0xFFFFu : (uint16_t)stalls;
 
     s_state.reserved0 = 0;
+    s_state.reserved1 = 0;
+    s_state.gains_seq = s_gains_seq;
     s_state.contact_ticks[0] = contact_stable_ticks(0);
     s_state.contact_ticks[1] = contact_stable_ticks(1);
 
@@ -508,6 +525,29 @@ void app_run(void)
            This runs far more often than once per tick, so the five frames
            queued each tick reach the wire well inside that tick. */
         act_tx_pump();
+
+        /*
+         * Gains from the Pi: rare, and only between runs. act_set_gains()
+         * refuses while the robot is driving and the echo below simply does
+         * not move, which is how the Pi is told it was refused.
+         */
+        nexus_gains_t gains;
+
+        if (link_usb_take_gains(&gains))
+        {
+            drive_gains_t g[NEXUS_NUM_JOINTS];
+
+            for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+            {
+                g[j].pos_gain     = gains.pos_gain[j];
+                g[j].vel_gain     = gains.vel_gain[j];
+                g[j].vel_int_gain = gains.vel_int_gain[j];
+            }
+            if (act_set_gains(g))
+            {
+                s_gains_seq = (uint8_t)(gains.seq & 0xFFu);
+            }
+        }
 
         if (link_usb_take_command(&cmd))
         {

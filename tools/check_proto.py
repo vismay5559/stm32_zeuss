@@ -50,6 +50,7 @@ FIELDS = [
     # ---- actuator diagnostics ----
     ("act_torque",       "f", P.NUM_JOINTS),
     ("act_error",        "I", P.NUM_JOINTS),
+    ("act_target",       "f", P.NUM_JOINTS),
     # ---- estimator internals ----
     ("fused_pos",        "f", 3),
     ("fused_vel",        "f", 3),
@@ -72,6 +73,8 @@ FIELDS = [
     ("health",           "B", 1),
     ("fk_valid",         "B", 1),
     ("safety_state",     "B", 1),
+    ("gains_seq",        "B", 1),
+    ("reserved1",        "B", 1),
     ("crc",              "H", 1),
 ]
 
@@ -99,6 +102,7 @@ def c_offsets():
         lines.append(f'  printf("{name} %zu\\n", offsetof(nexus_state_t, {name}));')
     lines.append('  printf("__size__ %zu\\n", sizeof(nexus_state_t));')
     lines.append('  printf("__cmd__ %zu\\n", sizeof(nexus_cmd_t));')
+    lines.append('  printf("__gains__ %zu\\n", sizeof(nexus_gains_t));')
     for macro, _ in JOINT_MACROS:
         lines.append(f'  printf("J:{macro} %d\\n", (int){macro});')
     lines.append('  return 0;}')
@@ -147,6 +151,10 @@ def main():
     ok = c["__cmd__"] == P.COMMAND_SIZE
     bad += not ok
     print(f"{'sizeof(cmd)':<20}{c['__cmd__']:>8}{P.COMMAND_SIZE:>10}   {'ok' if ok else 'MISMATCH'}")
+
+    ok = c["__gains__"] == P.GAINS_SIZE
+    bad += not ok
+    print(f"{'sizeof(gains)':<20}{c['__gains__']:>8}{P.GAINS_SIZE:>10}   {'ok' if ok else 'MISMATCH'}")
 
     # Every 4-byte field must be 4-aligned or the M7 pays for byte-wise access
     # and numpy cannot view the buffer in place.

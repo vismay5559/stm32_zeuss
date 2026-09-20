@@ -111,6 +111,12 @@ static void test_absent_data_reads_as_absent(void)
           "fused quaternion is not identity");
     CHECK(st.imu_quat[0] == 1.0f && st.imu_quat[3] == 0.0f, "IMU quaternion is not identity");
     CHECK(isnan(st.foot_z[0]) && isnan(st.foot_z[1]), "foot_z is not NaN");
+    for (int k = 0; k < NEXUS_NUM_JOINTS; k++)
+    {
+        CHECK(isnan(st.act_target[k]),
+              "act_target[%d] is not NaN: the leg test has no interpolated "
+              "target to report", k);
+    }
     CHECK(st.fk_valid == 0u, "fk_valid claims a valid foot");
     CHECK(st.fused_valid == NEXUS_FUSION_INVALID, "fused_valid is not INVALID");
     CHECK(st.pelvis_z == 0.0f && st.health == 0u && st.contacts == 0u && st.enc_valid == 0u,

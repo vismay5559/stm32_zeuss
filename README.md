@@ -1367,7 +1367,7 @@ The Nucleo has two USB ports, and they do different jobs:
 
 On the user port the board is a USB *device* and the Pi is the *host*. It shows
 up as a serial port (USB CDC, `/dev/ttyACM*`, USB ID `0483:5740`) and carries
-binary packets, not text: a 400-byte state packet every millisecond out, 44-byte
+binary packets, not text: a 434-byte state packet every millisecond out, 44-byte
 commands in. Plug it into any USB port on the Pi.
 
 What sends packets depends on the mode:
@@ -1467,7 +1467,7 @@ ros2 launch zeus_bringup robot.launch.py rerun:=connect rerun_host:=<LAPTOP_IP> 
 
 ## What the Pi receives
 
-One **400-byte packet every millisecond** (400 KB/s, under 1% of USB HS).
+One **434-byte packet every millisecond** (434 KB/s, under 1% of USB HS).
 `Appli/App/link_proto.h` and `pi/nexus_proto.py` describe the same bytes;
 `tools/check_proto.py` compares every field offset, both struct sizes and the
 joint map, so a mismatch is caught rather than debugged.
@@ -1519,6 +1519,40 @@ Putting the waist back: `NEXUS_NUM_JOINTS` 10, `ODRV_NODES_PER_BUS` 5, the map
 above back to `bus * 5`, the two `NEXUS_J_WAIST_*` indices, the waist entries in
 `robot_config.c`, the version bump, and the Pi side to match. The tag
 **`waist-10-actuators`** marks the last commit that had them.
+
+### What the drive was told
+
+`act_target[]` is the number the interpolator actually put on the wire this
+tick, in radians on the output side - the reference, plus the policy's
+residual, after the safety envelope and the slew limit. `ref_angle + residual`
+is what the Pi **asked** for; this is what the joint **got**, and it is the only
+honest thing to plot `joint_pos` against when tuning a drive. It is NaN
+whenever nothing is being driven, so a plot shows a gap rather than a flat line
+that reads as a command the joint is ignoring.
+
+### Gains, from the Pi
+
+The ODrives close their own position and velocity loops; this board only sends
+targets. `g_drive_gains[]` in `robot_config.c` is what it writes to every drive
+**on every arm** - not once at boot, so a drive that browned out or was swapped
+comes back with the gains the robot is actually running rather than whatever is
+saved in that particular drive.
+
+The Pi can replace that table between runs with a third message type,
+`nexus_gains_t` (`NEXUS_MSG_GAINS`, 106 bytes, sent by hand or by a tuning
+script - never in a control loop):
+
+- **Refused while the robot is driving.** A velocity gain changing under load is
+  a step change in torque with a leg's weight behind it.
+- **The board says so by NOT moving `gains_seq`** in the state packet, which
+  echoes the seq of the last gains message it applied. The Pi sends, watches
+  that byte, and knows.
+- **Not saved in the drives.** Power-cycle the board and it goes back to
+  `robot_config.c`. When a value is settled, put it there and reflash.
+
+The Pi side is `zeus gains show / push / set` and `zeus tune` in
+[zeus_26](https://github.com/vismay5559/zeus_26); the metrics that say which
+gain to change live in `zeus_link.tuning`.
 
 ### The policy block
 
@@ -1675,12 +1709,12 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **The policy block is contiguous and its offset is checked.**
   `tools/check_proto.py` fails if the block moves or gains a gap, because the
   zero-copy slice above would then read the wrong bytes silently.
-- **Protocol version is 7.** v1 sent raw encoder counts; v2 added the health
+- **Protocol version is 8.** v1 sent raw encoder counts; v2 added the health
   byte and alignment; v3 added the policy block and split the contacts; v4 added
   `fk_valid` and `safety_state`; v5 added the diagnostics block; v6 made the
-  command a residual rather than a target; v7 dropped the two waist joints.
-  422 → 424 → 444 → 400 bytes. Mismatched versions reject each other rather
-  than silently misparsing.
+  command a residual rather than a target; v7 dropped the two waist joints; v8
+  added `act_target` and the gains message. 422 → 424 → 444 → 400 → 434 bytes.
+  Mismatched versions reject each other rather than silently misparsing.
 
 ## Watching it live — Rerun
 

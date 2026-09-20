@@ -1,4 +1,5 @@
 #include "act_odrive.h"
+#include "robot_config.h"
 #include "critical.h"
 #include "main.h"
 #include <math.h>
@@ -15,6 +16,8 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define ODRV_CMD_GET_ENCODER      0x009u
 #define ODRV_CMD_SET_INPUT_POS    0x00Cu
 #define ODRV_CMD_GET_TORQUES      0x01Cu
+#define ODRV_CMD_SET_POS_GAIN     0x01Au
+#define ODRV_CMD_SET_VEL_GAINS    0x01Bu
 
 /* How often a standing disarm request is repeated while faulted, in ticks.
    Once is not enough - the frame can be lost, or a drive can reboot into
@@ -92,6 +95,11 @@ static float    s_out[NEXUS_NUM_JOINTS];
 static float    s_prev_out[NEXUS_NUM_JOINTS];
 static uint32_t s_seg_tick;
 static uint8_t  s_have_target;
+
+/* The gains every drive is given when it arms. Starts as the table in
+   robot_config.c; the Pi may replace it while disarmed. */
+static drive_gains_t s_gains[NEXUS_NUM_JOINTS];
+static uint8_t       s_gains_loaded;
 
 /* Ticks since each joint last reported a position. Written from the FDCAN
    ISRs and from the tick, so every access is inside a critical section. */
@@ -232,6 +240,15 @@ void act_init(void)
     memset(s_txq_head, 0, sizeof(s_txq_head));
     memset(s_txq_tail, 0, sizeof(s_txq_tail));
     memset(s_tx_dropped, 0, sizeof(s_tx_dropped));
+    if (!s_gains_loaded)
+    {
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+        {
+            s_gains[j] = g_drive_gains[j];
+        }
+        s_gains_loaded = 1;
+    }
+
     memset(s_seg_start, 0, sizeof(s_seg_start));
     memset(s_seg_end, 0, sizeof(s_seg_end));
     memset(s_out, 0, sizeof(s_out));
@@ -393,9 +410,99 @@ static void request_all_closed_loop(void)
     act_tx_pump();
 }
 
+static void put_f32_le(uint8_t *p, float v)
+{
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    p[0] = (uint8_t)(bits & 0xFFu);
+    p[1] = (uint8_t)((bits >> 8) & 0xFFu);
+    p[2] = (uint8_t)((bits >> 16) & 0xFFu);
+    p[3] = (uint8_t)((bits >> 24) & 0xFFu);
+}
+
+/*
+ * Write the gain table to the drives.
+ *
+ * Sent on every arm, not once at boot: a drive that browned out, was swapped
+ * or rebooted mid-session would otherwise come back holding its own saved
+ * gains while the robot behaved as though it had the tuned ones. Two frames
+ * per joint, sixteen in all, and only ever while disarmed or arming.
+ */
+static void send_gains(void)
+{
+    uint8_t data[8];
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
+        uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
+
+        if (s_gains[j].pos_gain >= 0.0f)
+        {
+            memset(data, 0, sizeof(data));
+            put_f32_le(&data[0], s_gains[j].pos_gain);
+            tx_enqueue(bus, (node << 5) | ODRV_CMD_SET_POS_GAIN, data);
+        }
+        if ((s_gains[j].vel_gain >= 0.0f) && (s_gains[j].vel_int_gain >= 0.0f))
+        {
+            memset(data, 0, sizeof(data));
+            put_f32_le(&data[0], s_gains[j].vel_gain);
+            put_f32_le(&data[4], s_gains[j].vel_int_gain);
+            tx_enqueue(bus, (node << 5) | ODRV_CMD_SET_VEL_GAINS, data);
+        }
+    }
+    act_tx_pump();
+}
+
+uint8_t act_set_gains(const drive_gains_t gains[NEXUS_NUM_JOINTS])
+{
+    /*
+     * Not while the robot is driving. Changing a velocity gain under load is
+     * a step change in torque with a leg's weight behind it, and the whole
+     * point of the tuning loop is that it happens between runs.
+     */
+    if (!s_disarmed && s_have_target)
+    {
+        return 0;
+    }
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_gains[j] = gains[j];
+    }
+    send_gains();
+    return 1;
+}
+
+void act_get_gains(drive_gains_t out[NEXUS_NUM_JOINTS])
+{
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        out[j] = s_gains[j];
+    }
+}
+
+uint8_t act_get_sent_targets(float out[NEXUS_NUM_JOINTS])
+{
+    uint32_t primask = critical_enter();
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        out[j] = s_out[j];
+    }
+    uint8_t driving = s_have_target;
+
+    critical_exit(primask);
+    return driving;
+}
+
 void act_request_arm(void)
 {
     uint8_t data[8] = { 0 };
+
+    /* Gains before closed loop: a drive that has just been told to hold
+       position should be holding it with the gains we think it has. */
+    send_gains();
 
     s_disarmed   = 0;
     s_arming     = 1;

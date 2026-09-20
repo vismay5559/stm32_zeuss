@@ -66,6 +66,7 @@ def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x33):
         # ---- actuator diagnostics ----
         *([1.5] * P.NUM_JOINTS),      # act_torque
         *([0] * P.NUM_JOINTS),        # act_error
+        *([0.3] * P.NUM_JOINTS),      # act_target: what the drives were told
         # ---- estimator internals ----
         0.0, 0.0, height,             # fused_pos
         0.4, 0.1, 0.0,                # fused_vel, world
@@ -88,6 +89,8 @@ def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x33):
         0x00,                         # health
         0x03,                         # fk_valid: both feet real
         P.SAFETY_ARMED,               # safety_state
+        0,                            # gains_seq
+        0,                            # reserved1
     )
     return body + struct.pack("<H", crc16(body))
 
