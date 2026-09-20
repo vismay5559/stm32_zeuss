@@ -15,11 +15,17 @@
  * foot switch, both seen from the IMU through the waist and the whole leg.
  *
  * Per leg the kinematics take eight angles. Four are the leg's drives, two are
- * the waist drives (they move the IMU relative to both legs), and two are the
- * spring deflections of hip pitch and knee - ADDED to those joints' motor
+ * the spring deflections of hip pitch and knee - ADDED to those joints' motor
  * side, because the drives measure before the spring and the AS5047Ps measure
- * only the spring. robot_config.h has the history of getting that wrong both
- * ways.
+ * only the spring (robot_config.h has the history of getting that wrong both
+ * ways) - and two are the waist joints.
+ *
+ * THE WAIST IS BOLTED in this build: there are no waist actuators (link_proto.h
+ * says why), so both waist angles are held at zero. They stay in the chain
+ * because the IMU is mounted above them, and they are given a small variance
+ * rather than none - a bolted bracket is stiff, not infinitely stiff, and
+ * claiming certainty the robot does not have is how a filter talks itself into
+ * a wrong answer.
  */
 
 #define TURNS_TO_RAD   6.28318531f
@@ -72,8 +78,9 @@
  * show up at the foot as angle error too, so the motor figure is deliberately
  * loose. Tune on recorded data, not by datasheet.
  */
-#define NOISE_MOTOR_RAD            0.0175f   /* 1 deg: drives and waist         */
+#define NOISE_MOTOR_RAD            0.0175f   /* 1 deg: the leg drives           */
 #define NOISE_SPRING_RAD           0.005f    /* 0.3 deg: AS5047P, 14-bit        */
+#define NOISE_WAIST_BOLTED_RAD     0.0087f   /* 0.5 deg: play in a bolted joint */
 
 /* A spring that cannot be read could be anywhere within its travel. Using 0
    with this much doubt is honest; using 0 as if it were measured is not. */
@@ -184,10 +191,7 @@ static void leg_input(int leg,
         [ROBOT_JOINT_KNEE]      = ZEUS_KIN_Q_KNEE_PITCH,
         [ROBOT_JOINT_ANKLE]     = ZEUS_KIN_Q_ANKLE_PITCH,
     };
-    static const uint8_t waist_q[2] = {
-        [ROBOT_WAIST_PITCH] = ZEUS_KIN_Q_WAIST_PITCH,
-        [ROBOT_WAIST_ROLL]  = ZEUS_KIN_Q_WAIST_ROLL,
-    };
+    static const uint8_t waist_q[2] = { ZEUS_KIN_Q_WAIST_PITCH, ZEUS_KIN_Q_WAIST_ROLL };
     static const uint8_t spring_q[2] = {
         [ROBOT_SPRING_HIP]  = ZEUS_KIN_Q_HIP_PITCH_SPRING,
         [ROBOT_SPRING_KNEE] = ZEUS_KIN_Q_KNEE_PITCH_SPRING,
@@ -208,14 +212,11 @@ static void leg_input(int leg,
         in->fresh = (uint8_t)(in->fresh | (act->pos_age[src->act_index] == 0u));
     }
 
+    /* The waist is bolted at its zero pose - no drive to read. */
     for (int j = 0; j < 2; j++)
     {
-        const joint_src_t *src = &g_waist_joints[j];
-
-        in->q[waist_q[j]]   = drive_angle(src, act);
-        in->var[waist_q[j]] = motor_var;
-        in->ok    = (uint8_t)(in->ok & drive_ok(src, act));
-        in->fresh = (uint8_t)(in->fresh | (act->pos_age[src->act_index] == 0u));
+        in->q[waist_q[j]]   = 0.0f;
+        in->var[waist_q[j]] = NOISE_WAIST_BOLTED_RAD * NOISE_WAIST_BOLTED_RAD;
     }
 
     for (int k = 0; k < 2; k++)

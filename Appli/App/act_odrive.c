@@ -25,7 +25,11 @@ extern FDCAN_HandleTypeDef hfdcan2;
    in closed loop. Same reasoning as the disarm repeat, opposite direction. */
 #define ODRV_ARM_REPEAT_TICKS     100u
 
-#define ODRV_NODES_PER_BUS        5
+/* Four leg drives per bus. The waist drives (node 5 on each bus) are not
+   part of this build - see the joint map in link_proto.h. The RX filter is
+   left open to node 5 so an unexpected drive still shows up as a dropped
+   frame rather than silence. */
+#define ODRV_NODES_PER_BUS        4
 #define ODRV_FILTER_ID_LOW        0x020u   /* node 1, cmd 0  */
 #define ODRV_FILTER_ID_HIGH       0x0BFu   /* node 5, cmd 31 */
 

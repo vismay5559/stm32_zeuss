@@ -16,9 +16,9 @@
  *
  * Vocabulary, since the CAN wire has its own:
  *
- *   bus       one of the two wires. Joints 0-4 are on bus 0, joints 5-9 on
+ *   bus       one of the two wires. Joints 0-3 are on bus 0, joints 4-7 on
  *             bus 1.
- *   node      which motor on that wire, 1 to 5.
+ *   node      which motor on that wire, 1 to 4.
  *   frame     one message. Its address ("identifier") packs the node and the
  *             kind of message together: (node << 5) | command.
  *   turns     the unit ODrive counts position in. One turn is one revolution.
@@ -56,7 +56,7 @@ static int s_fail;
 #define CMD_CLEAR_ERRORS  0x018u
 #define CMD_GET_TORQUES   0x01Cu
 
-#define NODES_PER_BUS  5
+#define NODES_PER_BUS  4
 
 /* ---- reading and writing the eight bytes of a frame ------------------ */
 
@@ -465,7 +465,7 @@ static void test_stopping_goes_limp_and_stays_limp(void)
 
     CHECK(act_is_armed() == 0u, "it still reports itself as switched on");
 
-    /* Every one of the ten joints is asked to go limp. */
+    /* Every one of the eight joints is asked to go limp. */
     CHECK(count_of_cmd(CMD_SET_STATE) == (uint32_t)NEXUS_NUM_JOINTS,
           "%u joints were told to stop, expected %d",
           count_of_cmd(CMD_SET_STATE), NEXUS_NUM_JOINTS);
@@ -493,7 +493,7 @@ static void test_stopping_goes_limp_and_stays_limp(void)
      * A single request can be lost, and a drive that reboots comes back in
      * whatever state it was configured for - so a standing stop is repeated,
      * slowly. Every 100 ticks, not every tick: a wire that is already in
-     * trouble does not need ten more frames a millisecond.
+     * trouble does not need eight more frames a millisecond.
      */
     act_tick_1khz();
     CHECK(count_of_cmd(CMD_SET_STATE) == (uint32_t)NEXUS_NUM_JOINTS,
@@ -557,9 +557,9 @@ static void test_it_keeps_asking_until_every_motor_confirms(void)
 
     CHECK(act_all_closed_loop() == 0u,
           "it reported every motor running before any had said so");
-    CHECK(act_not_closed_loop_mask() == 0x3FFu,
-          "the list of joints not yet running was 0x%03X, expected all ten "
-          "(0x3FF)", act_not_closed_loop_mask());
+    CHECK(act_not_closed_loop_mask() == 0x0FFu,
+          "the list of joints not yet running was 0x%03X, expected all eight "
+          "(0x0FF)", act_not_closed_loop_mask());
 
     /* Nothing has confirmed, so the request is repeated - slowly. */
     host_can_forget_sent();
@@ -625,7 +625,7 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     host_can_wire_blocked(0, 1);
 
     set_all_targets(1.0f);
-    ticks(4);                        /* 4 ticks x 5 joints = 20 commands */
+    ticks(5);                        /* 5 ticks x 4 joints = 20 commands */
 
     CHECK(act_tx_dropped(0) == 2u,
           "the blocked wire lost %u commands; expected 20 sent minus the 18 "
@@ -683,7 +683,7 @@ static void test_replies_land_on_the_right_joint(void)
 
     uint32_t before = act_rx_count(1);
 
-    /* Joint 7 is the third motor on the second wire. */
+    /* Joint 7 is the fourth motor on the second wire. */
     drive_reports_position(7, 7.5f, -1.25f);
 
     act_telemetry_t t;
@@ -702,7 +702,7 @@ static void test_replies_land_on_the_right_joint(void)
           before, act_rx_count(1));
 
     /* No other joint moved. */
-    CHECK(NEAR(t.pos[2], 0.0f, 1e-6f) && NEAR(t.pos[8], 0.0f, 1e-6f),
+    CHECK(NEAR(t.pos[2], 0.0f, 1e-6f) && NEAR(t.pos[6], 0.0f, 1e-6f),
           "a reply for joint 7 changed another joint's reading");
 
     /*
@@ -714,8 +714,11 @@ static void test_replies_land_on_the_right_joint(void)
     before = act_rx_count(1);
     uint8_t d[8] = { 0 };
 
-    host_can_deliver(1, (0u << 5) | CMD_GET_ENCODER, d);   /* node 0 */
-    host_can_deliver(1, (6u << 5) | CMD_GET_ENCODER, d);   /* node 6 */
+    host_can_deliver(1, (0u << 5) | CMD_GET_ENCODER, d);   /* node 0          */
+    host_can_deliver(1, (5u << 5) | CMD_GET_ENCODER, d);   /* node 5: the
+                                                              waist, not part
+                                                              of this build   */
+    host_can_deliver(1, (6u << 5) | CMD_GET_ENCODER, d);   /* node 6          */
     act_on_rx(1);
 
     CHECK(act_rx_count(1) == before,
@@ -754,7 +757,7 @@ static void test_a_frame_from_a_wire_that_does_not_exist_is_bounded(void)
      * should never arrive - but it used to work out WHICH JOINT a frame
      * belonged to by multiplying that number out, without checking it first.
      * A 2 would have filed the frame as joint 10, 11 or 12, and there are
-     * only ten. The write would have gone past the end of the table and
+     * only eight. The write would have gone past the end of the table and
      * landed on whichever variable happened to sit next to it in memory.
      *
      * Nothing on the board does that today. The check is here because the
@@ -830,9 +833,9 @@ static void test_a_reading_is_handed_over_once_and_then_ages(void)
        rolling over and pretending to be brand new. */
     ticks(20);
     act_get(&b);
-    CHECK(b.pos_age[9] == 0xFFFFu,
+    CHECK(b.pos_age[NEXUS_NUM_JOINTS - 1] == 0xFFFFu,
           "a joint that has never reported now looks %u ticks old",
-          b.pos_age[9]);
+          b.pos_age[NEXUS_NUM_JOINTS - 1]);
 }
 
 static void test_a_wire_that_shuts_itself_down_is_restarted(void)
@@ -913,7 +916,7 @@ static void test_the_emergency_stop_bypasses_everything(void)
      * This runs from a crash handler, where the ordinary queue may be exactly
      * what is broken. So it goes straight to the hardware, and it must finish
      * even when a wire will never accept anything again - hanging here would
-     * strand the other wire too, and with it the other five joints.
+     * strand the other wire too, and with it the other four joints.
      */
     act_emergency_idle();
 

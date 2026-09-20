@@ -167,7 +167,7 @@ static void test_foot_follows_the_drives(void)
     fusion_fill_state(&a);
 
     /* Bend every joint on the right leg by a quarter turn. */
-    for (int j = 5; j < 9; j++)
+    for (int j = NEXUS_J_R_HIP_PITCH; j <= NEXUS_J_R_ANKLE_PITCH; j++)
     {
         s_act.pos[j] = 0.25f;
     }
@@ -304,24 +304,47 @@ static void test_an_unreadable_spring_is_not_believed(void)
           (double)impossible, (double)rigid);
 }
 
-/* The waist sits between the IMU and both legs. */
-static void test_a_faulted_waist_invalidates_both_legs(void)
+/*
+ * The waist sits between the IMU and both legs, and this build has no waist
+ * actuators: it is bolted at zero. So no drive can invalidate it, and no
+ * telemetry can move it - the kinematics must behave as if it were welded.
+ */
+static void test_the_bolted_waist_never_moves(void)
 {
-    printf("a faulted waist axis invalidates both legs\n");
+    printf("the waist is bolted: no drive index moves it\n");
 
     fixtures_reset();
     fusion_init();
     tick(1, 0);
 
-    s_act.axis_error[g_waist_joints[ROBOT_WAIST_PITCH].act_index] = 0x20u;
+    nexus_state_t before;
+    memset(&before, 0, sizeof(before));
+    fusion_fill_state(&before);
+
+    /* Drive every index the packet has, including the ones the waist used to
+       live at, and the feet must not move by so much as a micron. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_act.pos[j] = 0.0f;
+    }
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        if ((j < NEXUS_J_L_HIP_PITCH) || (j > NEXUS_J_R_ANKLE_PITCH))
+        {
+            s_act.pos[j] = 0.25f;          /* nothing outside the legs exists */
+        }
+    }
     tick(1, 0);
 
-    nexus_state_t st;
-    memset(&st, 0, sizeof(st));
-    fusion_fill_state(&st);
+    nexus_state_t after;
+    memset(&after, 0, sizeof(after));
+    fusion_fill_state(&after);
 
-    CHECK(st.fk_valid == 0u,
-          "fk_valid = 0x%02X with the waist pitch axis faulted, expected 0", st.fk_valid);
+    CHECK(after.foot_z[0] == before.foot_z[0] && after.foot_z[1] == before.foot_z[1],
+          "a non-leg drive index moved a foot (%f -> %f)",
+          (double)before.foot_z[1], (double)after.foot_z[1]);
+    CHECK(after.fk_valid == 0x3u,
+          "fk_valid = 0x%02X: the bolted waist invalidated a leg", after.fk_valid);
 }
 
 /* Toe and heel are separate contact points, each keyed off its own switch. */
@@ -440,7 +463,7 @@ int main(void)
     test_faulted_axis_invalidates_its_leg();
     test_spring_deflection_adds_to_the_drive();
     test_an_unreadable_spring_is_not_believed();
-    test_a_faulted_waist_invalidates_both_legs();
+    test_the_bolted_waist_never_moves();
     test_each_switch_is_its_own_contact();
     test_never_reports_ok_while_uncalibrated();
     test_no_nan_in_a_healthy_run();

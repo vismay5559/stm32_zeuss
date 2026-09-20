@@ -84,12 +84,10 @@ JOINT_MACROS = [
     ("NEXUS_J_L_HIP_ROLL", "left_hip_roll"),
     ("NEXUS_J_L_KNEE_PITCH", "left_knee_pitch"),
     ("NEXUS_J_L_ANKLE_PITCH", "left_ankle_pitch"),
-    ("NEXUS_J_WAIST_ROLL", "waist_roll"),
     ("NEXUS_J_R_HIP_PITCH", "right_hip_pitch"),
     ("NEXUS_J_R_HIP_ROLL", "right_hip_roll"),
     ("NEXUS_J_R_KNEE_PITCH", "right_knee_pitch"),
     ("NEXUS_J_R_ANKLE_PITCH", "right_ankle_pitch"),
-    ("NEXUS_J_WAIST_PITCH", "waist_pitch"),
 ]
 
 

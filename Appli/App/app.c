@@ -209,16 +209,16 @@ static void update_health_leds(void)
  *
  * Joint indices are the NEXUS_J_* map in link_proto.h:
  *
- *     bus 0: 0 L hip_pitch  1 L hip_roll  2 L knee  3 L ankle  4 waist_roll
- *     bus 1: 5 R hip_pitch  6 R hip_roll  7 R knee  8 R ankle  9 waist_pitch
+ *     bus 0: 0 L hip_pitch  1 L hip_roll  2 L knee  3 L ankle
+ *     bus 1: 4 R hip_pitch  5 R hip_roll  6 R knee  7 R ankle
  *
  * Each row below says, by name, which table column drives which joint on each
  * side. Table columns are NOT in node order (see gait_ref.h), so this is the
  * only place that pairing is made.
  *
- * THE WAIST HAS NO REFERENCE. The trajectory has four leg columns and nothing
- * for the waist, so indices 4 and 9 are held at zero - upright - and only the
- * policy's residual moves them.
+ * Every joint in this build is a leg joint, so every index gets a reference.
+ * (The waist used to sit at indices 4 and 9 with no column of its own and was
+ * held at zero; this build has no waist actuators at all.)
  */
 /*
  * Stride playback rate. 1.0 plays the trajectory at the speed it was optimised

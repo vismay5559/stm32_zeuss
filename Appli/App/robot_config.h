@@ -39,7 +39,9 @@
  *
  *   hip_pitch, hip_roll, knee_pitch, ankle_pitch   from that leg's ODrives
  *   hip_pitch_spring, knee_pitch_spring            from that leg's AS5047Ps
- *   waist_pitch, waist_roll                        from the waist ODrives
+ *   waist_pitch, waist_roll                        held at zero - this build
+ *                                                  has no waist actuators and
+ *                                                  the waist is bolted
  *
  * A series-elastic joint's real angle is the motor side PLUS the spring's
  * deflection: the ODrive's encoder sits after the gearbox but before the
@@ -60,7 +62,7 @@
  * NEXUS_ENC_*), and confirmed against the wiring:
  *
  *     node 1 hip_pitch   node 2 hip_roll   node 3 knee   node 4 ankle
- *     node 5 waist       (roll on bus 0, pitch on bus 1)
+ *     (node 5, the waist, is not part of this build)
  *
  * What is still NOT measured is every sign and offset in these tables. The
  * convention they must match is the URDF's: every pitch joint positive about
@@ -87,12 +89,6 @@ typedef struct
 #define ROBOT_LEG_MOTORS         4
 
 extern const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS];   /* [0]=left [1]=right */
-
-/* The two waist joints, shared by both legs' chains. */
-#define ROBOT_WAIST_PITCH        0
-#define ROBOT_WAIST_ROLL         1
-
-extern const joint_src_t g_waist_joints[2];
 
 /* Each leg's spring encoders, NEXUS_ENC_* indices: [leg][0] hip, [leg][1] knee. */
 #define ROBOT_SPRING_HIP         0

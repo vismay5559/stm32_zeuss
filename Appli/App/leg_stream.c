@@ -5,7 +5,7 @@
 
 #define TWO_PI                 6.28318530718f
 #define ODRV_CLOSED_LOOP       8u
-#define NODES_PER_BUS          5u
+#define NODES_PER_BUS          4u
 
 static float turns_to_output_rad(float turns, float scale)
 {

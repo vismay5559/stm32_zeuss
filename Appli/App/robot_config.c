@@ -5,8 +5,8 @@
 /*
  * Which telemetry index feeds each FK slot. The indices are the NEXUS_J_*
  * joint map in link_proto.h - node 1 hip_pitch, node 2 hip_roll, node 3 knee,
- * node 4 ankle, left leg on bus 0 and right on bus 1. Node 5 on each bus is a
- * waist joint (g_waist_joints below).
+ * node 4 ankle, left leg on bus 0 and right on bus 1. Node 5 on each bus would
+ * be a waist joint; this build has none.
  *
  * Every sign is +1 and every offset 0, which is another way of writing "not
  * measured". Both matter: the sign says whether the drive's positive
@@ -29,11 +29,6 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
         /* knee_pitch  */ { NEXUS_J_R_KNEE_PITCH,  1.0f, 0.0f },   /* node 3 */
         /* ankle_pitch */ { NEXUS_J_R_ANKLE_PITCH, 1.0f, 0.0f },   /* node 4 */
     },
-};
-
-const joint_src_t g_waist_joints[2] = {
-    /* pitch */ { NEXUS_J_WAIST_PITCH, 1.0f, 0.0f },   /* bus 1 node 5 */
-    /* roll  */ { NEXUS_J_WAIST_ROLL,  1.0f, 0.0f },   /* bus 0 node 5 */
 };
 
 const uint8_t g_leg_springs[2][2] = {

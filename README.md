@@ -29,7 +29,7 @@ subsystem up at a time.
 | External flash | Macronix MX25UW25645G, 256 Mbit octal, on XSPI2 |
 | IMU | BNO085, SHTP over UART1 @ 3 Mbaud, 400 Hz |
 | Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: two daisy chains (one per leg), one CS each |
-| Actuators | 10 × ODrive S1 — 5 per bus on 2 × FDCAN |
+| Actuators | 8 × ODrive S1 — 4 per bus on 2 × FDCAN (two legs, no waist — see the joint map) |
 | Contacts | 4 × mechanical foot switches (toe/heel, both feet) |
 | Host link | USB High Speed (480 Mbit), CDC |
 
@@ -257,7 +257,7 @@ covers today:
 | --- | --- |
 | `test_contact` | switch debouncing, and that each switch owns the right bit |
 | `test_safety` | the arm/idle/fault transitions and every command-rejection rule |
-| `test_fusion` | the sensor-to-filter bridge: springs add to their drives, an unreadable spring is not believed, a faulted waist invalidates both legs, each foot switch is its own contact |
+| `test_fusion` | the sensor-to-filter bridge: springs add to their drives, an unreadable spring is not believed, the bolted waist never moves, each foot switch is its own contact |
 | `test_robot_config` | spring deflection, sensor-zero wrap-around, calibration flag |
 | `test_watchdog` | start, refresh, and the stopped-clock case |
 | `test_lie_group` | rotations stay rotations, and the Gamma coefficients against a double-precision reference |
@@ -366,7 +366,7 @@ Pinocchio's. `--check` exits 1 if the committed files are stale;
 `zeus_kin_model_sha`, the first 16 hex digits of the URDF's sha256.
 
 Per leg, `q` is hip pitch, hip roll, knee pitch, ankle pitch (motor side),
-hip and knee spring deflection, then waist pitch and roll - by name
+hip and knee spring deflection, then waist pitch and roll (bolted at zero) - by name
 (`ZEUS_KIN_Q_*`), so a re-export that nests the joints differently changes the
 tables, not the API.
 
@@ -1367,7 +1367,7 @@ The Nucleo has two USB ports, and they do different jobs:
 
 On the user port the board is a USB *device* and the Pi is the *host*. It shows
 up as a serial port (USB CDC, `/dev/ttyACM*`, USB ID `0483:5740`) and carries
-binary packets, not text: a 444-byte state packet every millisecond out, 52-byte
+binary packets, not text: a 400-byte state packet every millisecond out, 44-byte
 commands in. Plug it into any USB port on the Pi.
 
 What sends packets depends on the mode:
@@ -1467,7 +1467,7 @@ ros2 launch zeus_bringup robot.launch.py rerun:=connect rerun_host:=<LAPTOP_IP> 
 
 ## What the Pi receives
 
-One **444-byte packet every millisecond** (444 KB/s, under 1% of USB HS).
+One **400-byte packet every millisecond** (400 KB/s, under 1% of USB HS).
 `Appli/App/link_proto.h` and `pi/nexus_proto.py` describe the same bytes;
 `tools/check_proto.py` compares every field offset, both struct sizes and the
 joint map, so a mismatch is caught rather than debugged.
@@ -1483,7 +1483,7 @@ Every per-joint array in both packets — `joint_pos`, `joint_vel`, `ref_angle`,
 `act_*`, and the command's `residual` — uses one index:
 
 ```
-index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
+index = bus * 4 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
 ```
 
 | index | bus | node | joint |
@@ -1492,22 +1492,37 @@ index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
 | 1 | 0 | 2 | left_hip_roll |
 | 2 | 0 | 3 | left_knee_pitch |
 | 3 | 0 | 4 | left_ankle_pitch |
-| 4 | 0 | 5 | waist_roll |
-| 5 | 1 | 1 | right_hip_pitch |
-| 6 | 1 | 2 | right_hip_roll |
-| 7 | 1 | 3 | right_knee_pitch |
-| 8 | 1 | 4 | right_ankle_pitch |
-| 9 | 1 | 5 | waist_pitch |
+| 4 | 1 | 1 | right_hip_pitch |
+| 5 | 1 | 2 | right_hip_roll |
+| 6 | 1 | 3 | right_knee_pitch |
+| 7 | 1 | 4 | right_ankle_pitch |
 
 The packet carries no names, so this table is the only thing labelling them.
 It is defined once in C (`NEXUS_J_*` in `link_proto.h`) and once in Python
 (`JOINT_NAMES` in `pi/nexus_proto.py`), and `tools/check_proto.py` fails if the
-two disagree. The waist joints have no reference in the stored gait and read
-`ref_angle` 0.
+two disagree.
+
+#### Two legs, no waist — a temporary build
+
+The robot has **ten** actuators: these eight plus waist roll (bus 0 node 5) and
+waist pitch (bus 1 node 5). This firmware brings the two legs up without them.
+
+| | |
+|---|---|
+| **CAN** | four drives per bus. Node 5 is neither commanded nor expected; a frame from it is ignored and not counted as a live drive |
+| **Packet** | 8 joints, protocol **v7**. The Pi must be updated together with the board — each rejects the other's version rather than misreading it |
+| **Waist** | bolted at its zero pose. The estimator still runs both waist joints in its kinematics, since the IMU sits above them, and holds them at zero with a small variance for the play in a bolted bracket (`NOISE_WAIST_BOLTED_RAD` in `fusion.c`) |
+| **Gait** | every index is a leg joint now, so every joint has a reference |
+| **URDF** | unchanged: the robot still has the parts. `/joint_states` on the Pi carries the two waist joints at 0 so the model stays in one piece |
+
+Putting the waist back: `NEXUS_NUM_JOINTS` 10, `ODRV_NODES_PER_BUS` 5, the map
+above back to `bus * 5`, the two `NEXUS_J_WAIST_*` indices, the waist entries in
+`robot_config.c`, the version bump, and the Pi side to match. The tag
+**`waist-10-actuators`** marks the last commit that had them.
 
 ### The policy block
 
-Bytes 12 to 219 are **52 contiguous float32** holding exactly what the RL
+Bytes 12 to 195 are **46 contiguous float32** holding exactly what the RL
 observation needs, in the order it expects. The Pi slices it in place and copies
 nothing:
 
@@ -1660,10 +1675,12 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **The policy block is contiguous and its offset is checked.**
   `tools/check_proto.py` fails if the block moves or gains a gap, because the
   zero-copy slice above would then read the wrong bytes silently.
-- **Protocol version is 5.** v1 sent raw encoder counts; v2 added the health
+- **Protocol version is 7.** v1 sent raw encoder counts; v2 added the health
   byte and alignment; v3 added the policy block and split the contacts; v4 added
-  `fk_valid` and `safety_state`; v5 added the diagnostics block. 422 → 424 → 444
-  bytes. Mismatched versions reject each other rather than silently misparsing.
+  `fk_valid` and `safety_state`; v5 added the diagnostics block; v6 made the
+  command a residual rather than a target; v7 dropped the two waist joints.
+  422 → 424 → 444 → 400 bytes. Mismatched versions reject each other rather
+  than silently misparsing.
 
 ## Watching it live — Rerun
 
@@ -1787,9 +1804,9 @@ planted.
 
 Per leg the kinematics take eight angles: that leg's four drives, the two
 spring deflections (added to hip pitch and knee - the drives measure before the
-spring), and both waist drives, which move the IMU relative to the legs. Each
-joint's noise is pushed through the Jacobian into a 3x3 covariance for the
-contact point. A spring encoder that is not valid, or reads beyond
+spring), and both waist joints - bolted at zero in this build, but still part
+of the chain because the IMU sits above them. Each joint's noise is pushed
+through the Jacobian into a 3x3 covariance for the contact point. A spring encoder that is not valid, or reads beyond
 `ROBOT_SPRING_MAX_DEFLECTION_RAD`, is treated as unknown (0 with a wide
 variance) rather than bent into the leg.
 
@@ -1903,7 +1920,7 @@ The walk is kinematic, built from the URDF: the stance foot is fixed to the
 world and the torso moves however the joint angles make it, so a closed
 switch's contact point really is still. It has what the estimator must cope
 with: heel strike and toe-off (switches go heel, both, toe), spring wind-up on
-the stance leg, hip-roll sway, waist motion, 400 Hz IMU with noise and constant
+the stance leg, hip-roll sway, 400 Hz IMU with noise and constant
 biases, drives reporting at 500 Hz.
 
 ```bash
@@ -1917,9 +1934,9 @@ Results on the current URDF, 16 steps, 3.9 m, judged after 2 s:
 
 | | error |
 |---|---|
-| tilt (roll/pitch) | 0.24 deg rms |
-| velocity, body frame | 0.011 m/s rms, 0.035 max |
-| IMU height | 10 mm rms, 13 mm drift over 3.9 m |
+| tilt (roll/pitch) | 0.23 deg rms |
+| velocity, body frame | 0.010 m/s rms, 0.034 max |
+| IMU height | 10 mm rms, 12 mm drift over 3.9 m |
 | foot height | 10 mm rms |
 | yaw | +0.7 deg over 14.6 s (unobservable, reported only) |
 
@@ -1933,11 +1950,17 @@ level-surface accelerometer calibration worth having.
 
 `--check` fails CI beyond roughly two to three times these numbers. It was
 checked by corrupting the simulated sensors: a flipped knee sign (42 cm height
-error), spring deflections dropped (11 cm) or marked invalid (13 cm), and a
-3 deg waist zero error (14 cm) all fail. **Losing the spring encoders costs
-over ten centimetres of height in four metres** - they are not optional for
-the estimate. Toe and heel switches swapped does not fail: velocity error rises
-50%, but the filter's foot-slip allowance absorbs it.
+error), and spring deflections dropped (11 cm) or marked invalid (13 cm), all
+fail. **Losing the spring encoders costs over ten centimetres of height in four
+metres** - they are not optional for the estimate.
+
+A waist that is not bolted where the estimator thinks fails too: simulating one
+that swings +/-3 deg (`tools/sim/run.sh --check -- --waist-pitch 0.05`) gives
+0.088 m/s of velocity error against a 0.03 limit. Worth repeating on the real
+robot's bracket before trusting the estimate.
+
+Toe and heel switches swapped does not fail: velocity error rises 50%, but the
+filter's foot-slip allowance absorbs it.
 
 What this does not test: impacts and foot slip (the walk has neither), the
 real sensors' noise, anything the URDF gets wrong about the real robot, and
@@ -2120,8 +2143,9 @@ the USB TX buffer being overwritten mid-transfer, the pure-Python CRC that
 could not sustain 1 kHz on a Pi, and the three BNO085 protocol bugs above. Each
 has a guard, a counter, or a test so it cannot come back unnoticed.
 
-The joint map is also settled: node 1 is hip_pitch, node 2 hip_roll, node 5 the
-waist (see [the joint map](#the-joint-map)). `robot_config.c` and
+The joint map is also settled: node 1 is hip_pitch, node 2 hip_roll, and node 5
+was the waist before this two-leg build dropped it (see
+[the joint map](#the-joint-map)). `robot_config.c` and
 `build_reference()` had node 1 as hip_roll, taken from a comment in the gait
 generator; both now name their indices with `NEXUS_J_*`.
 

@@ -40,12 +40,12 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 6
+PROTO_VERSION = 7
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
 
-NUM_JOINTS = 10
+NUM_JOINTS = 8
 NUM_ENCODERS = 4
 NUM_CONTACTS = 4
 
@@ -71,7 +71,7 @@ CONTACT_NAMES = ("left_toe", "left_heel", "right_toe", "right_heel")
 
 # THE JOINT MAP. Index -> name, identical to NEXUS_J_* in link_proto.h:
 #
-#     index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
+#     index = bus * 4 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
 #
 # Every per-joint array in both packets uses it - joint_pos, joint_vel,
 # ref_angle, act_* and the command residual. The packet carries no names, so
@@ -82,17 +82,26 @@ JOINT_NAMES = (
     "left_hip_roll",      # 1  bus 0 node 2
     "left_knee_pitch",    # 2  bus 0 node 3
     "left_ankle_pitch",   # 3  bus 0 node 4
-    "waist_roll",         # 4  bus 0 node 5
-    "right_hip_pitch",    # 5  bus 1 node 1
-    "right_hip_roll",     # 6  bus 1 node 2
-    "right_knee_pitch",   # 7  bus 1 node 3
-    "right_ankle_pitch",  # 8  bus 1 node 4
-    "waist_pitch",        # 9  bus 1 node 5
+    "right_hip_pitch",    # 4  bus 1 node 1
+    "right_hip_roll",     # 5  bus 1 node 2
+    "right_knee_pitch",   # 6  bus 1 node 3
+    "right_ankle_pitch",  # 7  bus 1 node 4
 )
+
+# TWO LEGS, NO WAIST - a temporary build. The robot's other two actuators are
+# waist roll (bus 0 node 5) and waist pitch (bus 1 node 5); this firmware does
+# not command or expect them, and the waist is bolted at its zero pose. The
+# estimator still runs the waist joints in its kinematics, held at zero, since
+# the IMU sits above them. See link_proto.h for how to put them back.
 JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
 
+# Joints the robot HAS but this build does not drive: the waist is bolted at
+# its zero pose (link_proto.h says why). They are not in any packet array, but
+# /joint_states carries them at 0 so the URDF model stays in one piece.
+BOLTED_JOINT_NAMES = ("waist_pitch", "waist_roll")
+
 # --------------------------------------------------------------------------
-# The policy block: 52 contiguous float32 starting at byte 12, holding exactly
+# The policy block: 46 contiguous float32 starting at byte 12, holding exactly
 # what the RL observation needs. Slice it out with numpy and skip parsing:
 #
 #     obs = np.frombuffer(raw, dtype="<f4", count=POLICY_COUNT,
@@ -104,7 +113,7 @@ JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
 # --------------------------------------------------------------------------
 
 POLICY_OFFSET = 12
-POLICY_COUNT = 52
+POLICY_COUNT = 46
 
 # (name, count) in order, for indexing the block by field.
 POLICY_FIELDS = [
@@ -112,10 +121,10 @@ POLICY_FIELDS = [
     ("quat", 4),            # w,x,y,z; observation uses x,y = indices 1,2
     ("gyro", 3),            # rad/s, body frame
     ("vel_hdg", 3),         # m/s, heading frame: lateral, forward, vertical
-    ("joint_pos", 10),      # rad, output side
-    ("joint_vel", 10),      # rad/s, output side
+    ("joint_pos", 8),      # rad, output side
+    ("joint_vel", 8),      # rad/s, output side
     ("spring_angle", 4),    # rad, SPRING DEFLECTION, SPRING_NAMES order
-    ("ref_angle", 10),      # rad, output side: the stored gait at `phase`
+    ("ref_angle", 8),      # rad, output side: the stored gait at `phase`
     ("contact", 4),         # 0.0/1.0, debounced foot switches
     ("foot_z", 2),          # m, world; [0] right, [1] left
     ("phase", 1),           # 0..1 gait clock
@@ -190,15 +199,15 @@ STATE_FORMAT = (
     "B"      # version
     "I"      # seq
     "I"      # timestamp_us
-    # ---------------- policy block, 52 float32 ----------------
+    # ---------------- policy block, 46 float32 ----------------
     "f"      # pelvis_z
     "4f"     # quat            w,x,y,z fused
     "3f"     # gyro            rad/s body
     "3f"     # vel_hdg         m/s heading: lat, fwd, up
-    "10f"    # joint_pos       rad output side
-    "10f"    # joint_vel       rad/s output side
+    "8f"     # joint_pos       rad output side
+    "8f"     # joint_vel       rad/s output side
     "4f"     # spring_angle    rad deflection
-    "10f"    # ref_angle       rad, stored gait at phase
+    "8f"     # ref_angle       rad, stored gait at phase
     "4f"     # contact         0.0 / 1.0
     "2f"     # foot_z          m world: right, left
     "f"      # phase           0..1
@@ -208,8 +217,8 @@ STATE_FORMAT = (
     "3f"     # imu_gyro        rad/s
     "I"      # imu_seq
     # ---------------- actuator diagnostics ----------------
-    "10f"    # act_torque      Nm
-    "10I"    # act_error
+    "8f"     # act_torque      Nm
+    "8I"     # act_error
     # ---------------- estimator internals ----------------
     "3f"     # fused_pos       m world
     "3f"     # fused_vel       m/s world, before heading rotation
@@ -225,8 +234,8 @@ STATE_FORMAT = (
     "B"      # stream_flags    STREAM_*
     "B"      # reserved0
     "2H"     # contact_ticks
-    "10B"    # act_state
-    "10B"    # act_flags
+    "8B"     # act_state
+    "8B"     # act_flags
     "B"      # enc_valid
     "B"      # contacts
     "B"      # fused_valid
@@ -243,7 +252,7 @@ COMMAND_FORMAT = (
     "B"      # msg_id
     "B"      # version
     "I"      # seq
-    "10f"    # residual        turns, added to ref_angle
+    "8f"     # residual        turns, added to ref_angle
     "H"      # flags
     "H"      # crc
 )
@@ -425,7 +434,7 @@ class NexusState:
     @staticmethod
     def policy_block(raw: bytes):
         """
-        The 52 observation floats, straight out of the buffer.
+        The 46 observation floats, straight out of the buffer.
 
         Prefer this to parse() in the control loop: it copies nothing and skips
         building a dataclass, which at 1 kHz is the difference between a few
@@ -443,7 +452,7 @@ class NexusState:
             return np.frombuffer(raw, dtype="<f4",
                                  count=POLICY_COUNT, offset=POLICY_OFFSET)
         except ImportError:
-            return struct.unpack_from("<52f", raw, POLICY_OFFSET)
+            return struct.unpack_from(f"<{POLICY_COUNT}f", raw, POLICY_OFFSET)
 
     @classmethod
     def parse(cls, raw: bytes) -> Optional["NexusState"]:

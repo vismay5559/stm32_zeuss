@@ -7,8 +7,9 @@ robot nobody knows the true motion. So this makes one up that is exactly
 consistent with the robot's own geometry (zeus.urdf):
 
   - The legs follow smooth joint trajectories: a step, a knee lift on the
-    swing leg, a little hip-roll sway, waist wobble, spring wind-up on the
-    stance leg.
+    swing leg, a little hip-roll sway, spring wind-up on the stance leg. The
+    waist is bolted in this build, so it stays at zero (--waist-pitch and
+    --waist-roll simulate a waist that is not where the estimator thinks).
   - Each foot lands heel first, toe raised, and rolls down flat; at the end of
     stance the heel lifts and it rolls over the toe. The switches follow:
     heel only, then both, then toe only. While a foot rolls, only the point it
@@ -56,9 +57,19 @@ POINTS = ("toe", "heel")
 GRAVITY = 9.81
 ENC_COUNTS = 16384
 
+def num_joints():
+    """NEXUS_NUM_JOINTS, read from link_proto.h so this cannot drift."""
+    m = re.search(r"#define\s+NEXUS_NUM_JOINTS\s+(\d+)", open(LINK_PROTO).read())
+    if not m:
+        raise SystemExit("NEXUS_NUM_JOINTS not found in link_proto.h")
+    return int(m.group(1))
+
+
+NUM_JOINTS = num_joints()
+
 # Replay input record: every field a little-endian float64, in this order.
 INPUT_FIELDS = (["t_us", "imu_new"] + [f"gyro{i}" for i in range(3)] + [f"accel{i}" for i in range(3)]
-                + [f"pos{i}" for i in range(10)] + [f"pos_age{i}" for i in range(10)]
+                + [f"pos{i}" for i in range(NUM_JOINTS)] + [f"pos_age{i}" for i in range(NUM_JOINTS)]
                 + [f"enc{i}" for i in range(4)] + ["enc_valid", "contacts"])
 
 
@@ -77,8 +88,6 @@ def proto_indices():
     for side, s in (("left", "L"), ("right", "R")):
         for j in ("HIP_PITCH", "HIP_ROLL", "KNEE_PITCH", "ANKLE_PITCH"):
             act[f"{side}_{j.lower()}"] = macro(f"NEXUS_J_{s}_{j}")
-    act["waist_pitch"] = macro("NEXUS_J_WAIST_PITCH")
-    act["waist_roll"] = macro("NEXUS_J_WAIST_ROLL")
     enc = {f"{side}_{j.lower()}_spring": macro(f"NEXUS_ENC_{s}_{j}")
            for side, s in (("left", "L"), ("right", "R")) for j in ("HIP_PITCH", "KNEE_PITCH")}
     bit = {(side, pt): macro(f"NEXUS_CONTACT_{s}_{pt.upper()}_BIT")
@@ -238,8 +247,11 @@ def main(argv=None):
     ap.add_argument("--roll", type=float, default=0.15, help="rad of heel-strike and toe-off foot roll")
     ap.add_argument("--heel-phase", type=float, default=0.15, help="part of stance on the heel alone")
     ap.add_argument("--toe-phase", type=float, default=0.80, help="part of stance after which only the toe is down")
-    ap.add_argument("--waist-pitch", type=float, default=0.05)
-    ap.add_argument("--waist-roll", type=float, default=0.03)
+    # The waist is bolted in this build - no actuators, no drive to report it -
+    # so it stays at zero unless someone deliberately simulates a bracket that
+    # is not bolted where the estimator thinks it is.
+    ap.add_argument("--waist-pitch", type=float, default=0.0)
+    ap.add_argument("--waist-roll", type=float, default=0.0)
     ap.add_argument("--gyro-noise", type=float, default=0.005, help="rad/s per sample")
     ap.add_argument("--accel-noise", type=float, default=0.03, help="m/s^2 per sample")
     ap.add_argument("--gyro-bias", type=float, nargs=3, default=[0.002, -0.003, 0.001])
@@ -324,8 +336,8 @@ def main(argv=None):
         "t": (n,), "p": (n, 3), "R": (n, 3, 3), "v": (n, 3), "omega_b": (n, 3), "f_b": (n, 3),
         "foot_z": (n, 2), "contacts": (n,)}.items()}
 
-    pos_turns = np.zeros(10)
-    pos_age = np.zeros(10)
+    pos_turns = np.zeros(NUM_JOINTS)
+    pos_age = np.zeros(NUM_JOINTS)
     next_imu = 0.0
 
     for k in range(n):

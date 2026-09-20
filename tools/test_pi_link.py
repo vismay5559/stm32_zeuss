@@ -71,6 +71,14 @@ def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x33):
         0.4, 0.1, 0.0,                # fused_vel, world
         0.0, 0.0, 0.0,                # fused_gyro_bias
         0.0, 0.0, 0.0,                # fused_accel_bias
+        # ---- diagnostics ----
+        0, 0,                         # overruns, usb_dropped
+        0, 0,                         # can_dropped, per bus
+        250,                          # loop_us_max
+        0,                            # enc_stalls
+        0, 0,                         # can_bus_off, per bus
+        P.STREAM_GAIT_LIVE,           # stream_flags
+        0,                            # reserved0
         100, 100,                     # contact_ticks
         *([8] * P.NUM_JOINTS),        # act_state
         *([3] * P.NUM_JOINTS),        # act_flags
@@ -78,6 +86,8 @@ def make_packet(seq, height=0.65, fused_valid=P.FUSION_OK, contacts=0x33):
         contacts,
         fused_valid,
         0x00,                         # health
+        0x03,                         # fk_valid: both feet real
+        P.SAFETY_ARMED,               # safety_state
     )
     return body + struct.pack("<H", crc16(body))
 
@@ -156,7 +166,7 @@ def test_parse():
           st.left_foot_down and not st.right_foot_down)
     check("no faults", st.faults() == [])
     check("torque preserved", abs(st.act_torque[3] - 1.5) < 1e-6)
-    check("joint_pos preserved", abs(st.joint_pos[9] - 0.25) < 1e-6)
+    check("joint_pos preserved", abs(st.joint_pos[P.NUM_JOINTS - 1] - 0.25) < 1e-6)
     check("spring angle preserved", abs(st.spring_angle[2] - 0.05) < 1e-6)
 
     bad = bytearray(pkt)

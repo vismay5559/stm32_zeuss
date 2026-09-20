@@ -64,7 +64,7 @@ from typing import Optional
 import rerun as rr
 
 from nexus_link import NexusLink
-from nexus_proto import CONTACT_NAMES, JOINT_NAMES, NexusState
+from nexus_proto import CONTACT_NAMES, JOINT_NAMES, NUM_JOINTS, NexusState
 
 # --------------------------------------------------------------------------
 # The estimator publishes at 1 kHz. Plots do not need that - the eye cannot use
@@ -122,7 +122,7 @@ def log_packet(pkt: NexusState) -> None:
     for axis, v in zip(("lateral", "forward", "vertical"), pkt.vel_hdg):
         rr.log(f"estimator/vel/{axis}", rr.Scalars(v))
 
-    for i in range(10):
+    for i in range(NUM_JOINTS):
         rr.log(f"joints/pos/{i}", rr.Scalars(pkt.joint_pos[i]))
         rr.log(f"joints/vel/{i}", rr.Scalars(pkt.joint_vel[i]))
         rr.log(f"joints/ref/{i}", rr.Scalars(pkt.ref_angle[i]))

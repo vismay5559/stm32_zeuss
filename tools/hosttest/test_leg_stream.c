@@ -81,10 +81,10 @@ static void test_joints_land_at_their_joint_map_index(void)
     CHECK(st.act_error[NEXUS_J_L_ANKLE_PITCH] == 0x08000200u, "ankle error");
     CHECK(st.act_state[NEXUS_J_L_ANKLE_PITCH] == 1u, "ankle state");
 
-    /* Node 2 (hip_roll) and 5 (waist) are not on this bench. */
+    /* Node 2 (hip_roll) is not on this bench, and neither is the right leg. */
     CHECK(st.joint_pos[NEXUS_J_L_HIP_ROLL] == 0.0f && st.act_state[NEXUS_J_L_HIP_ROLL] == 0u,
           "hip_roll written although no drive is node 2");
-    for (int i = NEXUS_J_WAIST_ROLL; i < NEXUS_NUM_JOINTS; i++)
+    for (int i = NEXUS_J_R_HIP_PITCH; i < NEXUS_NUM_JOINTS; i++)
     {
         CHECK(st.joint_pos[i] == 0.0f && st.ref_angle[i] == 0.0f,
               "index %d written although the leg is on bus 0", i);
