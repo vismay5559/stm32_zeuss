@@ -49,7 +49,10 @@ extern "C" {
 #define USE_STM32H7RSXX_NUCLEO
 
 /* COM define */
-#define USE_COM_LOG                         1U
+/* 0 so the BSP does not define __io_putchar. Ours lives in App/console.c and
+   does not block the caller - see the note there. The COM port itself is
+   still initialised; only the printf redirect moves. */
+#define USE_COM_LOG                         0U
 #define USE_BSP_COM_FEATURE                 1U
 
 /* IRQ priorities */

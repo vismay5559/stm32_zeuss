@@ -135,6 +135,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app.c
+    App/console.c
     App/contact.c
     App/health.c
     App/safety.c

@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "console.h"
 #include "app.h"
 #include "nexus_mode.h"
 #include "test_leg_can.h"
@@ -135,6 +136,7 @@ int main(void)
   BspCOMInit.Parity     = COM_PARITY_NONE;
   BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
   (void)BSP_COM_Init(COM1, &BspCOMInit);
+  console_init();      /* printf stops blocking from here on */
 
   printf("\r\n>>> APPLI running from XIP at 0x70000000 <<<\r\n");
   printf("APPLI: starting peripheral init\r\n");
