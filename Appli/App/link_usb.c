@@ -89,6 +89,16 @@ void link_usb_init(void)
  * enabled and getting no VDD50USB - a board-level supply question, not
  * firmware.
  */
+/*
+ * The body below reads PWR and the OTG core directly, so it only exists on the
+ * target. The host suite links this file to test the framing and CRC, where
+ * there is no hardware to report on and nothing for this to say.
+ */
+#ifdef NEXUS_HOSTTEST
+void link_usb_diag(void)
+{
+}
+#else
 void link_usb_diag(void)
 {
     /*
@@ -192,6 +202,7 @@ void link_usb_diag(void)
                "        the host: the data pair is not getting through.\r\n");
     }
 }
+#endif /* NEXUS_HOSTTEST */
 
 /*
  * True while the USB core still owns s_tx_dma, or while there is no host to
