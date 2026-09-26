@@ -74,7 +74,28 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
    * times out (its return value is discarded), the PHY stays unpowered, and a
    * later PHY access hangs the CPU with no fault and no message.
    */
-  HAL_PWREx_EnableUSBReg();
+  /*
+   * VDD33USB IS SUPPLIED EXTERNALLY ON THIS BOARD - THE REGULATOR MUST BE OFF.
+   *
+   * MB1737 feeds VDD33USB from the board's own 3V3 rail, with VDD33USB and
+   * VDD50USB tied together. The HAL calls that the external-supply case, and it
+   * requires USBREGEN CLEARED (stm32h7rsxx_hal_pwr_ex.c, "USB regulator is
+   * disabled ... VDD33USB can be provided from an external supply").
+   *
+   * Enabling the internal regulator instead - which is what CubeMX and every
+   * example assume - makes it try to regulate 3.3 V down to 3.3 V. It never
+   * reaches threshold, PWR_CSR2.USB33RDY stays 0 forever, and the transceiver
+   * has no power. The symptom is total silence at the host with every enable
+   * bit reading back correctly set, which is indistinguishable from a dead
+   * cable and cost days to find. Measured on the bench: USB33RDY goes 0 -> 1
+   * the moment this is cleared rather than set.
+   *
+   * This must happen BEFORE HAL_PCD_Init() below. Powering the rail afterwards
+   * is not enough: the core and PHY registers get configured while the
+   * transceiver is dead, so D+ goes up but nothing answers, and the host logs
+   * "device not accepting address" / "descriptor read error -32".
+   */
+  HAL_PWREx_DisableUSBReg();
   HAL_PWREx_EnableUSBHSregulator();
   /* USER CODE END USB_OTG_HS_MspInit 0 */
 
@@ -419,7 +440,34 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
   hpcd_USB_OTG_HS.Init.dev_endpoints = 9;
   hpcd_USB_OTG_HS.Init.speed = PCD_SPEED_HIGH;
   hpcd_USB_OTG_HS.Init.phy_itface = USB_OTG_HS_EMBEDDED_PHY;
-  hpcd_USB_OTG_HS.Init.dma_enable = ENABLE;
+  /*
+   * THE OTG CORE'S OWN DMA IS OFF, DELIBERATELY - DO NOT LET CUBEMX TURN IT
+   * BACK ON.
+   *
+   * With dma_enable set, the USB core masters its own transfers into RAM. The
+   * D-cache is on (SCB_EnableDCache in main.c), so every buffer the core
+   * touches must live in the non-cacheable region - see App/dma_buffer.h. The
+   * link's state and command buffers do; the CONTROL endpoint buffers do not.
+   * hUsbDeviceHS is an ordinary global in cached RAM, and the core DMAs each
+   * SETUP packet straight into hUsbDeviceHS.setup[].
+   *
+   * The CPU then reads its own stale cache line instead, so the very first
+   * GET_DESCRIPTOR is parsed as garbage and never answered. The host reports
+   * "device descriptor read/64, error -32" and "device not responding to setup
+   * address": the device attaches, D+ goes up, and enumeration dies at the
+   * first control transfer. It looks like a damaged cable.
+   *
+   * Turning the core's DMA off makes the stack copy through the FIFOs under
+   * the CPU, which is cache-coherent by construction. The cost is trivial
+   * here: one 434-byte packet per millisecond is about 434 kB/s on a 600 MHz
+   * M7, a rounding error against what this link needs.
+   *
+   * The alternative - keeping DMA and moving the whole device handle and every
+   * class buffer into the non-cacheable section - buys throughput this
+   * application does not need, in exchange for a failure that reappears
+   * silently whenever a new buffer is added in the wrong place.
+   */
+  hpcd_USB_OTG_HS.Init.dma_enable = DISABLE;
   hpcd_USB_OTG_HS.Init.Sof_enable = DISABLE;
   hpcd_USB_OTG_HS.Init.low_power_enable = DISABLE;
   hpcd_USB_OTG_HS.Init.lpm_enable = DISABLE;

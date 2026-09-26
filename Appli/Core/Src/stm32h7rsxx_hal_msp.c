@@ -84,15 +84,26 @@ void HAL_MspInit(void)
   /* Enable the XSPIM_P2 interface */
   HAL_PWREx_EnableXSPIM2();
 
+  /* VDD33USB comes from the board 3V3 here, not from an internal regulator -
+     see the long note in usbd_conf.c. Select that mode before the detector
+     below, so this first call succeeds instead of timing out. */
+  HAL_PWREx_DisableUSBReg();
+
   /* Enable USB Voltage detector */
   if(HAL_PWREx_EnableUSBVoltageDetector() != HAL_OK)
   {
     /*
-     * NOT fatal - do not call Error_Handler() here. USB33RDY needs VDD33USB,
-     * which comes from VBUS on the USER USB connector. On the bench, with only
-     * the ST-LINK cable plugged in, this always times out. Failing hard here
-     * means the whole robot refuses to boot just because no USB host is
-     * attached. Carry on; USB simply will not enumerate until a cable is in.
+     * NOT fatal - do not call Error_Handler() here.
+     *
+     * VDD33USB is fed from the board's own 3V3 rail on MB1737, NOT from VBUS
+     * on the user connector as this comment used to claim. With USBREGEN
+     * cleared just above, USB33RDY comes up from the 3V3 regulator and does
+     * not depend on a host cable being present at all.
+     *
+     * It is still not worth dying over: the detector is a supply check, and
+     * failing hard here would mean the whole robot refuses to boot over a USB
+     * rail it may not even need in the mode it is running. link_usb_diag()
+     * reports the real state, and retries, once the console exists to say so.
      */
   }
 

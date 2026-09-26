@@ -105,9 +105,11 @@ RCC_OscInitTypeDef RCC_OscInitStruct = {0};
      * NOT fatal - do not call Error_Handler() here.
      *
      * This detector waits for USB33RDY, which requires VDD33USB. On this board
-     * that rail comes from VBUS on the USER USB connector, so with only the
-     * ST-LINK cable attached it can never become ready and this always times
-     * out. CubeMX generates Error_Handler() here, which killed Boot inside
+     * that rail comes from the onboard 3V3 regulator, and reaching it needs
+     * USBREGEN CLEARED (the external-supply case - see the long note in
+     * Appli/USB_DEVICE/Target/usbd_conf.c). Boot does not do that, so the
+     * detector times out here. CubeMX generates Error_Handler(), which killed
+     * Boot inside
      * HAL_Init() - before GPIO or the serial port existed to report why, and
      * long before the LEDs meant anything.
      *

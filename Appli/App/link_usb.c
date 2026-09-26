@@ -3,6 +3,8 @@
 #include "critical.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
+#include "main.h"
+#include <stdio.h>
 #include <string.h>
 
 extern USBD_HandleTypeDef hUsbDeviceHS;
@@ -63,6 +65,132 @@ void link_usb_init(void)
     memset(&s_cmd, 0, sizeof(s_cmd));
 
     USBD_CDC_SetRxBuffer(&hUsbDeviceHS, s_rx_dma);
+}
+
+/*
+ * WHAT THE USB HARDWARE IS ACTUALLY DOING, AND A LIVE RETRY OF ITS SUPPLY.
+ *
+ * The transceiver needs VDD33USB, which this MCU makes internally from
+ * VDD50USB (fed from the cable's VBUS) via a regulator enabled by USBREGEN.
+ * PWR_CSR2.USB33RDY is the hardware saying that rail is up. While it is 0 the
+ * PHY cannot pull D+ up, so no host anywhere sees a device - which from the
+ * host side is indistinguishable from a dead cable.
+ *
+ * The enable sequence runs once, at boot, inside MX_USB_DEVICE_Init(). If VBUS
+ * was absent or late at that moment the regulator never came up and nothing
+ * ever tries again. So this does two things:
+ *
+ *   - prints the four control bits, not just the ready flag, so a failure says
+ *     WHICH step did not take; and
+ *   - re-runs the enable whenever USB33RDY is 0, which both tests the
+ *     boot-order theory and doubles as hot-plug recovery on the robot.
+ *
+ * If the bits read back set and USB33RDY still stays 0, the regulator is
+ * enabled and getting no VDD50USB - a board-level supply question, not
+ * firmware.
+ */
+void link_usb_diag(void)
+{
+    /*
+     * Stay quiet once the link is healthy.
+     *
+     * The console is a polled UART: __io_putchar blocks for one character time
+     * per byte, 87 us at 115200. Printing this line every second costs the
+     * 1 kHz loop over a hundred ticks a minute for news that has not changed.
+     * So report every time while something is wrong - that is when someone is
+     * watching - and only occasionally once the link is up.
+     */
+    static uint32_t calls;
+    const uint8_t healthy = (hUsbDeviceHS.dev_state == USBD_STATE_CONFIGURED) &&
+                            ((PWR->CSR2 & PWR_CSR2_USB33RDY) != 0u);
+    if (healthy && ((calls++ % 30u) != 0u))
+    {
+        return;
+    }
+
+    const USB_OTG_DeviceTypeDef *dev =
+        (USB_OTG_DeviceTypeDef *)((uint32_t)USB_OTG_HS + USB_OTG_DEVICE_BASE);
+
+    uint32_t csr2 = PWR->CSR2;
+    uint8_t  rdy  = (csr2 & PWR_CSR2_USB33RDY) ? 1u : 0u;
+
+    if (!rdy)
+    {
+        /*
+         * There are TWO supply arrangements, and which one a board uses is a
+         * wiring decision the firmware cannot see:
+         *
+         *   internal  VDD50USB is fed from the cable's VBUS and the on-chip
+         *             regulator (USBREGEN) makes VDD33USB from it.
+         *   external  VDD33USB is fed directly from the board's own 3V3, with
+         *             VDD33USB and VDD50USB tied together. Then the regulator
+         *             must be OFF: left on it tries to regulate 3.3 V down to
+         *             3.3 V, never reaches threshold, and USB33RDY stays 0
+         *             forever with every enable bit reading back set.
+         *
+         * Enabling the regulator on an external-supply board and enabling
+         * nothing on an internal-supply board fail identically. So try both and
+         * report which one brought the rail up - that answers the wiring
+         * question from the bench instead of from a schematic.
+         */
+        for (int mode = 0; mode < 2 && !rdy; mode++)
+        {
+            if (mode == 0)
+            {
+                HAL_PWREx_EnableUSBReg();           /* internal regulator  */
+            }
+            else
+            {
+                HAL_PWREx_DisableUSBReg();          /* external 3V3 supply */
+            }
+            HAL_PWREx_EnableUSBHSregulator();
+            HAL_Delay(2);
+            SET_BIT(PWR->CSR2, PWR_CSR2_USB33DEN);
+
+            uint32_t t0 = HAL_GetTick();
+            while (((PWR->CSR2 & PWR_CSR2_USB33RDY) == 0u) && ((HAL_GetTick() - t0) < 50u))
+            {
+            }
+            csr2 = PWR->CSR2;
+            rdy  = (csr2 & PWR_CSR2_USB33RDY) ? 1u : 0u;
+            if (rdy)
+            {
+                printf("USB: rail came up with the regulator %s\r\n",
+                       (mode == 0) ? "ENABLED (VBUS -> internal regulator)"
+                                   : "DISABLED (external 3V3 on VDD33USB)");
+            }
+        }
+    }
+
+    const uint32_t dsts = dev->DSTS;
+    const uint8_t  st   = hUsbDeviceHS.dev_state;
+
+    printf("USB: USB33RDY=%u  USBREGEN=%u USBHSREGEN=%u USB33DEN=%u  "
+           "state=%s(%u) enumspd=%u susp=%u\r\n",
+           (unsigned)rdy,
+           (unsigned)((csr2 & PWR_CSR2_USBREGEN)   ? 1u : 0u),
+           (unsigned)((csr2 & PWR_CSR2_USBHSREGEN) ? 1u : 0u),
+           (unsigned)((csr2 & PWR_CSR2_USB33DEN)   ? 1u : 0u),
+           (st == USBD_STATE_CONFIGURED) ? "CONFIGURED"
+         : (st == USBD_STATE_ADDRESSED)  ? "ADDRESSED"
+         : (st == USBD_STATE_SUSPENDED)  ? "SUSPENDED"
+         : (st == USBD_STATE_DEFAULT)    ? "DEFAULT (not enumerated)"
+                                         : "unknown",
+           (unsigned)st,
+           (unsigned)((dsts & USB_OTG_DSTS_ENUMSPD) >> USB_OTG_DSTS_ENUMSPD_Pos),
+           (unsigned)((dsts & USB_OTG_DSTS_SUSPSTS) ? 1u : 0u));
+
+    if (!rdy)
+    {
+        printf("     -> VDD33USB stays down in BOTH supply modes. The rail\r\n"
+               "        itself is absent at the MCU pin - a board supply path,\r\n"
+               "        not a firmware setting.\r\n");
+    }
+    else if (st == USBD_STATE_DEFAULT)
+    {
+        printf("     -> rail is UP and D+ is pulled up, but no bus reset from\r\n"
+               "        the host: the data pair is not getting through.\r\n");
+    }
 }
 
 /*

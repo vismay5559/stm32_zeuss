@@ -22,6 +22,14 @@
 void    link_usb_init(void);
 
 /*
+ * Print what the USB hardware is doing, on the ST-LINK console.
+ *
+ * For the case where the host sees nothing at all: the rail, the device state
+ * and the negotiated speed, with the cause named. See link_usb.c.
+ */
+void    link_usb_diag(void);
+
+/*
  * Send one report to the Pi. Call once per tick.
  *
  * Fills in the header and check number, then hands it over to be sent.

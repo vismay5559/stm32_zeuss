@@ -2125,6 +2125,12 @@ void legtest_init(void)
     link_usb_init();
     printf("\r\nUSB: streaming the state packet at 1 kHz on the USB user port\r\n"
            "     (on the Pi: link_check, or rerun) - commands from it are ignored\r\n");
+    /*
+     * ...and say whether there is anything to stream INTO. At boot the answer
+     * is usually "not yet" - the host has not finished enumerating - so this
+     * line repeats in the periodic status below, where it becomes useful.
+     */
+    link_usb_diag();
 #endif
 
     printf("\r\n=========== CAN-FD SINGLE LEG TEST ===========\r\n");
@@ -2244,6 +2250,10 @@ static void report(void)
            (unsigned long)d_rx, (unsigned long)s_rx_unknown,
            (unsigned long)s_tx_fail, (unsigned long)s_txq_drop,
            (unsigned long)load_pct);
+
+#if LEGTEST_USB_STREAM
+    link_usb_diag();
+#endif
 
     can_status();
 
