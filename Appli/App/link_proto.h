@@ -31,7 +31,7 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     8u      /* v8: act_target, and gains from the Pi      */
+#define NEXUS_PROTO_VERSION     9u      /* v9: one foot switch per foot, not two      */
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
@@ -39,7 +39,7 @@
 
 #define NEXUS_NUM_JOINTS        8       /* see the joint map below            */
 #define NEXUS_NUM_ENCODERS      4       /* AS5047P, after-spring (SEA) joints */
-#define NEXUS_NUM_CONTACTS      4       /* mechanical foot switches           */
+#define NEXUS_NUM_CONTACTS      2       /* mechanical foot switches, one a foot */
 
 /*
  * THE JOINT MAP - the one definition of which index is which joint.
@@ -91,12 +91,16 @@
 
 /*
  * Foot switch order, used by contact[] in the policy block and by the
- * `contacts` bitmask. Two switches per foot: toe and heel.
+ * `contacts` bitmask. ONE switch per foot, at the centre of the sole.
+ *
+ * There were two per foot, at the toe and the heel, which let the board say
+ * which part of the sole was loaded. It cannot any more: a foot is either
+ * taking weight or it is not. The switch sits at the middle of the sole so
+ * that single answer is not biased towards the part of the stride when the
+ * toe or the heel happens to be down - see zeus_kinematics.h.
  */
-#define NEXUS_CONTACT_L_TOE     0
-#define NEXUS_CONTACT_L_HEEL    1
-#define NEXUS_CONTACT_R_TOE     2
-#define NEXUS_CONTACT_R_HEEL    3
+#define NEXUS_CONTACT_LEFT      0
+#define NEXUS_CONTACT_RIGHT     1
 
 /*
  * Spring encoder order, used by spring_angle[] and the `enc_valid` bitmask
@@ -108,14 +112,16 @@
 #define NEXUS_ENC_R_HIP_PITCH   2
 #define NEXUS_ENC_R_KNEE_PITCH  3
 
-/* Bitmask positions in `contacts`, same order, plus the derived per-foot bits
-   the STM32 computes by OR-ing each foot's two switches. */
-#define NEXUS_CONTACT_L_TOE_BIT   (1u << 0)
-#define NEXUS_CONTACT_L_HEEL_BIT  (1u << 1)
-#define NEXUS_CONTACT_R_TOE_BIT   (1u << 2)
-#define NEXUS_CONTACT_R_HEEL_BIT  (1u << 3)
-#define NEXUS_CONTACT_L_FOOT      (1u << 4)
-#define NEXUS_CONTACT_R_FOOT      (1u << 5)
+/*
+ * Bitmask positions in `contacts`, same order.
+ *
+ * There used to be four switch bits plus two derived "this foot is down" bits,
+ * which the board worked out by OR-ing each foot's pair. With one switch per
+ * foot the switch IS the foot, so the derived bits would be copies and are
+ * gone. Bits 2..7 are unused and sent as zero.
+ */
+#define NEXUS_CONTACT_L_BIT       (1u << 0)
+#define NEXUS_CONTACT_R_BIT       (1u << 1)
 
 /* fused_valid values. */
 #define NEXUS_FUSION_INVALID    0u      /* estimator not running              */
@@ -163,29 +169,29 @@
 typedef struct __attribute__((packed))
 {
     /* ---- header ------------------------------------------------ 0 */
-    uint16_t sync;                           /*   0 */
-    uint8_t  msg_id;                         /*   2 */
-    uint8_t  version;                        /*   3 */
-    uint32_t seq;                            /*   4 increments every 1 kHz tick */
-    uint32_t timestamp_us;                   /*   8 free-running 1 MHz counter  */
+    uint16_t sync;                           /*     0 */
+    uint8_t  msg_id;                         /*     2 */
+    uint8_t  version;                        /*     3 */
+    uint32_t seq;                            /*     4 increments every 1 kHz tick */
+    uint32_t timestamp_us;                   /*     8 free-running 1 MHz counter  */
 
     /* ====================== POLICY BLOCK ======================== 12
      *
      * 46 contiguous float32. Slice this straight into the observation.
      * SI units, raw. See pi/nexus_proto.py: NexusState.policy_block().
      */
-    float pelvis_z;                          /*  12 m, height above stance ground
+    float pelvis_z;                          /*   12 m, height above stance ground
                                                     from the estimator          */
-    float quat[4];                           /*  16 w,x,y,z body->world, fused.
+    float quat[4];                           /*   16 w,x,y,z body->world, fused.
                                                     Observation uses x and y,
                                                     i.e. quat[1] and quat[2].   */
-    float gyro[3];                           /*  32 rad/s, BODY frame           */
-    float vel_hdg[3];                        /*  44 m/s, HEADING frame:
+    float gyro[3];                           /*   32 rad/s, BODY frame           */
+    float vel_hdg[3];                        /*   44 m/s, HEADING frame:
                                                     [0] lateral
                                                     [1] forward
                                                     [2] vertical                */
-    float joint_pos[NEXUS_NUM_JOINTS];       /*  56 rad, OUTPUT side            */
-    float joint_vel[NEXUS_NUM_JOINTS];       /*  88 rad/s, OUTPUT side          */
+    float joint_pos[NEXUS_NUM_JOINTS];       /*   56 rad, OUTPUT side            */
+    float joint_vel[NEXUS_NUM_JOINTS];       /*   88 rad/s, OUTPUT side          */
     float spring_angle[NEXUS_NUM_ENCODERS];  /* 120 rad, SPRING DEFLECTION -
                                                     what the after-spring
                                                     encoders actually measure,
@@ -194,27 +200,28 @@ typedef struct __attribute__((packed))
                                                     gait at `phase`, the value
                                                     residual[] is added to.     */
     float contact[NEXUS_NUM_CONTACTS];       /* 168 0.0 / 1.0, debounced, in
-                                                    NEXUS_CONTACT_* order       */
-    float foot_z[2];                         /* 184 m, world. [0] right,
+                                                    NEXUS_CONTACT_* order:
+                                                    [0] left, [1] right         */
+    float foot_z[2];                         /* 176 m, world. [0] right,
                                                     [1] left. Forward kinematics
                                                     through the fused pose.     */
-    float phase;                             /* 192 0..1 gait clock. 0 = start
+    float phase;                             /* 184 0..1 gait clock. 0 = start
                                                     of stance, 1 = end of the
                                                     full leg trajectory.        */
-    /* ==================== end policy block ====================== 196 */
+    /* ==================== end policy block ====================== 188 */
 
-    /* ---- IMU, raw from the BNO085 ----------------------------- 196 */
-    float    imu_quat[4];                    /* 196 w,x,y,z, sensor's own 9-axis
+    /* ---- IMU, raw from the BNO085 ----------------------------- 188 */
+    float    imu_quat[4];                    /* 188 w,x,y,z, sensor's own 9-axis
                                                     fusion. Independent of the
                                                     estimator's quat[] above.   */
-    float    imu_accel[3];                   /* 212 m/s^2, specific force,
+    float    imu_accel[3];                   /* 204 m/s^2, specific force,
                                                     INCLUDES gravity            */
-    float    imu_gyro[3];                    /* 224 rad/s, raw                  */
-    uint32_t imu_seq;                        /* 236 lets the Pi spot staleness  */
+    float    imu_gyro[3];                    /* 216 rad/s, raw                  */
+    uint32_t imu_seq;                        /* 228 lets the Pi spot staleness  */
 
-    /* ---- actuator diagnostics --------------------------------- 240 */
-    float    act_torque[NEXUS_NUM_JOINTS];   /* 240 Nm, estimate                */
-    uint32_t act_error[NEXUS_NUM_JOINTS];    /* 272 raw ODrive axis_error       */
+    /* ---- actuator diagnostics --------------------------------- 232 */
+    float    act_torque[NEXUS_NUM_JOINTS];   /* 232 Nm, estimate                */
+    uint32_t act_error[NEXUS_NUM_JOINTS];    /* 264 raw ODrive axis_error       */
 
     /*
      * WHAT THE DRIVE WAS TOLD, this tick, rad on the output side - the
@@ -228,18 +235,18 @@ typedef struct __attribute__((packed))
      * nothing is being driven, so a plot shows a gap rather than a flat line
      * that looks like a held command.
      */
-    float    act_target[NEXUS_NUM_JOINTS];   /* 304 rad, OUTPUT side, or NaN    */
+    float    act_target[NEXUS_NUM_JOINTS];   /* 296 rad, OUTPUT side, or NaN    */
 
-    /* ---- estimator internals ---------------------------------- 336 */
-    float    fused_pos[3];                   /* 336 m, world. [2] duplicates
+    /* ---- estimator internals ---------------------------------- 328 */
+    float    fused_pos[3];                   /* 328 m, world. [2] duplicates
                                                     pelvis_z; [0] and [1] drift
                                                     and are for logging only.   */
-    float    fused_vel[3];                   /* 348 m/s, WORLD frame, before the
+    float    fused_vel[3];                   /* 340 m/s, WORLD frame, before the
                                                     heading rotation            */
-    float    fused_gyro_bias[3];             /* 360 rad/s, estimated            */
-    float    fused_accel_bias[3];            /* 372 m/s^2, estimated            */
+    float    fused_gyro_bias[3];             /* 352 rad/s, estimated            */
+    float    fused_accel_bias[3];            /* 364 m/s^2, estimated            */
 
-    /* ---- diagnostics ------------------------------------------ 384 *
+    /* ---- diagnostics ------------------------------------------ 376 *
      *
      * These used to go out only on the serial console, in a line that cost
      * ~9.5 ms of a 1 ms control loop every two seconds - a diagnostic that
@@ -247,25 +254,25 @@ typedef struct __attribute__((packed))
      * reading this packet at 1 kHz, so they belong here, where they can be
      * plotted against everything else that happened at the same moment.
      */
-    uint32_t overruns;                       /* 384 ticks missed, cumulative    */
-    uint32_t usb_dropped;                    /* 388 state packets skipped       */
-    uint16_t can_dropped[2];                 /* 392 TX frames dropped, per bus  */
-    uint16_t loop_us_max;                    /* 396 worst cycle since last sent */
-    uint16_t enc_stalls;                     /* 398 SPI transfers abandoned     */
-    uint8_t  can_bus_off[2];                 /* 400 bus-off events, saturating  */
-    uint8_t  stream_flags;                   /* 402 NEXUS_STREAM_*              */
-    uint8_t  reserved0;                      /* 403 keeps the next field even   */
+    uint32_t overruns;                       /* 376 ticks missed, cumulative    */
+    uint32_t usb_dropped;                    /* 380 state packets skipped       */
+    uint16_t can_dropped[2];                 /* 384 TX frames dropped, per bus  */
+    uint16_t loop_us_max;                    /* 388 worst cycle since last sent */
+    uint16_t enc_stalls;                     /* 390 SPI transfers abandoned     */
+    uint8_t  can_bus_off[2];                 /* 392 bus-off events, saturating  */
+    uint8_t  stream_flags;                   /* 394 NEXUS_STREAM_*              */
+    uint8_t  reserved0;                      /* 395 keeps the next field even   */
 
-    /* ---- 2-byte fields ---------------------------------------- 404 */
-    uint16_t contact_ticks[2];               /* 404 ticks each foot held state  */
+    /* ---- 2-byte fields ---------------------------------------- 396 */
+    uint16_t contact_ticks[2];               /* 396 ticks each foot held state  */
 
-    /* ---- 1-byte fields ---------------------------------------- 408 */
-    uint8_t  act_state[NEXUS_NUM_JOINTS];    /* 408 raw ODrive axis_state       */
-    uint8_t  act_flags[NEXUS_NUM_JOINTS];    /* 416 per-joint freshness         */
-    uint8_t  enc_valid;                      /* 424 bit per encoder             */
-    uint8_t  contacts;                       /* 425 switch + derived foot bits  */
-    uint8_t  fused_valid;                    /* 426 NEXUS_FUSION_*              */
-    uint8_t  health;                         /* 427 health.h bitmask            */
+    /* ---- 1-byte fields ---------------------------------------- 400 */
+    uint8_t  act_state[NEXUS_NUM_JOINTS];    /* 400 raw ODrive axis_state       */
+    uint8_t  act_flags[NEXUS_NUM_JOINTS];    /* 408 per-joint freshness         */
+    uint8_t  enc_valid;                      /* 416 bit per encoder             */
+    uint8_t  contacts;                       /* 417 one bit per foot switch     */
+    uint8_t  fused_valid;                    /* 418 NEXUS_FUSION_*              */
+    uint8_t  health;                         /* 419 health.h bitmask            */
 
     /*
      * Which foot_z entries are real measurements: bit 0 = foot_z[0] (right),
@@ -274,12 +281,12 @@ typedef struct __attribute__((packed))
      * without checking one of them. It used to be sent as 0.0, which reads as
      * "exactly on the ground".
      */
-    uint8_t  fk_valid;                       /* 428 bit per foot                */
+    uint8_t  fk_valid;                       /* 420 bit per foot                */
 
     /* NEXUS_SAFETY_* - whether the board is allowed to be driving, and why
        not. Lets the Pi see a fault it caused, and see that a stand-down or a
        re-arm handshake was actually acted on. */
-    uint8_t  safety_state;                   /* 429                             */
+    uint8_t  safety_state;                   /* 421                             */
 
     /*
      * The seq of the last gains message this board APPLIED (low byte). The Pi
@@ -288,11 +295,11 @@ typedef struct __attribute__((packed))
      * robot is armed, since retuning a drive mid-stride is not something to
      * allow by accident.
      */
-    uint8_t  gains_seq;                      /* 430                             */
-    uint8_t  reserved1;                      /* 431 keeps the crc even          */
+    uint8_t  gains_seq;                      /* 422                             */
+    uint8_t  reserved1;                      /* 423 keeps the crc even          */
 
-    uint16_t crc;                            /* 432 CRC16-CCITT over 0..431     */
-} nexus_state_t;                             /* 434 total                       */
+    uint16_t crc;                            /* 424 CRC16-CCITT over 0..423     */
+} nexus_state_t;                             /* 426 total                       */
 
 typedef struct __attribute__((packed))
 {

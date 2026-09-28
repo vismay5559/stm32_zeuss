@@ -53,7 +53,22 @@ LINK_PROTO = os.path.join(ROOT, "Appli", "App", "link_proto.h")
 OUT_DIR = os.path.join(ROOT, "tools", "sim", "out")
 
 SIDES = ("left", "right")
-POINTS = ("toe", "heel")
+
+# SOLE GEOMETRY, NOT SWITCH POSITIONS.
+#
+# The foot still rolls from its rear edge onto its front edge whether or not
+# there is a switch at either end - that is how walking works, and the
+# simulated body trajectory depends on it. The URDF used to carry those two
+# edges as the toe and heel contact frames; now that each foot has one switch
+# at the sole centre, they are geometry rather than sensing, and live here.
+#
+# Measured from the frames this file used to read, relative to the contact
+# point, in the foot frame. Identical on both feet to nine decimal places.
+SOLE_EDGE = {
+    "heel": np.array([ 0.104972816,  0.002389133, -0.000004580]),
+    "toe":  np.array([-0.104972816, -0.002389133,  0.000004580]),
+}
+
 GRAVITY = 9.81
 ENC_COUNTS = 16384
 
@@ -90,10 +105,11 @@ def proto_indices():
             act[f"{side}_{j.lower()}"] = macro(f"NEXUS_J_{s}_{j}")
     enc = {f"{side}_{j.lower()}_spring": macro(f"NEXUS_ENC_{s}_{j}")
            for side, s in (("left", "L"), ("right", "R")) for j in ("HIP_PITCH", "KNEE_PITCH")}
-    bit = {(side, pt): macro(f"NEXUS_CONTACT_{s}_{pt.upper()}_BIT")
-           for side, s in (("left", "L"), ("right", "R")) for pt in POINTS}
-    foot = {"left": macro("NEXUS_CONTACT_L_FOOT"), "right": macro("NEXUS_CONTACT_R_FOOT")}
-    return act, enc, bit, foot
+    # One switch per foot, so the switch bit IS the foot bit and there is no
+    # derived pair to read.
+    bit = {side: macro(f"NEXUS_CONTACT_{s}_BIT")
+           for side, s in (("left", "L"), ("right", "R"))}
+    return act, enc, bit
 
 
 # ---------------------------------------------------------------- the gait
@@ -147,13 +163,27 @@ class Gait:
         end = -self.heel_strike(i + 1) if i < self.n - 1 else 0.0
         return start + (end - start) * quintic(s)
 
-    def stance_switches(self, i, s):
-        """Which of the stance foot's switches are closed."""
+    def stance_switch_closed(self, i, s):
+        """
+        Whether the stance foot's single switch is closed.
+
+        The switch sits at the CENTRE of the sole, so it reports the flat part
+        of stance and nothing else. While the foot is still rolling onto its
+        heel, or already rolling over its toe, the middle of the sole is off
+        the ground and the switch is open - even though the foot is plainly
+        bearing weight.
+
+        That is a real loss of information and worth being explicit about: the
+        board used to see contact through the whole roll, and now sees it only
+        in the middle. It also makes this simulation a harder test than it was,
+        because the estimator gets a shorter window of trustworthy ground on
+        each step rather than a continuous one.
+        """
         if self.heel_strike(i) and s < self.a.heel_phase:
-            return ("heel",)
+            return False
         if self.toe_off(i) and s > self.a.toe_phase:
-            return ("toe",)
-        return POINTS
+            return False
+        return True
 
     def q(self, i, s):
         a = self.a
@@ -193,7 +223,7 @@ class Robot:
         self.model = pin.buildModelFromUrdf(urdf)
         self.data = self.model.createData()
         self.fid = {n: self.model.getFrameId(n) for n in
-                    ["imu_link", "left_foot", "right_foot"] + [f"{s}_{p}" for s in SIDES for p in POINTS]}
+                    ["imu_link", "left_foot", "right_foot"] + [f"{s}_contact" for s in SIDES]}
 
     def frames(self, qd):
         pin = self.pin
@@ -260,7 +290,7 @@ def main(argv=None):
     ap.add_argument("--drive-period", type=int, default=2, help="ticks between ODrive position reports")
     a = ap.parse_args(argv)
 
-    act_idx, enc_idx, bit, foot_bit = proto_indices()
+    act_idx, enc_idx, bit = proto_indices()
     rng = np.random.default_rng(a.seed)
     robot = Robot(a.urdf)
 
@@ -272,7 +302,7 @@ def main(argv=None):
         def level_error(h0):
             a.hip0 = h0
             f = robot.frames(Gait(a).q(0, 0.0))
-            return min(f[f"left_{pt}"][2, 3] for pt in POINTS) - min(f[f"right_{pt}"][2, 3] for pt in POINTS)
+            return f["left_contact"][2, 3] - f["right_contact"][2, 3]
         lo, hi = -0.6, 0.2
         if np.sign(level_error(lo)) == np.sign(level_error(hi)):
             raise SystemExit("could not find a hip angle that lands both feet level; pass --hip0")
@@ -294,7 +324,7 @@ def main(argv=None):
     # through that point - so the point doing the pivoting never moves.
     f0 = robot.frames(gait.q(0, 0.0))
     T_Fb = {side: inv(f0[f"{side}_foot"]) for side in SIDES}
-    local = {(side, pt): (T_Fb[side] @ f0[f"{side}_{pt}"])[:3, 3] for side in SIDES for pt in POINTS}
+    local = {side: (T_Fb[side] @ f0[f"{side}_contact"])[:3, 3] for side in SIDES}
 
     T_wb0 = np.eye(4)
     T_wb0[2, 3] = -f0["left_toe"][2, 3]                   # left toe on z = 0, torso upright
@@ -304,15 +334,15 @@ def main(argv=None):
     def foot_world(i, s):
         st = gait.stance(i)
         heel, toe = gait.stance_pitch(i, s)
-        c_heel = (A[i] @ np.append(local[(st, "heel")], 1.0))[:3]
-        c_toe = (A[i] @ np.append(local[(st, "toe")], 1.0))[:3]
+        c_heel = (A[i] @ np.append(local[st] + SOLE_EDGE["heel"], 1.0))[:3]
+        c_toe = (A[i] @ np.append(local[st] + SOLE_EDGE["toe"], 1.0))[:3]
         return pivot(c_heel, heel) @ pivot(c_toe, toe) @ A[i]
 
     T_wb = T_wb0
     for i in range(gait.n):
         st = gait.stance(i)
         T_wF = T_wb @ robot.frames(gait.q(i, 0.0))[f"{st}_foot"]
-        c_heel = (T_wF @ np.append(local[(st, "heel")], 1.0))[:3]
+        c_heel = (T_wF @ np.append(local[st] + SOLE_EDGE["heel"], 1.0))[:3]
         A.append(pivot(c_heel, gait.heel_strike(i)) @ T_wF)     # undo the landing roll
         T_wb = foot_world(i, 1.0) @ inv(robot.frames(gait.q(i, 1.0))[f"{st}_foot"])
 
@@ -361,17 +391,19 @@ def main(argv=None):
         truth["p"][k], truth["R"][k], truth["v"][k] = p, R, v
         truth["omega_b"][k], truth["f_b"][k] = omega_b, f_b
         for s_i, side in enumerate(("right", "left")):        # foot_z order: [0] right, [1] left
-            truth["foot_z"][k, s_i] = min((T_wb @ f[f"{side}_{pt}"])[2, 3] for pt in POINTS)
+            truth["foot_z"][k, s_i] = (T_wb @ f[f"{side}_contact"])[2, 3]
 
-        # contacts: both feet flat while standing; the stance foot's switches
-        # (heel, both, toe) while walking
+        # contacts: both feet flat while standing; while walking, the stance
+        # foot's switch only for the flat middle of its stance
         if t < gait.t_walk or t >= gait.t_end:
-            down = [(side, pt) for side in SIDES for pt in POINTS]
+            down = list(SIDES)
+        elif gait.stance_switch_closed(i, s):
+            down = [gait.stance(i)]
         else:
-            down = [(gait.stance(i), pt) for pt in gait.stance_switches(i, s)]
+            down = []
         contacts = 0
-        for side, pt in down:
-            contacts |= bit[(side, pt)] | foot_bit[side]
+        for side in down:
+            contacts |= bit[side]
         truth["contacts"][k] = contacts
 
         # IMU at 400 Hz: a sample becomes visible on the first tick at or after it

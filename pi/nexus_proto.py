@@ -40,7 +40,7 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 8
+PROTO_VERSION = 9
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
@@ -48,7 +48,7 @@ MSG_GAINS = 0x03        # Pi -> board, rare: drive gains
 
 NUM_JOINTS = 8
 NUM_ENCODERS = 4
-NUM_CONTACTS = 4
+NUM_CONTACTS = 2
 
 # Spring encoder order in spring_angle[] and the `enc_valid` bitmask, as
 # NEXUS_ENC_* in link_proto.h: two AS5047P daisy chains, one per leg.
@@ -59,16 +59,24 @@ ENC_R_KNEE_PITCH = 3
 SPRING_NAMES = ("left_hip_pitch", "left_knee_pitch", "right_hip_pitch", "right_knee_pitch")
 
 # Foot switch order in contact[] and in the `contacts` bitmask.
-CONTACT_L_TOE = 0
-CONTACT_L_HEEL = 1
-CONTACT_R_TOE = 2
-CONTACT_R_HEEL = 3
+#
+# ONE switch per foot, at the centre of the sole. There were two - a toe and a
+# heel on each foot - which let the board say which part of the sole was
+# loaded. It cannot any more: a foot is either taking weight or it is not. The
+# switch sits at the middle of the sole so that single answer is not biased
+# towards the part of the stride when the toe or the heel happens to be down.
+#
+# The `contacts` bitmask used to carry these four bits plus two derived
+# "this foot is down" bits at 4 and 5, which the board computed by OR-ing each
+# foot's pair. One switch per foot makes those copies, so they are gone; bits
+# 2..7 are unused and sent as zero.
+CONTACT_LEFT = 0
+CONTACT_RIGHT = 1
 
-# Derived per-foot bits, in `contacts` only.
-CONTACT_L_FOOT = 1 << 4
-CONTACT_R_FOOT = 1 << 5
+CONTACT_L_BIT = 1 << 0
+CONTACT_R_BIT = 1 << 1
 
-CONTACT_NAMES = ("left_toe", "left_heel", "right_toe", "right_heel")
+CONTACT_NAMES = ("left", "right")
 
 # THE JOINT MAP. Index -> name, identical to NEXUS_J_* in link_proto.h:
 #
@@ -102,7 +110,7 @@ JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
 BOLTED_JOINT_NAMES = ("waist_pitch", "waist_roll")
 
 # --------------------------------------------------------------------------
-# The policy block: 46 contiguous float32 starting at byte 12, holding exactly
+# The policy block: 44 contiguous float32 starting at byte 12, holding exactly
 # what the RL observation needs. Slice it out with numpy and skip parsing:
 #
 #     obs = np.frombuffer(raw, dtype="<f4", count=POLICY_COUNT,
@@ -114,7 +122,7 @@ BOLTED_JOINT_NAMES = ("waist_pitch", "waist_roll")
 # --------------------------------------------------------------------------
 
 POLICY_OFFSET = 12
-POLICY_COUNT = 46
+POLICY_COUNT = 44
 
 # (name, count) in order, for indexing the block by field.
 POLICY_FIELDS = [
@@ -126,7 +134,7 @@ POLICY_FIELDS = [
     ("joint_vel", 8),      # rad/s, output side
     ("spring_angle", 4),    # rad, SPRING DEFLECTION, SPRING_NAMES order
     ("ref_angle", 8),      # rad, output side: the stored gait at `phase`
-    ("contact", 4),         # 0.0/1.0, debounced foot switches
+    ("contact", 2),         # 0.0/1.0, debounced foot switches: left, right
     ("foot_z", 2),          # m, world; [0] right, [1] left
     ("phase", 1),           # 0..1 gait clock
 ]
@@ -209,7 +217,7 @@ STATE_FORMAT = (
     "8f"     # joint_vel       rad/s output side
     "4f"     # spring_angle    rad deflection
     "8f"     # ref_angle       rad, stored gait at phase
-    "4f"     # contact         0.0 / 1.0
+    "2f"     # contact         0.0 / 1.0
     "2f"     # foot_z          m world: right, left
     "f"      # phase           0..1
     # ---------------- raw IMU ----------------
@@ -303,7 +311,7 @@ class NexusState:
     joint_vel: List[float]       # rad/s, output side
     spring_angle: List[float]    # rad, SPRING DEFLECTION (not joint angle)
     ref_angle: List[float]       # rad, stored gait at phase; residual adds to it
-    contact: List[float]         # 0.0/1.0, four foot switches
+    contact: List[float]         # 0.0/1.0, one switch per foot
     foot_z: List[float]          # m, world; [0] right, [1] left
     phase: float                 # 0..1 gait clock
 
@@ -371,12 +379,18 @@ class NexusState:
 
     @property
     def left_foot_down(self) -> bool:
-        """Either left switch closed."""
-        return bool(self.contact[CONTACT_L_TOE] or self.contact[CONTACT_L_HEEL])
+        """The left foot's switch is closed.
+
+        Kept as a named property rather than letting callers index contact[]
+        themselves: it read "either left switch closed" when each foot had two,
+        and the callers that ask "is this foot down" should not have to change
+        again the day a second switch comes back.
+        """
+        return bool(self.contact[CONTACT_LEFT])
 
     @property
     def right_foot_down(self) -> bool:
-        return bool(self.contact[CONTACT_R_TOE] or self.contact[CONTACT_R_HEEL])
+        return bool(self.contact[CONTACT_RIGHT])
 
     @property
     def foot_z_right(self) -> Optional[float]:

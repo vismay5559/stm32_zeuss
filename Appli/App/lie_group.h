@@ -42,12 +42,20 @@
 
 typedef float inekf_real_t;
 
-/* Four contact points: toe and heel of each foot, NEXUS_CONTACT_* order. */
-#define INEKF_MAX_CONTACTS   4
+/*
+ * Two contact points: one switch per foot, NEXUS_CONTACT_* order.
+ *
+ * This was 4 when each foot had a toe and a heel switch and the filter kept a
+ * world position for every one of them. Halving it halves the contact block of
+ * the state and quarters the part of the covariance that block spans: the
+ * error state goes from 27 to 21, so P drops from 27x27 to 21x21 - about 40%
+ * fewer numbers to propagate every tick, in the hot path.
+ */
+#define INEKF_MAX_CONTACTS   2
 
 /* Side length of the group matrix X: N + 5. */
 #define INEKF_X_DIM(n)       ((n) + 5)
-#define INEKF_X_MAX          INEKF_X_DIM(INEKF_MAX_CONTACTS)          /* 9  */
+#define INEKF_X_MAX          INEKF_X_DIM(INEKF_MAX_CONTACTS)          /* 7  */
 
 /*
  * Error-state dimension: 3(N+3) pose/contact terms + 6 bias terms.
@@ -55,7 +63,7 @@ typedef float inekf_real_t;
  */
 #define INEKF_POSE_DIM(n)    (3 * ((n) + 3))
 #define INEKF_ERR_DIM(n)     (INEKF_POSE_DIM(n) + 6)
-#define INEKF_ERR_MAX        INEKF_ERR_DIM(INEKF_MAX_CONTACTS)        /* 27 */
+#define INEKF_ERR_MAX        INEKF_ERR_DIM(INEKF_MAX_CONTACTS)        /* 21 */
 
 /*
  * Every error-state matrix is stored row-major with a FIXED stride of

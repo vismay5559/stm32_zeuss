@@ -459,7 +459,7 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
    *
    * Turning the core's DMA off makes the stack copy through the FIFOs under
    * the CPU, which is cache-coherent by construction. The cost is trivial
-   * here: one 434-byte packet per millisecond is about 434 kB/s on a 600 MHz
+   * here: one 426-byte packet per millisecond is about 426 kB/s on a 600 MHz
    * M7, a rounding error against what this link needs.
    *
    * The alternative - keeping DMA and moving the whole device handle and every

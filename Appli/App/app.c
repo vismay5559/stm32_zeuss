@@ -422,10 +422,13 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
         s_state.act_target[j] = driving ? (sent_turns[j] * TURNS_TO_RAD) : (float)NAN;
     }
 
-    /* ---- contacts: four switches, as floats for the observation ------ */
+    /* ---- contacts: one switch per foot, as floats for the observation - */
     uint8_t sw = contact_switches();
 
-    s_state.contacts = (uint8_t)(sw | contact_feet());
+    /* The mask used to carry the switch bits OR-ed with two derived "this foot
+       is down" bits. One switch per foot makes those the same bits, so the
+       derived pair is gone and this is just the switches. */
+    s_state.contacts = sw;
     for (int c = 0; c < NEXUS_NUM_CONTACTS; c++)
     {
         s_state.contact[c] = (sw & (1u << c)) ? 1.0f : 0.0f;

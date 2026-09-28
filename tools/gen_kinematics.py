@@ -2,14 +2,14 @@
 """
 zeus.urdf  ->  Appli/App/zeus_kinematics_model.h: the estimator's leg geometry.
 
-The contact-aided InEKF needs, every tick, where each toe and heel contact point
+The contact-aided InEKF needs, every tick, where each foot's contact point
 is relative to the IMU, and how that point moves with each joint (the Jacobian,
 which turns encoder noise into measurement noise). That used to be written by
 hand around four measured lengths. Now the geometry comes from the CAD model:
 
     zeus_26/zeus_description/urdf/zeus.urdf          (made from the Fusion export)
         │
-        ├─ this script walks the URDF from imu_link to each toe and heel,
+        ├─ this script walks the URDF from imu_link to each foot's contact,
         │  folds every rigid part between two joints into one constant
         │  transform, and writes the result as C tables
         │                    ─► Appli/App/zeus_kinematics_model.h
@@ -75,7 +75,7 @@ Q = [
     ("WAIST_ROLL", "waist_roll"),
 ]
 SIDES = ["left", "right"]              # ZEUS_KIN_LEFT, ZEUS_KIN_RIGHT
-POINTS = ["toe", "heel"]               # ZEUS_KIN_TOE, ZEUS_KIN_HEEL
+POINTS = ["contact"]                   # one mechanical switch per foot
 IMU = "imu_link"
 NQ = len(Q)
 
@@ -143,7 +143,7 @@ class Urdf:
 
 
 def leg_tables(urdf: Urdf, side: str):
-    """Steps (pre_T, axis, sign, q index) and the toe/heel points, for one leg."""
+    """Steps (pre_T, axis, sign, q index) and the contact point, for one leg."""
     qidx = {name.format(s=side): i for i, (_, name) in enumerate(Q)}
     legs = []
     for point in POINTS:
@@ -166,16 +166,14 @@ def leg_tables(urdf: Urdf, side: str):
                 C = C @ np.linalg.inv(j["T"])
         legs.append((steps, C[:3, 3]))
 
-    (steps, toe), (steps_heel, heel) = legs
-    same = len(steps) == len(steps_heel) and all(
-        np.allclose(a[0], b[0], atol=1e-12) and a[2:] == b[2:] for a, b in zip(steps, steps_heel))
-    if not same:
-        raise SystemExit(f"{side} toe and heel are not on the same link chain")
+    # One point per foot now, so there is no second chain to agree with. The
+    # check that replaced it is below: every joint exactly once on the path.
+    (steps, point), = legs
     used = sorted(s[3] for s in steps)
     if used != list(range(NQ)):
         missing = [Q[i][1].format(s=side) for i in range(NQ) if i not in used]
         raise SystemExit(f"{side} leg: {missing or 'a joint'} not exactly once on the path IMU -> foot")
-    return steps, [toe, heel]
+    return steps, [point]
 
 
 # ---------------------------------------------------------------- output
@@ -230,8 +228,7 @@ def model_header(prov: dict, tables, zero_pose) -> str:
                         f"              .sign  = {sign:.1f}f, .q = ZEUS_KIN_Q_{Q[qi][0]} }},")
         legs.append(f"    [ZEUS_KIN_{side.upper()}] = {{\n"
                     f"        .step = {{\n" + "\n".join(rows) + "\n        },\n"
-                    f"        .point = {{ {{ {f32(points[0])} }},    /* toe  */\n"
-                    f"                   {{ {f32(points[1])} }} }},  /* heel */\n"
+                    f"        .point = {{ {{ {f32(points[0])} }} }},  /* sole centre */\n"
                     f"    }},")
     zp = "\n".join(f" *   {s:<5} {pt:<4}  ({v[0]:+.4f}, {v[1]:+.4f}, {v[2]:+.4f})"
                    for (s, pt), v in zero_pose.items())
@@ -261,7 +258,7 @@ typedef struct
 typedef struct
 {{
     zk_step_t step[ZK_STEPS];
-    float point[ZEUS_KIN_POINTS][3];    /* toe, heel in the last joint's frame */
+    float point[ZEUS_KIN_POINTS][3];    /* sole centre in the last joint's frame */
 }} zk_leg_t;
 
 static const zk_leg_t zk_legs[2] = {{
@@ -318,7 +315,7 @@ def reference(urdf_path: str, prov: dict):
 typedef struct
 {{
     int    side;            /* ZEUS_KIN_LEFT / RIGHT  */
-    int    point;           /* ZEUS_KIN_TOE / HEEL    */
+    int    point;           /* always 0: one per foot */
     double q[{NQ}];
     double p[3];            /* IMU frame, m           */
     double J[{3 * NQ}];           /* row-major 3 x {NQ}, m/rad */
@@ -343,12 +340,33 @@ def check_enum():
         raise SystemExit(f"zeus_kinematics.h ZEUS_KIN_Q_* {enum} does not match this script's Q {want}")
 
 
-def generate(urdf_path: str) -> dict:
+def zero_pose_from_tables(tables) -> dict:
+    """
+    Where each contact point sits at q = 0, straight from the tables.
+
+    At zero every joint rotation is the identity, so the chain collapses to the
+    product of the pre-transforms and the answer needs no Pinocchio. That
+    matters twice: the comment block in the generated header is worth having
+    even when the reference cannot be built, and when Pinocchio IS available
+    this is an independent second opinion on the same number.
+    """
+    out = {}
+    for side, (steps, points) in zip(SIDES, tables):
+        T = np.eye(4)
+        for C, _axis, _sign, _qi in steps:
+            T = T @ C
+        out[(side, POINTS[0])] = (T @ np.append(points[0], 1.0))[:3]
+    return out
+
+
+def generate(urdf_path: str, with_ref: bool = True) -> dict:
     check_enum()
     text = open(urdf_path).read()
     prov = provenance(urdf_path, text)
     urdf = Urdf(text)
     tables = [leg_tables(urdf, side) for side in SIDES]
+    if not with_ref:
+        return {"model": model_header(prov, tables, zero_pose_from_tables(tables))}
     ref, zero_pose = reference(urdf_path, prov)
     return {"model": model_header(prov, tables, zero_pose), "ref": ref}
 
@@ -357,12 +375,19 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--urdf", default=DEFAULT_URDF, help=f"default: {DEFAULT_URDF}")
     ap.add_argument("--check", action="store_true", help="exit 1 if the checked-in files are stale")
+    # The firmware tables need numpy and nothing else. Only the reference the
+    # host test compares against needs Pinocchio, whose wheels are not always
+    # installable - and being unable to regenerate the tables the firmware
+    # actually flies on, because a test dependency will not build, is a bad
+    # place to be.
+    ap.add_argument("--model-only", action="store_true",
+                    help="regenerate the firmware tables only, without Pinocchio")
     a = ap.parse_args(argv)
     urdf = os.path.abspath(a.urdf)
     if not os.path.exists(urdf):
         raise SystemExit(f"no URDF at {urdf} - pass --urdf")
 
-    out = generate(urdf)
+    out = generate(urdf, with_ref=not a.model_only)
     stale = [k for k, t in out.items() if not os.path.exists(FILES[k]) or open(FILES[k]).read() != t]
     if a.check:
         for k in stale:

@@ -15,9 +15,12 @@
  * Everything is in imu_link - the IMU chip's own axes, origin at the chip -
  * which is the body frame the InEKF works in.
  *
- * Each leg has two contact points, toe and heel, one per contact switch.
- * zeus_kin_foot() returns both: they share every joint, so the second costs a
- * few multiplications.
+ * Each leg has ONE contact point: the mechanical switch at the centre of the
+ * sole. There used to be two, at the toe and the heel. With a single switch
+ * the firmware cannot tell which part of the sole is loaded, so the point it
+ * reports is the middle of the foot - the least biased place to pin the
+ * estimator when that foot is down. Either edge would be a position the robot
+ * only genuinely stands on for part of the stride.
  *
  * q, per leg, in ZEUS_KIN_Q_* order (rad):
  *
@@ -51,17 +54,24 @@ typedef enum
     ZEUS_KIN_RIGHT = 1
 } zeus_kin_side_t;
 
-#define ZEUS_KIN_TOE        0
-#define ZEUS_KIN_HEEL       1
-#define ZEUS_KIN_POINTS     2
+#define ZEUS_KIN_SOLE       0
+#define ZEUS_KIN_POINTS     1
 
-/* The NEXUS_CONTACT_* index of a point: L_TOE 0, L_HEEL 1, R_TOE 2, R_HEEL 3. */
-#define ZEUS_KIN_CONTACT(side, point)   ((int)(side) * ZEUS_KIN_POINTS + (int)(point))
+/*
+ * The NEXUS_CONTACT_* index of a leg's point: LEFT 0, RIGHT 1.
+ *
+ * One switch per foot makes this the identity, which is exactly why it is
+ * still written down. The two numberings are independent - one is a kinematic
+ * chain, the other a wire into a pin - and a previous version of this file
+ * quietly assumed they matched when they did not. Keeping the conversion named
+ * means the next person to add a point changes one macro, not every caller.
+ */
+#define ZEUS_KIN_CONTACT(side)          ((int)(side) * ZEUS_KIN_POINTS)
 
 /*
  * side  ZEUS_KIN_LEFT or ZEUS_KIN_RIGHT
  * q     ZEUS_KIN_NQ joint angles, ZEUS_KIN_Q_* order                 (rad)
- * p     p[ZEUS_KIN_TOE], p[ZEUS_KIN_HEEL]: position in the IMU frame  (m)
+ * p     p[ZEUS_KIN_SOLE]: position in the IMU frame                  (m)
  * J     J[point][r * ZEUS_KIN_NQ + i] = d p[point][r] / d q[i]       (m/rad)
  *       - the exact derivative, not a finite difference. May be NULL.
  *

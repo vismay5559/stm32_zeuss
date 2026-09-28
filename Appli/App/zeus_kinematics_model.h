@@ -4,8 +4,8 @@
  * Leg geometry for zeus_kinematics.c. Include it from there only.
  *
  * model   zeus_26/zeus_description/urdf/zeus.urdf
- * sha256  2a2cf77ed7de0196e3858ea766e9753b6c6babd396090859fce2c7311c7cd526
- * tools   pin 4.1.0, numpy 2.5.3
+ * sha256  4c8fbec6f2f96b3e29da1c8b220bdce75eab0f8aeab3ee3e77cc5af96f87e79a
+ * tools   pin ?, numpy 1.26.4
  */
 
 #ifndef ZEUS_KINEMATICS_MODEL_H
@@ -16,10 +16,8 @@
 /*
  * Contact points in the IMU frame at q = 0 (m), as a sanity check against
  * the robot in front of you:
- *   left  toe   (+0.1374, +0.0881, -0.9647)
- *   left  heel  (-0.0726, +0.0881, -0.9647)
- *   right toe   (+0.1374, -0.0639, -0.9637)
- *   right heel  (-0.0726, -0.0639, -0.9637)
+ *   left  contact  (+0.0324, +0.0881, -0.9647)
+ *   right contact  (+0.0324, -0.0639, -0.9637)
  */
 
 #define ZK_STEPS  8
@@ -36,7 +34,7 @@ typedef struct
 typedef struct
 {
     zk_step_t step[ZK_STEPS];
-    float point[ZEUS_KIN_POINTS][3];    /* toe, heel in the last joint's frame */
+    float point[ZEUS_KIN_POINTS][3];    /* sole centre in the last joint's frame */
 } zk_leg_t;
 
 static const zk_leg_t zk_legs[2] = {
@@ -83,8 +81,7 @@ static const zk_leg_t zk_legs[2] = {
               .axis  = { 0.0f, -0.00191700031f, -0.999998163f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_ANKLE_PITCH },
         },
-        .point = { { -0.106216109f, 0.0473589987f, -0.0350908587f },    /* toe  */
-                   { 0.103729522f, 0.0521372654f, -0.0351000185f } },  /* heel */
+        .point = { { -0.00124329324f, 0.049748132f, -0.0350954386f } },  /* sole centre */
     },
     [ZEUS_KIN_RIGHT] = {
         .step = {
@@ -129,11 +126,10 @@ static const zk_leg_t zk_legs[2] = {
               .axis  = { 0.0f, -0.00191700031f, -0.999998163f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_ANKLE_PITCH },
         },
-        .point = { { -0.106218845f, 0.0474931179f, 0.0349089885f },    /* toe  */
-                   { 0.103726786f, 0.0522713846f, 0.0348998287f } },  /* heel */
+        .point = { { -0.00124602954f, 0.0498822512f, 0.0349044086f } },  /* sole centre */
     },
 };
 
-const char zeus_kin_model_sha[] = "2a2cf77ed7de0196";
+const char zeus_kin_model_sha[] = "4c8fbec6f2f96b3e";
 
 #endif /* ZEUS_KINEMATICS_MODEL_H */

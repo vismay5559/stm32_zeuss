@@ -39,7 +39,7 @@ receiver throws it away. It proves the message arrived intact. It does **not**
 prove the message was a good idea.
 
 **Mask / bit** — a compact way of carrying several yes/no answers in one
-number. "Bit 0 is the left toe switch" means one particular yes/no lives in one
+number. "Bit 0 is the left foot switch" means one particular yes/no lives in one
 particular slot. A "valid mask" says which readings in a batch can be trusted.
 
 **Debounce** — ignoring flicker. A mechanical switch does not close cleanly; it

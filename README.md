@@ -30,7 +30,7 @@ subsystem up at a time.
 | IMU | BNO085, SHTP over UART1 @ 3 Mbaud, 400 Hz |
 | Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: two daisy chains (one per leg), one CS each |
 | Actuators | 8 × ODrive S1 — 4 per bus on 2 × FDCAN (two legs, no waist — see the joint map) |
-| Contacts | 4 × mechanical foot switches (toe/heel, both feet) |
+| Contacts | 2 × mechanical foot switches (one per foot, sole centre) |
 | Host link | USB High Speed (480 Mbit), CDC |
 
 ### Spring encoder wiring
@@ -109,7 +109,7 @@ Appli/App/            ← the actual robot code
    critical.h           ISR-safe copy helper
 
    lie_group.c/.h       SE_K(3) Lie group maths (fixed size)
-   zeus_kinematics.c/.h toe/heel FK + exact Jacobian from the URDF (model: GENERATED -
+   zeus_kinematics.c/.h contact-point FK + exact Jacobian from the URDF (model: GENERATED -
                         see tools/gen_kinematics.py)
    inekf.c/.h           contact-aided right-invariant EKF
    fusion.c/.h          bridges sensors <-> filter; fills the policy block
@@ -261,7 +261,7 @@ covers today:
 | `test_robot_config` | spring deflection, sensor-zero wrap-around, calibration flag |
 | `test_watchdog` | start, refresh, and the stopped-clock case |
 | `test_lie_group` | rotations stay rotations, and the Gamma coefficients against a double-precision reference |
-| `test_zeus_kinematics` | toe and heel positions and Jacobians from the URDF model, against Pinocchio in double precision |
+| `test_zeus_kinematics` | contact-point positions and Jacobians from the URDF model, against Pinocchio in double precision |
 | `test_health` | fault thresholds, which subsystem is blamed, latching, and the blink code |
 | `test_gait_ref` | phase wrap, interpolation, the seam, and the two documented table steps |
 | `test_inekf` | still, free fall, a known spin, contact correction, a refused time step, and the fast covariance update against a dense reference |
@@ -336,7 +336,7 @@ assertions reads that as "the mutation survived".
 
 ## Kinematics from the URDF
 
-The estimator needs each toe and heel contact point relative to the IMU, and
+The estimator needs each foot's contact point relative to the IMU, and
 its Jacobian. Rather than measuring lengths by hand, the geometry comes from
 the CAD:
 
@@ -1367,7 +1367,7 @@ The Nucleo has two USB ports, and they do different jobs:
 
 On the user port the board is a USB *device* and the Pi is the *host*. It shows
 up as a serial port (USB CDC, `/dev/ttyACM*`, USB ID `0483:5740`) and carries
-binary packets, not text: a 434-byte state packet every millisecond out, 44-byte
+binary packets, not text: a 426-byte state packet every millisecond out, 44-byte
 commands in. Plug it into any USB port on the Pi.
 
 What sends packets depends on the mode:
@@ -1467,7 +1467,7 @@ ros2 launch zeus_bringup robot.launch.py rerun:=connect rerun_host:=<LAPTOP_IP> 
 
 ## What the Pi receives
 
-One **434-byte packet every millisecond** (434 KB/s, under 1% of USB HS).
+One **426-byte packet every millisecond** (426 KB/s, under 1% of USB HS).
 `Appli/App/link_proto.h` and `pi/nexus_proto.py` describe the same bytes;
 `tools/check_proto.py` compares every field offset, both struct sizes and the
 joint map, so a mismatch is caught rather than debugged.
@@ -1574,7 +1574,7 @@ obs = np.frombuffer(raw, "<f4", count=52, offset=12)
 | 5 | `joint_vel` | 10 | rad/s, output side | ODrive |
 | 6 | `spring_angle` | 4 | rad | after-spring encoders — **deflection** |
 | 7 | `ref_angle` | 10 | rad, output side | stored gait at `phase` — what `residual` adds to |
-| 8 | `contact` | 4 | 0.0 / 1.0 | foot switches: L toe, L heel, R toe, R heel |
+| 8 | `contact` | 2 | 0.0 / 1.0 | foot switches: left, right (one per foot) |
 | 9 | `foot_z` | 2 | m, world | forward kinematics — **[0] right, [1] left** |
 | 10 | `phase` | 1 | 0..1 | stride clock, free-running at 1 kHz |
 
@@ -1713,7 +1713,8 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
   byte and alignment; v3 added the policy block and split the contacts; v4 added
   `fk_valid` and `safety_state`; v5 added the diagnostics block; v6 made the
   command a residual rather than a target; v7 dropped the two waist joints; v8
-  added `act_target` and the gains message. 422 → 424 → 444 → 400 → 434 bytes.
+  added `act_target` and the gains message; v9 cut each foot from two switches
+  to one. 422 → 424 → 444 → 400 → 434 → 426 bytes.
   Mismatched versions reject each other rather than silently misparsing.
 
 ## Watching it live — Rerun
@@ -1825,15 +1826,15 @@ the RL policy.
 | File | Contents |
 |---|---|
 | `lie_group.c` | SO(3) exponential, Gamma0-3, fixed-stride matrix helpers |
-| `zeus_kinematics.c` | Toe and heel position in the IMU frame + exact 3x8 Jacobian, from the URDF |
+| `zeus_kinematics.c` | Contact-point position in the IMU frame + exact 3x8 Jacobian, from the URDF |
 | `inekf.c` | Predict, contact update, contact add/remove |
 | `fusion.c` | Sensors in, estimate out: joint angles, contacts, noise, status |
 
 State is `X` in SE_{N+2}(3) with `R, v, p` and one world position per contact,
 IMU bias `theta` in R^6, and a 27x27 right-invariant error covariance. There are
-four contact points - the toe and heel of each foot, one per foot switch - and
+two contact points - one per foot, at the centre of each sole - and
 each is added when its switch closes and removed when it opens, so a rolling
-foot hands over from heel to toe instead of pretending the whole foot is
+foot is planted instead of pretending the whole robot is
 planted.
 
 Per leg the kinematics take eight angles: that leg's four drives, the two
@@ -1925,7 +1926,7 @@ Both are worth fixing in the Python too if it stays in use.
 Checked on the host against independent references, not against the Python:
 
 - `Gamma1` against a numerically integrated `exp(phi*s) ds` (1e-4)
-- Toe/heel kinematics against Pinocchio reading the same URDF (0.2 um, 96 poses)
+- Contact-point kinematics against Pinocchio reading the same URDF (0.2 um, 48 poses)
 - Free fall for 1 s gives exactly -9.81 m/s and -4.905 m
 - **An injected 20 cm position error decays to 1.1 mm under contact updates** -
   this is what validates the innovation and `H` sign convention; with either
@@ -1953,7 +1954,8 @@ zeus.urdf ─► gen_walk.py ─► what the IMU, drives, springs and switches w
 The walk is kinematic, built from the URDF: the stance foot is fixed to the
 world and the torso moves however the joint angles make it, so a closed
 switch's contact point really is still. It has what the estimator must cope
-with: heel strike and toe-off (switches go heel, both, toe), spring wind-up on
+with: heel strike and toe-off (the sole-centre switch closes only for the flat
+middle of stance), spring wind-up on
 the stance leg, hip-roll sway, 400 Hz IMU with noise and constant
 biases, drives reporting at 500 Hz.
 
@@ -1993,7 +1995,7 @@ that swings +/-3 deg (`tools/sim/run.sh --check -- --waist-pitch 0.05`) gives
 0.088 m/s of velocity error against a 0.03 limit. Worth repeating on the real
 robot's bracket before trusting the estimate.
 
-Toe and heel switches swapped does not fail: velocity error rises 50%, but the
+Swapping the two feet does not fail: velocity error rises 50%, but the
 filter's foot-slip allowance absorbs it.
 
 What this does not test: impacts and foot slip (the walk has neither), the

@@ -11,7 +11,7 @@
 /*
  * Which drive and encoder is which joint, and their signs and zeros, live in
  * robot_config.h. The leg geometry comes from the URDF, through
- * zeus_kinematics.h: each leg has two contact points, toe and heel, one per
+ * zeus_kinematics.h: each leg has one contact point, the sole centre, one per
  * foot switch, both seen from the IMU through the waist and the whole leg.
  *
  * Per leg the kinematics take eight angles. Four are the leg's drives, two are
@@ -255,7 +255,7 @@ static void point_cov(float C[9], const float J[3 * ZEUS_KIN_NQ], const float va
     }
 }
 
-/* Toe and heel in the body frame, refreshed every tick for foot_z. */
+/* The contact point in the body frame, refreshed every tick for foot_z. */
 static float   s_point_body[2][ZEUS_KIN_POINTS][3];
 static uint8_t s_leg_ok[2];
 
@@ -437,7 +437,7 @@ void fusion_tick(const imu_sample_t *imu,
         leg_input(leg, act, spring_rad, spring_valid, &in);
 
         /*
-         * Which of this leg's two points are planted. A leg with unreadable
+         * Whether this leg's contact point is planted. A leg with unreadable
          * joint angles has none: anchoring a contact from a bad forward-
          * kinematic position is worse than having no contact at all, because
          * the filter would pull the whole state towards a point that does not
@@ -448,7 +448,7 @@ void fusion_tick(const imu_sample_t *imu,
 
         for (int k = 0; k < ZEUS_KIN_POINTS; k++)
         {
-            int slot = ZEUS_KIN_CONTACT(leg, k);
+            int slot = ZEUS_KIN_CONTACT(leg);
 
             down[k]  = (uint8_t)(in.ok && ((contacts & (1u << (unsigned)slot)) != 0u));
             any_down = (uint8_t)(any_down | down[k]);
@@ -469,7 +469,7 @@ void fusion_tick(const imu_sample_t *imu,
 
         for (int k = 0; k < ZEUS_KIN_POINTS; k++)
         {
-            int slot = ZEUS_KIN_CONTACT(leg, k);
+            int slot = ZEUS_KIN_CONTACT(leg);
 
             if (down[k] && !s_down[slot])
             {

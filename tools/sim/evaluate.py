@@ -16,7 +16,7 @@ replay.c), and reports only errors that mean something for this filter:
   height     estimated minus true IMU height above the starting ground.
              Absolute height is only weakly observable - the anchor is the
              first contact - so it may wander slowly.
-  foot_z     reported foot height (lowest of toe and heel) against the truth.
+  foot_z     reported foot height (the sole's contact point) against the truth.
   biases     estimated against the constant biases that were injected.
 
 --check exits 1 if any error is beyond LIMITS below. The limits are about
@@ -24,7 +24,9 @@ two to three times what the default walk gives today: loose enough not to
 flake on a change of noise seed, tight enough that a real mistake fails it.
 Checked by corrupting the simulated sensors: a flipped knee sign, the spring
 deflections dropped or marked invalid, and a 3 degree waist zero error all
-fail. Toe and heel switches swapped does NOT - it makes velocity 50% worse,
+fail. (The toe/heel switch swap this used to list is gone with the second
+switch: there is one per foot now, at the sole centre.) Swapping the two feet
+still does NOT - it makes velocity 50% worse,
 but the filter's foot-slip allowance absorbs the few centimetres a rolling
 foot moves, so it stays inside the limits.
 

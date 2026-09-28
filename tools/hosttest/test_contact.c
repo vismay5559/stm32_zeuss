@@ -47,27 +47,29 @@ typedef struct
     GPIO_TypeDef *port;
     uint16_t      pin;
     uint8_t       expect_bit;    /* the ONE bit this switch must set   */
-    uint8_t       expect_foot;   /* the foot bit it must derive        */
 } sw_t;
 
-static const sw_t SWITCHES[4] = {
-    { "L_TOE",  L_TOE_GPIO_Port,  L_TOE_Pin,  NEXUS_CONTACT_L_TOE_BIT,  NEXUS_CONTACT_L_FOOT },
-    { "L_HEEL", L_HEEL_GPIO_Port, L_HEEL_Pin, NEXUS_CONTACT_L_HEEL_BIT, NEXUS_CONTACT_L_FOOT },
-    { "R_TOE",  R_TOE_GPIO_Port,  R_TOE_Pin,  NEXUS_CONTACT_R_TOE_BIT,  NEXUS_CONTACT_R_FOOT },
-    { "R_HEEL", R_HEEL_GPIO_Port, R_HEEL_Pin, NEXUS_CONTACT_R_HEEL_BIT, NEXUS_CONTACT_R_FOOT },
+/*
+ * One switch per foot, at the centre of the sole. The pins keep their CubeMX
+ * names: L_TOE and R_TOE are the two that are still wired, and L_HEEL/R_HEEL
+ * are no longer connected to anything - see contact_init().
+ */
+static const sw_t SWITCHES[NEXUS_NUM_CONTACTS] = {
+    { "LEFT",  L_TOE_GPIO_Port, L_TOE_Pin, NEXUS_CONTACT_L_BIT },
+    { "RIGHT", R_TOE_GPIO_Port, R_TOE_Pin, NEXUS_CONTACT_R_BIT },
 };
 
 /*
  * Each switch, pressed on its own, must set exactly its own bit and light
- * exactly its own foot. This is the test that C1 fails: the mask table was
- * built from the INDEX macros (0,1,2,3) rather than the _BIT macros, so
- * L_TOE set nothing at all and R_HEEL set two bits at once.
+ * exactly its own foot. This is the test that catches a mask table built from
+ * the INDEX macros (0,1) rather than the _BIT macros - which would make the
+ * left foot invisible and the right foot report as the left.
  */
 static void test_one_switch_one_bit(void)
 {
     printf("one switch -> one bit\n");
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < NEXUS_NUM_CONTACTS; i++)
     {
         const sw_t *s = &SWITCHES[i];
 
@@ -82,9 +84,12 @@ static void test_one_switch_one_bit(void)
               "%s pressed: switches = 0x%02X, expected 0x%02X",
               s->name, sw, s->expect_bit);
 
-        CHECK(feet == s->expect_foot,
+        /* One switch per foot, so the foot mask is the switch mask - but go
+           through contact_feet() rather than assuming it, since that is the
+           thing the estimator actually asks. */
+        CHECK(feet == s->expect_bit,
               "%s pressed: feet = 0x%02X, expected 0x%02X",
-              s->name, feet, s->expect_foot);
+              s->name, feet, s->expect_bit);
     }
 }
 
@@ -97,12 +102,11 @@ static void test_bit_positions_match_protocol(void)
 {
     printf("bit positions match the protocol's index order\n");
 
-    const int idx[4] = {
-        NEXUS_CONTACT_L_TOE, NEXUS_CONTACT_L_HEEL,
-        NEXUS_CONTACT_R_TOE, NEXUS_CONTACT_R_HEEL,
+    const int idx[NEXUS_NUM_CONTACTS] = {
+        NEXUS_CONTACT_LEFT, NEXUS_CONTACT_RIGHT,
     };
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < NEXUS_NUM_CONTACTS; i++)
     {
         const sw_t *s = &SWITCHES[i];
 
@@ -124,37 +128,43 @@ static void test_bit_positions_match_protocol(void)
     }
 }
 
-/* Both switches on one foot, and nothing on the other. */
+/*
+ * One foot's switch must never move the other foot.
+ *
+ * This used to press both switches on a foot to prove they OR-ed together.
+ * There is only one per foot now, so what is left to protect is the thing
+ * that actually matters to the estimator: the two feet are independent, and
+ * standing on one does not make the other look planted. Anchoring a foot that
+ * is in the air is how the position estimate runs away.
+ */
 static void test_feet_are_independent(void)
 {
-    printf("one foot's switches never move the other foot\n");
+    printf("one foot's switch never moves the other foot\n");
 
     settle_released();
-    host_press(L_TOE_GPIO_Port,  L_TOE_Pin,  1);
-    host_press(L_HEEL_GPIO_Port, L_HEEL_Pin, 1);
+    host_press(L_TOE_GPIO_Port, L_TOE_Pin, 1);
     poll_n(MAKE_TICKS);
 
-    CHECK(contact_feet() == NEXUS_CONTACT_L_FOOT,
-          "both left switches: feet = 0x%02X, expected 0x%02X",
-          contact_feet(), NEXUS_CONTACT_L_FOOT);
+    CHECK(contact_feet() == NEXUS_CONTACT_L_BIT,
+          "left switch: feet = 0x%02X, expected 0x%02X",
+          contact_feet(), NEXUS_CONTACT_L_BIT);
 
     settle_released();
-    host_press(R_TOE_GPIO_Port,  R_TOE_Pin,  1);
-    host_press(R_HEEL_GPIO_Port, R_HEEL_Pin, 1);
+    host_press(R_TOE_GPIO_Port, R_TOE_Pin, 1);
     poll_n(MAKE_TICKS);
 
-    CHECK(contact_feet() == NEXUS_CONTACT_R_FOOT,
-          "both right switches: feet = 0x%02X, expected 0x%02X",
-          contact_feet(), NEXUS_CONTACT_R_FOOT);
+    CHECK(contact_feet() == NEXUS_CONTACT_R_BIT,
+          "right switch: feet = 0x%02X, expected 0x%02X",
+          contact_feet(), NEXUS_CONTACT_R_BIT);
 
     settle_released();
     host_press(L_TOE_GPIO_Port, L_TOE_Pin, 1);
     host_press(R_TOE_GPIO_Port, R_TOE_Pin, 1);
     poll_n(MAKE_TICKS);
 
-    CHECK(contact_feet() == (NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT),
-          "both toes: feet = 0x%02X, expected 0x%02X",
-          contact_feet(), NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
+    CHECK(contact_feet() == (NEXUS_CONTACT_L_BIT | NEXUS_CONTACT_R_BIT),
+          "both switches: feet = 0x%02X, expected 0x%02X",
+          contact_feet(), NEXUS_CONTACT_L_BIT | NEXUS_CONTACT_R_BIT);
 }
 
 /*
@@ -174,13 +184,13 @@ static void test_debounce_asymmetry(void)
           "made after only %d ticks (should need %d)", MAKE_TICKS - 1, MAKE_TICKS);
 
     poll_n(1);
-    CHECK(contact_switches() == NEXUS_CONTACT_L_TOE_BIT,
+    CHECK(contact_switches() == NEXUS_CONTACT_L_BIT,
           "not made after %d ticks", MAKE_TICKS);
 
     host_press(L_TOE_GPIO_Port, L_TOE_Pin, 0);
 
     poll_n(BREAK_TICKS - 1);
-    CHECK(contact_switches() == NEXUS_CONTACT_L_TOE_BIT,
+    CHECK(contact_switches() == NEXUS_CONTACT_L_BIT,
           "broke after only %d ticks (should need %d)", BREAK_TICKS - 1, BREAK_TICKS);
 
     poll_n(1);

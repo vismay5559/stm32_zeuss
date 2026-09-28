@@ -36,8 +36,7 @@ static float           s_spring[NEXUS_NUM_ENCODERS];
 static uint8_t         s_spring_valid;
 static uint32_t        s_now_us;
 
-#define ALL_SWITCHES  ((uint8_t)(NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_HEEL_BIT | \
-                                 NEXUS_CONTACT_R_TOE_BIT | NEXUS_CONTACT_R_HEEL_BIT))
+#define ALL_SWITCHES  ((uint8_t)(NEXUS_CONTACT_L_BIT | NEXUS_CONTACT_R_BIT))
 
 static void fixtures_reset(void)
 {
@@ -347,7 +346,7 @@ static void test_the_bolted_waist_never_moves(void)
           "fk_valid = 0x%02X: the bolted waist invalidated a leg", after.fk_valid);
 }
 
-/* Toe and heel are separate contact points, each keyed off its own switch. */
+/* Each foot switch is its own contact point, keyed off its own bit. */
 static void test_each_switch_is_its_own_contact(void)
 {
     printf("each foot switch is its own contact point\n");
@@ -355,23 +354,23 @@ static void test_each_switch_is_its_own_contact(void)
     fixtures_reset();
     fusion_init();
 
-    tick(1, (uint8_t)(NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_FOOT));
-    CHECK(fusion_num_contacts() == 1u, "left toe alone gave %u contacts", fusion_num_contacts());
+    tick(1, NEXUS_CONTACT_L_BIT);
+    CHECK(fusion_num_contacts() == 1u, "left alone gave %u contacts", fusion_num_contacts());
 
-    tick(1, (uint8_t)(NEXUS_CONTACT_L_TOE_BIT | NEXUS_CONTACT_L_HEEL_BIT | NEXUS_CONTACT_L_FOOT));
-    CHECK(fusion_num_contacts() == 2u, "left toe and heel gave %u contacts", fusion_num_contacts());
+    tick(1, ALL_SWITCHES);
+    CHECK(fusion_num_contacts() == 2u, "both feet gave %u contacts", fusion_num_contacts());
 
-    tick(1, (uint8_t)(ALL_SWITCHES | NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT));
-    CHECK(fusion_num_contacts() == 4u, "all four switches gave %u contacts", fusion_num_contacts());
+    /*
+     * The left foot lifts while the right stays down. There is no longer a
+     * toe and a heel to lift separately, so what this pins down is that a
+     * released switch actually drops its anchor - a contact left active under
+     * a foot that is in the air drags the whole estimate with it.
+     */
+    tick(1, NEXUS_CONTACT_R_BIT);
+    CHECK(fusion_num_contacts() == 1u, "right alone gave %u contacts", fusion_num_contacts());
 
-    /* Heel lifts, toe stays: the per-foot bit is still set, but only one
-       point is still planted. */
-    tick(1, (uint8_t)(NEXUS_CONTACT_R_TOE_BIT | NEXUS_CONTACT_R_FOOT));
-    CHECK(fusion_num_contacts() == 1u, "right toe alone gave %u contacts", fusion_num_contacts());
-
-    /* The per-foot bit on its own is not a contact point. */
-    tick(1, (uint8_t)(NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT));
-    CHECK(fusion_num_contacts() == 0u, "foot bits alone gave %u contacts", fusion_num_contacts());
+    tick(1, 0u);
+    CHECK(fusion_num_contacts() == 0u, "both feet up gave %u contacts", fusion_num_contacts());
 }
 
 /*
@@ -387,7 +386,7 @@ static void test_never_reports_ok_while_uncalibrated(void)
     fusion_init();
 
     /* Stand on both feet and run for well past the convergence hold time. */
-    uint8_t both = (uint8_t)(ALL_SWITCHES | NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
+    uint8_t both = (uint8_t)(ALL_SWITCHES);
 
     for (int i = 0; i < 3000; i++)
     {
@@ -424,7 +423,7 @@ static void test_no_nan_in_a_healthy_run(void)
     fixtures_reset();
     fusion_init();
 
-    uint8_t both = (uint8_t)(ALL_SWITCHES | NEXUS_CONTACT_L_FOOT | NEXUS_CONTACT_R_FOOT);
+    uint8_t both = (uint8_t)(ALL_SWITCHES);
 
     for (int i = 0; i < 1000; i++)
     {

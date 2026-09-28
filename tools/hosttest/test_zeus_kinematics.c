@@ -1,5 +1,5 @@
 /*
- * Host test for zeus_kinematics.c - toe and heel positions, and their
+ * Host test for zeus_kinematics.c - the contact point position, and its
  * Jacobians, in the IMU frame, from the URDF-generated model.
  *
  * The answers come from somewhere else: Pinocchio, a separate rigid-body
@@ -40,7 +40,7 @@ static int s_fail;
 
 static void test_matches_pinocchio(void)
 {
-    printf("toe and heel, and their Jacobians, match Pinocchio (%d poses)\n", ZEUS_KIN_REF_N);
+    printf("the contact point and its Jacobian match Pinocchio (%d poses)\n", ZEUS_KIN_REF_N);
 
     double worst_p = 0.0, worst_j = 0.0;
 
@@ -115,17 +115,26 @@ static void test_jacobian_predicts_small_moves(void)
 
 static void test_the_robot_is_the_right_way_up(void)
 {
-    printf("at q = 0: feet below the IMU, toe ahead of heel, left foot left\n");
+    printf("at q = 0: feet below the IMU, under the ankle, left foot left\n");
 
     const float q[ZEUS_KIN_NQ] = { 0 };
     float L[ZEUS_KIN_POINTS][3], R[ZEUS_KIN_POINTS][3];
     zeus_kin_foot(ZEUS_KIN_LEFT, q, L, NULL);
     zeus_kin_foot(ZEUS_KIN_RIGHT, q, R, NULL);
 
-    CHECK(L[ZEUS_KIN_TOE][2] < -0.3f && R[ZEUS_KIN_TOE][2] < -0.3f, "feet not below the IMU");
-    CHECK(L[ZEUS_KIN_TOE][0] > L[ZEUS_KIN_HEEL][0], "left toe behind its heel");
-    CHECK(R[ZEUS_KIN_TOE][0] > R[ZEUS_KIN_HEEL][0], "right toe behind its heel");
-    CHECK(L[ZEUS_KIN_TOE][1] > R[ZEUS_KIN_TOE][1], "left foot is not to the left");
+    CHECK(L[ZEUS_KIN_SOLE][2] < -0.3f && R[ZEUS_KIN_SOLE][2] < -0.3f, "feet not below the IMU");
+    CHECK(L[ZEUS_KIN_SOLE][1] > R[ZEUS_KIN_SOLE][1], "left foot is not to the left");
+
+    /*
+     * The toe-ahead-of-heel check went with the second switch. What replaces
+     * it is the property that made the centre worth choosing: the single point
+     * sits under the middle of the foot, not out at an edge. A model that
+     * silently kept the old toe frame would pass every other check here and
+     * fail this one.
+     */
+    CHECK(fabsf(L[ZEUS_KIN_SOLE][0]) < 0.05f && fabsf(R[ZEUS_KIN_SOLE][0]) < 0.05f,
+          "contact point is not near the middle of the sole (L %.3f, R %.3f)",
+          (double)L[ZEUS_KIN_SOLE][0], (double)R[ZEUS_KIN_SOLE][0]);
 
     /* Positive hip pitch swings the foot back, on both legs: the URDF clean-up
        made every pitch axis +Y, so the two legs must agree. */
@@ -134,7 +143,7 @@ static void test_the_robot_is_the_right_way_up(void)
     qp[ZEUS_KIN_Q_HIP_PITCH] = 0.2f;
     zeus_kin_foot(ZEUS_KIN_LEFT, qp, Lp, NULL);
     zeus_kin_foot(ZEUS_KIN_RIGHT, qp, Rp, NULL);
-    CHECK(Lp[ZEUS_KIN_TOE][0] < L[ZEUS_KIN_TOE][0] && Rp[ZEUS_KIN_TOE][0] < R[ZEUS_KIN_TOE][0],
+    CHECK(Lp[ZEUS_KIN_SOLE][0] < L[ZEUS_KIN_SOLE][0] && Rp[ZEUS_KIN_SOLE][0] < R[ZEUS_KIN_SOLE][0],
           "positive hip pitch did not swing both feet back");
 
     /* The spring adds to the motor angle: same joint axis. */
@@ -143,8 +152,8 @@ static void test_the_robot_is_the_right_way_up(void)
     qs[ZEUS_KIN_Q_HIP_PITCH] = 0.15f;
     qs[ZEUS_KIN_Q_HIP_PITCH_SPRING] = 0.05f;
     zeus_kin_foot(ZEUS_KIN_LEFT, qs, Ls, NULL);
-    CHECK(fabsf(Ls[ZEUS_KIN_TOE][0] - Lp[ZEUS_KIN_TOE][0]) < 1e-3f &&
-          fabsf(Ls[ZEUS_KIN_TOE][2] - Lp[ZEUS_KIN_TOE][2]) < 1e-3f,
+    CHECK(fabsf(Ls[ZEUS_KIN_SOLE][0] - Lp[ZEUS_KIN_SOLE][0]) < 1e-3f &&
+          fabsf(Ls[ZEUS_KIN_SOLE][2] - Lp[ZEUS_KIN_SOLE][2]) < 1e-3f,
           "0.15 motor + 0.05 spring is not about 0.2 of hip pitch");
 }
 
@@ -153,9 +162,9 @@ static void test_bad_side(void)
     printf("a side that is neither leaves the outputs alone\n");
 
     const float q[ZEUS_KIN_NQ] = { 0 };
-    float p[ZEUS_KIN_POINTS][3] = { { 7.0f, 7.0f, 7.0f }, { 7.0f, 7.0f, 7.0f } };
+    float p[ZEUS_KIN_POINTS][3] = { { 7.0f, 7.0f, 7.0f } };
     CHECK(zeus_kin_foot((zeus_kin_side_t)2, q, p, NULL) == -1, "side 2 accepted");
-    CHECK(p[0][0] == 7.0f && p[1][2] == 7.0f, "p written for a bad side");
+    CHECK(p[0][0] == 7.0f && p[0][2] == 7.0f, "p written for a bad side");
     CHECK(strlen(zeus_kin_model_sha) == 16u, "model sha missing");
 }
 

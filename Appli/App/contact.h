@@ -6,8 +6,9 @@
 /*
  * THE FOOT SWITCHES
  *
- * Four switches tell the robot when it is standing on something: toe and heel
- * on each foot. This matters more than it sounds. A foot that is planted is
+ * Two switches tell the robot when it is standing on something: one per foot,
+ * at the centre of the sole. This matters more than it sounds. A foot that is
+ * planted is
  * the one thing the robot can be certain is not moving, and the position
  * estimator leans on that to correct itself. Believe a foot is down when it
  * is not and the estimate drifts.
@@ -25,14 +26,13 @@
  *
  * Each switch is tied to the slot it reports into. Those slots are numbered
  * differently from the switches' own positions in the list, and mixing the
- * two up once made the left toe invisible and the right heel report two
- * switches at once - so they are written out here one by one, deliberately.
+ * two up once made one foot invisible and the other report two switches at
+ * once - so they are written out one by one, deliberately.
  */
 void    contact_init(void);
 
 /*
- * Look at all four switches and update what they are saying. Call once per
- * tick.
+ * Look at both switches and update what they are saying. Call once per tick.
  *
  * A change is only believed once the switch has held its new position long
  * enough. Anything briefer is treated as chatter and ignored.
@@ -40,8 +40,7 @@ void    contact_init(void);
 void    contact_poll(void);
 
 /*
- * Which individual switches are pressed, as four yes/no answers:
- * left toe, left heel, right toe, right heel.
+ * Which individual switches are pressed, as two yes/no answers: left, right.
  *
  * These have already been through the chatter filtering, so they are what the
  * switches are really saying rather than what they said for an instant.
@@ -51,8 +50,11 @@ uint8_t contact_switches(void);
 /*
  * Which FEET are on the ground, as two yes/no answers: left and right.
  *
- * A foot counts as down if either of its switches is pressed - a robot on its
- * heel is still standing on that foot.
+ * With one switch per foot this is the same answer as contact_switches(), and
+ * it is kept as its own name on purpose: the two are only equal because of
+ * how the robot is currently built. A caller asking "is this foot down"
+ * should not have to know that, and would otherwise all need changing the day
+ * a second switch comes back.
  */
 uint8_t contact_feet(void);
 
