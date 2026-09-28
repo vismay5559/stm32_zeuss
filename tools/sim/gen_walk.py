@@ -327,7 +327,10 @@ def main(argv=None):
     local = {side: (T_Fb[side] @ f0[f"{side}_contact"])[:3, 3] for side in SIDES}
 
     T_wb0 = np.eye(4)
-    T_wb0[2, 3] = -f0["left_toe"][2, 3]                   # left toe on z = 0, torso upright
+    # The foot is flat at the start pose, so the sole's contact point is the
+    # sole: putting it on z = 0 puts the foot on the ground, exactly as
+    # resting the toe there used to.
+    T_wb0[2, 3] = -f0["left_contact"][2, 3]              # left sole on z = 0, torso upright
 
     A = []
 
