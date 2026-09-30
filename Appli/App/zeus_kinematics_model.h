@@ -5,7 +5,7 @@
  *
  * model   zeus_26/zeus_description/urdf/zeus.urdf
  * sha256  6e7d4e74a9e2f33e6da913ab0ceb2d3cf27dd4e92e106083d86ecfa5d7c68dcd
- * tools   pin ?, numpy 1.26.4
+ * tools   pin 2.7.0, numpy 1.26.4
  */
 
 #ifndef ZEUS_KINEMATICS_MODEL_H

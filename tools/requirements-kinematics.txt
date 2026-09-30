@@ -1,4 +1,23 @@
-# tools/gen_kinematics.py only - the firmware build needs none of this.
-# Install into a venv, never with pip --user on a ROS machine.
-pin==4.1.0
-numpy
+# tools/gen_kinematics.py and tools/sim/run.sh only - the firmware build needs
+# none of this. Install into a venv, never with pip --user on a ROS machine.
+#
+# BOTH VERSIONS ARE PINNED, and the numpy pin is the load-bearing one.
+#
+# The newer pin wheels (3.x, 4.x) bundle an eigenpy whose compiled extension
+# wants a numpy ABI that no installable numpy provides: importing pinocchio
+# dies with
+#
+#     undefined symbol: EIGENPY_ARRAY_APIPyArray_RUNTIME_VERSION
+#
+# which is a broken macro expansion in eigenpy, not anything wrong here. It
+# happens with every numpy 2.x, and pinning numpy alone does not fix it because
+# cmeel-boost then demands numpy >= 2.3 straight back.
+#
+# pin 2.7.0 against numpy 1.x imports and runs: it regenerates the kinematics
+# reference and runs the walk simulation. Verified against the checked-in
+# tables to 1.46e-07 m over 48 poses.
+#
+# If a later pin release fixes eigenpy, raise this - but check that
+# `tools/sim/run.sh --check` still passes, not just that the import works.
+pin==2.7.0
+numpy<2
