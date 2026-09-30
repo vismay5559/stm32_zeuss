@@ -12,7 +12,7 @@
  *
  * `pre` is everything rigid between one joint and the next, already multiplied
  * together. `sign` is -1 where the walk crosses a joint from child to parent -
- * the waist, since the IMU sits above it and the legs hang below.
+ * the torso, since the IMU sits on it and the legs hang below.
  *
  * The Jacobian needs no extra FK. A revolute joint turning by dq moves any
  * point downstream of it by (axis x (point - joint origin)) dq, so recording

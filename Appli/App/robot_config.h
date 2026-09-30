@@ -39,9 +39,6 @@
  *
  *   hip_pitch, hip_roll, knee_pitch, ankle_pitch   from that leg's ODrives
  *   hip_pitch_spring, knee_pitch_spring            from that leg's AS5047Ps
- *   waist_pitch, waist_roll                        held at zero - this build
- *                                                  has no waist actuators and
- *                                                  the waist is bolted
  *
  * A series-elastic joint's real angle is the motor side PLUS the spring's
  * deflection: the ODrive's encoder sits after the gearbox but before the

@@ -23,7 +23,7 @@ replay.c), and reports only errors that mean something for this filter:
 two to three times what the default walk gives today: loose enough not to
 flake on a change of noise seed, tight enough that a real mistake fails it.
 Checked by corrupting the simulated sensors: a flipped knee sign, the spring
-deflections dropped or marked invalid, and a 3 degree waist zero error all
+deflections dropped or marked invalid all
 fail. (The toe/heel switch swap this used to list is gone with the second
 switch: there is one per foot now, at the sole centre.) Swapping the two feet
 still does NOT - it makes velocity 50% worse,

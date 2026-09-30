@@ -304,34 +304,39 @@ static void test_an_unreadable_spring_is_not_believed(void)
 }
 
 /*
- * The waist sits between the IMU and both legs, and this build has no waist
- * actuators: it is bolted at zero. So no drive can invalidate it, and no
- * telemetry can move it - the kinematics must behave as if it were welded.
+ * One leg's drives must not move the other leg's foot.
+ *
+ * This replaces a test that checked the bolted waist never moved. There is no
+ * waist now - both hips bolt straight to the torso - and with all eight packet
+ * indices being leg joints, that test had quietly become a loop whose body
+ * never ran: it passed by describing a robot that no longer exists.
+ *
+ * What is still worth pinning down is the property it was really protecting:
+ * each leg's kinematics read only that leg's drives. The two legs share a q
+ * vector layout but not a q vector, and getting an index wrong there moves a
+ * foot that nobody touched - which looks exactly like an estimator drifting
+ * for no reason.
  */
-static void test_the_bolted_waist_never_moves(void)
+static void test_one_legs_drives_do_not_move_the_other_foot(void)
 {
-    printf("the waist is bolted: no drive index moves it\n");
+    printf("one leg's drives never move the other leg's foot\n");
 
     fixtures_reset();
     fusion_init();
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_act.pos[j] = 0.0f;
+    }
     tick(1, 0);
 
     nexus_state_t before;
     memset(&before, 0, sizeof(before));
     fusion_fill_state(&before);
 
-    /* Drive every index the packet has, including the ones the waist used to
-       live at, and the feet must not move by so much as a micron. */
-    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    /* Move every LEFT drive and nothing else. foot_z is [0] right, [1] left. */
+    for (int j = NEXUS_J_L_HIP_PITCH; j <= NEXUS_J_L_ANKLE_PITCH; j++)
     {
-        s_act.pos[j] = 0.0f;
-    }
-    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
-    {
-        if ((j < NEXUS_J_L_HIP_PITCH) || (j > NEXUS_J_R_ANKLE_PITCH))
-        {
-            s_act.pos[j] = 0.25f;          /* nothing outside the legs exists */
-        }
+        s_act.pos[j] = 0.25f;
     }
     tick(1, 0);
 
@@ -339,11 +344,15 @@ static void test_the_bolted_waist_never_moves(void)
     memset(&after, 0, sizeof(after));
     fusion_fill_state(&after);
 
-    CHECK(after.foot_z[0] == before.foot_z[0] && after.foot_z[1] == before.foot_z[1],
-          "a non-leg drive index moved a foot (%f -> %f)",
-          (double)before.foot_z[1], (double)after.foot_z[1]);
+    CHECK(after.foot_z[0] == before.foot_z[0],
+          "moving the left leg moved the RIGHT foot (%f -> %f)",
+          (double)before.foot_z[0], (double)after.foot_z[0]);
+    CHECK(after.foot_z[1] != before.foot_z[1],
+          "moving the left leg did not move the left foot at all (%f) - the "
+          "test proves nothing if the drives are not reaching the kinematics",
+          (double)after.foot_z[1]);
     CHECK(after.fk_valid == 0x3u,
-          "fk_valid = 0x%02X: the bolted waist invalidated a leg", after.fk_valid);
+          "fk_valid = 0x%02X: a leg went invalid on a plain joint move", after.fk_valid);
 }
 
 /* Each foot switch is its own contact point, keyed off its own bit. */
@@ -462,7 +471,7 @@ int main(void)
     test_faulted_axis_invalidates_its_leg();
     test_spring_deflection_adds_to_the_drive();
     test_an_unreadable_spring_is_not_believed();
-    test_the_bolted_waist_never_moves();
+    test_one_legs_drives_do_not_move_the_other_foot();
     test_each_switch_is_its_own_contact();
     test_never_reports_ok_while_uncalibrated();
     test_no_nan_in_a_healthy_run();

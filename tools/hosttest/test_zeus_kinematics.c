@@ -80,7 +80,7 @@ static void test_jacobian_predicts_small_moves(void)
 {
     printf("each Jacobian column predicts what nudging that joint does\n");
 
-    const float q0[ZEUS_KIN_NQ] = { 0.3f, -0.1f, -0.6f, 0.25f, 0.05f, -0.04f, 0.1f, -0.08f };
+    const float q0[ZEUS_KIN_NQ] = { 0.3f, -0.1f, -0.6f, 0.25f, 0.05f, -0.04f };
     const float h = 1e-3f;
 
     for (int side = 0; side < 2; side++)

@@ -62,19 +62,24 @@
  *    7    1    4     right_ankle_pitch
  *
  * ---------------------------------------------------------------------------
- * TWO LEGS, NO WAIST - a temporary build.
+ * TWO LEGS, NO WAIST.
  *
- * The robot has ten actuators: these eight plus waist roll (bus 0 node 5) and
- * waist pitch (bus 1 node 5). This firmware is for bringing the two legs up
- * without them: node 5 on each bus is neither commanded nor expected, and the
- * waist is bolted at its zero pose. The estimator's kinematics still run the
- * waist joints - they are part of the chain from the IMU to each leg - and
- * simply hold them at zero (fusion.c).
+ * The robot had ten actuators: these eight plus waist roll (bus 0 node 5) and
+ * waist pitch (bus 1 node 5). Node 5 on each bus is neither commanded nor
+ * expected.
  *
- * Putting the waist back: NEXUS_NUM_JOINTS 10, ODRV_NODES_PER_BUS 5, the map
- * above back to bus * 5, the two NEXUS_J_WAIST_* indices, the waist entries in
- * robot_config.c, and the version bump. The tag `waist-10-actuators` marks the
- * last commit that had them.
+ * The waist is gone from the MODEL too, not just undriven. It used to be
+ * bolted at its zero pose while the estimator still carried both waist joints
+ * in its chain - the IMU sat above them, so they were part of the path from
+ * the IMU to each leg, held at zero with a small variance. The current CAD
+ * bolts both hips straight to the torso, so there is no joint between the IMU
+ * and the legs at all: ZEUS_KIN_NQ is 6 per leg, not 8.
+ *
+ * Putting the waist back now needs a CAD export that has the joints in it,
+ * then zeus_model.yaml, then ZEUS_KIN_Q_* and gen_kinematics.py - as well as
+ * NEXUS_NUM_JOINTS 10, ODRV_NODES_PER_BUS 5, the map above back to bus * 5,
+ * the two NEXUS_J_WAIST_* indices, the waist entries in robot_config.c, and a
+ * version bump. The tag `waist-10-actuators` marks the last commit with ten.
  * ---------------------------------------------------------------------------
  *
  * Confirmed against the wiring. The Pi side names them in the same order in

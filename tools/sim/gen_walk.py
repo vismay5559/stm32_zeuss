@@ -8,8 +8,8 @@ consistent with the robot's own geometry (zeus.urdf):
 
   - The legs follow smooth joint trajectories: a step, a knee lift on the
     swing leg, a little hip-roll sway, spring wind-up on the stance leg. The
-    waist is bolted in this build, so it stays at zero (--waist-pitch and
-    --waist-roll simulate a waist that is not where the estimator thinks).
+    model has no waist at all: both hips bolt straight to the torso, so there
+    is no joint between the IMU and the legs to get wrong.
   - Each foot lands heel first, toe raised, and rolls down flat; at the end of
     stance the heel lifts and it rolls over the toe. The switches follow:
     heel only, then both, then toe only. While a foot rolls, only the point it
@@ -209,8 +209,6 @@ class Gait:
                          + knee + q[f"{side}_knee_pitch_spring"])
             q[f"{side}_ankle_pitch"] = -leg_pitch + pitch[side]
             q[f"{side}_hip_roll"] = a.sway * lift * (1.0 if st == "left" else -1.0)
-        q["waist_pitch"] = a.waist_pitch * math.sin(2.0 * math.pi * s)
-        q["waist_roll"] = a.waist_roll * math.sin(2.0 * math.pi * s)
         return q
 
 
@@ -277,11 +275,6 @@ def main(argv=None):
     ap.add_argument("--roll", type=float, default=0.15, help="rad of heel-strike and toe-off foot roll")
     ap.add_argument("--heel-phase", type=float, default=0.15, help="part of stance on the heel alone")
     ap.add_argument("--toe-phase", type=float, default=0.80, help="part of stance after which only the toe is down")
-    # The waist is bolted in this build - no actuators, no drive to report it -
-    # so it stays at zero unless someone deliberately simulates a bracket that
-    # is not bolted where the estimator thinks it is.
-    ap.add_argument("--waist-pitch", type=float, default=0.0)
-    ap.add_argument("--waist-roll", type=float, default=0.0)
     ap.add_argument("--gyro-noise", type=float, default=0.005, help="rad/s per sample")
     ap.add_argument("--accel-noise", type=float, default=0.03, help="m/s^2 per sample")
     ap.add_argument("--gyro-bias", type=float, nargs=3, default=[0.002, -0.003, 0.001])

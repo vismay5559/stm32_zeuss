@@ -257,7 +257,7 @@ covers today:
 | --- | --- |
 | `test_contact` | switch debouncing, and that each switch owns the right bit |
 | `test_safety` | the arm/idle/fault transitions and every command-rejection rule |
-| `test_fusion` | the sensor-to-filter bridge: springs add to their drives, an unreadable spring is not believed, the bolted waist never moves, each foot switch is its own contact |
+| `test_fusion` | the sensor-to-filter bridge: springs add to their drives, an unreadable spring is not believed, one leg's drives never move the other leg's foot, each foot switch is its own contact |
 | `test_robot_config` | spring deflection, sensor-zero wrap-around, calibration flag |
 | `test_watchdog` | start, refresh, and the stopped-clock case |
 | `test_lie_group` | rotations stay rotations, and the Gamma coefficients against a double-precision reference |
@@ -1511,7 +1511,7 @@ waist pitch (bus 1 node 5). This firmware brings the two legs up without them.
 |---|---|
 | **CAN** | four drives per bus. Node 5 is neither commanded nor expected; a frame from it is ignored and not counted as a live drive |
 | **Packet** | 8 joints, protocol **v7**. The Pi must be updated together with the board — each rejects the other's version rather than misreading it |
-| **Waist** | bolted at its zero pose. The estimator still runs both waist joints in its kinematics, since the IMU sits above them, and holds them at zero with a small variance for the play in a bolted bracket (`NOISE_WAIST_BOLTED_RAD` in `fusion.c`) |
+| **Waist** | none. Both hips bolt straight to the torso in the current model, so there is no joint between the IMU and the legs and nothing for the estimator to hold at zero |
 | **Gait** | every index is a leg joint now, so every joint has a reference |
 | **URDF** | unchanged: the robot still has the parts. `/joint_states` on the Pi carries the two waist joints at 0 so the model stays in one piece |
 
@@ -1834,14 +1834,14 @@ State is `X` in SE_{N+2}(3) with `R, v, p` and one world position per contact,
 IMU bias `theta` in R^6, and a 27x27 right-invariant error covariance. There are
 two contact points - one per foot, at the centre of each sole - and
 each is added when its switch closes and removed when it opens, so a rolling
-foot is planted instead of pretending the whole robot is
-planted.
+foot is planted instead of pretending the whole robot is planted.
 
-Per leg the kinematics take eight angles: that leg's four drives, the two
-spring deflections (added to hip pitch and knee - the drives measure before the
-spring), and both waist joints - bolted at zero in this build, but still part
-of the chain because the IMU sits above them. Each joint's noise is pushed
-through the Jacobian into a 3x3 covariance for the contact point. A spring encoder that is not valid, or reads beyond
+Per leg the kinematics take six angles: that leg's four drives and the two
+spring deflections, added to hip pitch and knee because the drives measure
+before the spring. There are no waist joints - both hips bolt straight to the
+torso, so nothing sits between the IMU and the legs. Each joint's noise is
+pushed through the Jacobian into a 3x3 covariance for the contact point. A
+spring encoder that is not valid, or reads beyond
 `ROBOT_SPRING_MAX_DEFLECTION_RAD`, is treated as unknown (0 with a wide
 variance) rather than bent into the leg.
 
@@ -1990,8 +1990,8 @@ error), and spring deflections dropped (11 cm) or marked invalid (13 cm), all
 fail. **Losing the spring encoders costs over ten centimetres of height in four
 metres** - they are not optional for the estimate.
 
-A waist that is not bolted where the estimator thinks fails too: simulating one
-that swings +/-3 deg (`tools/sim/run.sh --check -- --waist-pitch 0.05`) gives
+A waist that is not bolted where the estimator thinks used to fail too, but
+there is no waist to mis-model any more; that mutation went with it. It gave
 0.088 m/s of velocity error against a 0.03 limit. Worth repeating on the real
 robot's bracket before trusting the estimate.
 

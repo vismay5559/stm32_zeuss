@@ -31,7 +31,7 @@ void fusion_init(void);
  *   imu           latest sample; prediction runs only when BOTH the
  *                 accelerometer and gyro sequence numbers have moved
  *   act           actuator telemetry, positions in turns: the motor side of
- *                 every leg joint, and both waist joints
+ *                 every leg joint
  *   spring_rad    spring deflections in NEXUS_ENC_* order, from
  *                 robot_spring_deflection(): ADDED to the motor side of hip
  *                 pitch and knee, since link = motor + deflection

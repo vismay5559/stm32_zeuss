@@ -99,15 +99,19 @@ JOINT_NAMES = (
 
 # TWO LEGS, NO WAIST - a temporary build. The robot's other two actuators are
 # waist roll (bus 0 node 5) and waist pitch (bus 1 node 5); this firmware does
-# not command or expect them, and the waist is bolted at its zero pose. The
-# estimator still runs the waist joints in its kinematics, held at zero, since
-# the IMU sits above them. See link_proto.h for how to put them back.
+# not command or expect them. The model has no waist joints at all: both hips
+# bolt straight to the torso, so nothing sits between the IMU and the legs.
 JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
 
-# Joints the robot HAS but this build does not drive: the waist is bolted at
-# its zero pose (link_proto.h says why). They are not in any packet array, but
-# /joint_states carries them at 0 so the URDF model stays in one piece.
-BOLTED_JOINT_NAMES = ("waist_pitch", "waist_roll")
+# Joints the robot HAS but this build does not drive, carried in /joint_states
+# at 0 so robot_state_publisher can still place the parts above them.
+#
+# EMPTY now. It held the two waist joints, which the URDF had because the robot
+# had the parts even though nothing drove them. The current model has no waist
+# at all - both hips bolt straight to the torso - so there is nothing to stand
+# in for, and naming a joint here that the URDF does not have would have
+# robot_state_publisher rejecting it on every message.
+BOLTED_JOINT_NAMES = ()
 
 # --------------------------------------------------------------------------
 # The policy block: 44 contiguous float32 starting at byte 12, holding exactly

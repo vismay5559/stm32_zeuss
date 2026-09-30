@@ -71,8 +71,6 @@ Q = [
     ("ANKLE_PITCH", "{s}_ankle_pitch"),
     ("HIP_PITCH_SPRING", "{s}_hip_pitch_spring"),
     ("KNEE_PITCH_SPRING", "{s}_knee_pitch_spring"),
-    ("WAIST_PITCH", "waist_pitch"),
-    ("WAIST_ROLL", "waist_roll"),
 ]
 SIDES = ["left", "right"]              # ZEUS_KIN_LEFT, ZEUS_KIN_RIGHT
 POINTS = ["contact"]                   # one mechanical switch per foot
@@ -271,29 +269,112 @@ const char zeus_kin_model_sha[] = "{prov['sha'][:16]}";
 """
 
 
-def reference(urdf_path: str, prov: dict):
+def _ref_rows_numpy(urdf_path: str, poses):
+    """
+    Reference forward kinematics without Pinocchio.
+
+    Pinocchio is the preferred reference precisely because it is somebody
+    else's code, but its wheels are not always installable - eigenpy's binary
+    is currently built against a numpy whose ABI does not match, and the import
+    fails outright. A reference that cannot be regenerated is a test that
+    quietly stops covering the thing it was written for, so this is the
+    fallback.
+
+    It is deliberately NOT built from anything the table generator uses: it
+    re-parses the URDF with ElementTree, walks parent to child applying each
+    joint's own origin and its own axis rotation, and differentiates by central
+    differences. Nothing here shares the step-collapsing, the sign folding or
+    the q indexing that leg_tables() does, which is what makes it worth
+    comparing the C against.
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(urdf_path).getroot()
+    origin, axis, parent_of = {}, {}, {}
+    for j in root.findall("joint"):
+        child = j.find("child").get("link")
+        o = j.find("origin")
+        xyz = np.array([float(v) for v in (o.get("xyz") or "0 0 0").split()]) if o is not None else np.zeros(3)
+        rpy = np.array([float(v) for v in (o.get("rpy") or "0 0 0").split()]) if o is not None else np.zeros(3)
+        T = np.eye(4)
+        T[:3, :3] = _rpy(rpy)
+        T[:3, 3] = xyz
+        a = j.find("axis")
+        origin[child] = T
+        axis[child] = (np.array([float(v) for v in a.get("xyz").split()]) if a is not None else None)
+        parent_of[child] = (j.find("parent").get("link"), j.get("name"))
+
+    def world(link, ang):
+        T = np.eye(4)
+        while link in parent_of:
+            par, jname = parent_of[link]
+            R = np.eye(4)
+            if axis[link] is not None:
+                R[:3, :3] = _axis_angle(axis[link], ang.get(jname, 0.0))
+            T = origin[link] @ R @ T
+            link = par
+        return T
+
+    def contact(side, q8):
+        ang = {name.format(s=side): float(v) for (_, name), v in zip(Q, q8)}
+        T_imu = world(IMU, ang)
+        T_pt = world(f"{side}_{POINTS[0]}", ang)
+        return (np.linalg.inv(T_imu) @ T_pt)[:3, 3]
+
+    h = 1e-6
+    rows, zero_pose = [], {}
+    for side in SIDES:
+        for q in poses:
+            p = contact(side, q)
+            J = np.column_stack([(contact(side, q + h * e) - contact(side, q - h * e)) / (2 * h)
+                                 for e in np.eye(NQ)])
+            rows.append((side, POINTS[0], q, p, J))
+            if not q.any():
+                zero_pose[(side, POINTS[0])] = p
+    return rows
+
+
+def _rpy(r):
+    (a, b, c) = r
+    ca, sa, cb, sb, cc, sc = np.cos(a), np.sin(a), np.cos(b), np.sin(b), np.cos(c), np.sin(c)
+    return np.array([[cc * cb, cc * sb * sa - sc * ca, cc * sb * ca + sc * sa],
+                     [sc * cb, sc * sb * sa + cc * ca, sc * sb * ca - cc * sa],
+                     [-sb,     cb * sa,                cb * ca]])
+
+
+def _axis_angle(u, t):
+    u = np.asarray(u, float)
+    u = u / np.linalg.norm(u)
+    K = np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]])
+    return np.eye(3) + np.sin(t) * K + (1.0 - np.cos(t)) * (K @ K)
+
+
+def _ref_poses():
+    """The same poses whichever backend evaluates them, so the two agree."""
+    rng = np.random.default_rng(20260916)
+    poses = [np.zeros(NQ)]
+    for _ in range(N_REF - 1):
+        q = rng.uniform(-0.78, 0.78, NQ)         # inside the +/-45 deg limits
+        q[4:6] = rng.uniform(-0.15, 0.15, 2)     # springs deflect a little
+        poses.append(q)
+    return poses
+
+
+def _ref_rows_pinocchio(urdf_path: str, poses):
     import pinocchio as pin
 
     model = pin.buildModelFromUrdf(urdf_path)
     data = model.createData()
-    rng = np.random.default_rng(20260916)
 
-    def contact(side, q8, point):
+    def contact(side, qv, point):
         qf = pin.neutral(model)
-        for (_, name), v in zip(Q, q8):
+        for (_, name), v in zip(Q, qv):
             qf[model.joints[model.getJointId(name.format(s=side))].idx_q] = v
         pin.framesForwardKinematics(model, data, qf)
         return data.oMf[model.getFrameId(IMU)].actInv(data.oMf[model.getFrameId(f"{side}_{point}")].translation)
 
-    poses = [np.zeros(NQ)]
-    for _ in range(N_REF - 1):
-        q = rng.uniform(-0.78, 0.78, NQ)         # inside the +/-45 deg limits
-        q[4:6] = rng.uniform(-0.15, 0.15, 2)            # springs deflect a little
-        q[6:8] = rng.uniform(-0.3, 0.3, 2)
-        poses.append(q)
-
     h = 1e-6
-    rows, zero_pose = [], {}
+    rows = []
     for side in SIDES:
         for q in poses:
             for point in POINTS:
@@ -301,14 +382,31 @@ def reference(urdf_path: str, prov: dict):
                 J = np.column_stack([(contact(side, q + h * e, point) - contact(side, q - h * e, point)) / (2 * h)
                                      for e in np.eye(NQ)])
                 rows.append((side, point, q, p, J))
-                if not q.any():
-                    zero_pose[(side, point)] = p
+    return rows
+
+
+def reference(urdf_path: str, prov: dict):
+    poses = _ref_poses()
+    try:
+        rows = _ref_rows_pinocchio(urdf_path, poses)
+        how = "Reference answers from Pinocchio: double precision, J by central differences."
+    except ImportError:
+        # Pinocchio could not be imported at all - see _ref_rows_numpy. Fall
+        # back rather than leave the reference un-regenerable, and say in the
+        # banner which one produced the file, because the two are not equally
+        # authoritative and nobody should have to guess which they are reading.
+        rows = _ref_rows_numpy(urdf_path, poses)
+        how = ("Reference answers from this script's own URDF walk (Pinocchio could not be\n"
+               " * imported): double precision, J by central differences. Re-run where Pinocchio\n"
+               " * works to replace these with the third-party answers.")
+
+    zero_pose = {(s, pt): p for s, pt, q, p, _ in rows if not q.any()}
     body = "\n".join(f"    {{ {SIDES.index(s)}, {POINTS.index(pt)},\n"
                      f"      {{ {f64(q)} }},\n"
                      f"      {{ {f64(p)} }},\n"
                      f"      {{ {f64(J)} }} }},"
                      for s, pt, q, p, J in rows)
-    text = banner(prov, "Reference answers from Pinocchio: double precision, J by central differences.") + f"""
+    text = banner(prov, how) + f"""
 #ifndef ZEUS_KINEMATICS_REF_H
 #define ZEUS_KINEMATICS_REF_H
 
