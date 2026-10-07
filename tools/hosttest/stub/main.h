@@ -48,10 +48,17 @@ extern GPIO_TypeDef host_gpiof;
 #define R_TOE_GPIO_Port  GPIOE
 #define R_HEEL_Pin       GPIO_PIN_5
 #define R_HEEL_GPIO_Port GPIOE
-#define enc_cs_left_Pin        GPIO_PIN_1
-#define enc_cs_left_GPIO_Port  GPIOF
-#define enc_cs_right_Pin       GPIO_PIN_14
-#define enc_cs_right_GPIO_Port GPIOD
+#define GPIO_PIN_15 0x8000u
+
+/* One chip select per sensor - see the wiring note in enc_as5047p.h. */
+#define enc_cs_l_hip_Pin        GPIO_PIN_1
+#define enc_cs_l_hip_GPIO_Port  GPIOF
+#define enc_cs_l_knee_Pin       GPIO_PIN_15
+#define enc_cs_l_knee_GPIO_Port GPIOD
+#define enc_cs_r_hip_Pin        GPIO_PIN_14
+#define enc_cs_r_hip_GPIO_Port  GPIOD
+#define enc_cs_r_knee_Pin       GPIO_PIN_5
+#define enc_cs_r_knee_GPIO_Port GPIOF
 
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void          HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState v);

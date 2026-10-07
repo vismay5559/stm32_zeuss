@@ -21,18 +21,26 @@ extern SPI_HandleTypeDef hspi1;
 #define AS5047P_ERROR_FLAG          0x4000u
 #define AS5047P_DATA_MASK           0x3FFFu
 
-#define ENC_CHAINS          2u
-#define ENC_PER_CHAIN       2u
-
 /*
- * Which NEXUS_ENC_* index each word of each chain is. Word 0 comes from the
- * sensor nearest MISO, word 1 from the one nearest MOSI - see the wiring in
- * enc_as5047p.h. If a spring turns out to be reported in its neighbour's slot,
- * swap the two entries for that chain here and nowhere else.
+ * One sensor per chip select, read one after another in this order.
+ *
+ * This was two daisy chains of two, which made the ORDER WITHIN a chain carry
+ * meaning: the first word back came from whichever sensor sat nearest MISO, so
+ * wiring hip and knee the other way round silently swapped two springs in the
+ * data. Four separate selects remove that entirely - a reply can only have
+ * come from the one sensor that was selected.
+ *
+ * If a spring turns out to be reported as another one, the wire is on the
+ * wrong CS pin; s_cs[] below is the one place to change.
  */
-static const uint8_t s_slot[ENC_CHAINS][ENC_PER_CHAIN] = {
-    { NEXUS_ENC_L_KNEE_PITCH, NEXUS_ENC_L_HIP_PITCH },      /* chain 0, enc_cs_left  */
-    { NEXUS_ENC_R_KNEE_PITCH, NEXUS_ENC_R_HIP_PITCH },      /* chain 1, enc_cs_right */
+#define ENC_DEVICES         4u
+#define ENC_WORDS           1u      /* one sensor selected, one word exchanged */
+
+static const uint8_t s_slot[ENC_DEVICES] = {
+    NEXUS_ENC_L_HIP_PITCH,
+    NEXUS_ENC_L_KNEE_PITCH,
+    NEXUS_ENC_R_HIP_PITCH,
+    NEXUS_ENC_R_KNEE_PITCH,
 };
 
 typedef struct
@@ -41,20 +49,25 @@ typedef struct
     uint16_t      pin;
 } cs_pin_t;
 
-static const cs_pin_t s_cs[ENC_CHAINS] = {
-    { enc_cs_left_GPIO_Port,  enc_cs_left_Pin  },
-    { enc_cs_right_GPIO_Port, enc_cs_right_Pin },
+static const cs_pin_t s_cs[ENC_DEVICES] = {
+    { enc_cs_l_hip_GPIO_Port,   enc_cs_l_hip_Pin   },   /* PF1  */
+    { enc_cs_l_knee_GPIO_Port,  enc_cs_l_knee_Pin  },   /* PD15 */
+    { enc_cs_r_hip_GPIO_Port,   enc_cs_r_hip_Pin   },   /* PD14 */
+    { enc_cs_r_knee_GPIO_Port,  enc_cs_r_knee_Pin  },   /* PF5  */
 };
 
+_Static_assert(ENC_DEVICES == NEXUS_NUM_ENCODERS,
+               "one chip select per encoder, so the two counts are the same");
+
 /* Where such a buffer has to live, and why, is in dma_buffer.h. */
-static uint16_t s_tx[ENC_PER_CHAIN] NEXUS_DMA_BUFFER;
-static uint16_t s_rx[ENC_PER_CHAIN] NEXUS_DMA_BUFFER;
+static uint16_t s_tx[ENC_WORDS] NEXUS_DMA_BUFFER;
+static uint16_t s_rx[ENC_WORDS] NEXUS_DMA_BUFFER;
 
 static uint16_t s_angle[NEXUS_NUM_ENCODERS];
 static uint8_t  s_valid;
 static volatile uint8_t s_busy;
-static uint8_t  s_chain;                    /* chain in flight            */
-static uint8_t  s_new_valid;                /* built up across both chains */
+static uint8_t  s_dev;                      /* device in flight              */
+static uint8_t  s_new_valid;                /* built up across all four      */
 
 /*
  * What each sensor was last asked, so its next reply is read as the right
@@ -100,7 +113,7 @@ static uint8_t even_parity(uint16_t v)
 
 static void cs_release_all(void)
 {
-    for (uint8_t c = 0; c < ENC_CHAINS; c++)
+    for (uint8_t c = 0; c < ENC_DEVICES; c++)
     {
         HAL_GPIO_WritePin(s_cs[c].port, s_cs[c].pin, GPIO_PIN_SET);
     }
@@ -116,7 +129,7 @@ void enc_init(void)
     s_valid      = 0;
     s_new_valid  = 0;
     s_busy       = 0;
-    s_chain      = 0;
+    s_dev        = 0;
     s_busy_ticks = 0;
     s_stalls     = 0;
     s_errors     = 0;
@@ -142,21 +155,18 @@ static void abort_transfer(void)
     s_valid = 0;
 }
 
-/* Select one chain and start its transfer. 0 if it started. */
-static int start_chain(uint8_t chain)
+/* Select one sensor and start its transfer. 0 if it started. */
+static int start_device(uint8_t dev)
 {
-    for (uint8_t w = 0; w < ENC_PER_CHAIN; w++)
-    {
-        s_tx[w] = s_cmd[s_slot[chain][w]];
-    }
+    s_tx[0] = s_cmd[s_slot[dev]];
 
-    s_chain = chain;
-    HAL_GPIO_WritePin(s_cs[chain].port, s_cs[chain].pin, GPIO_PIN_RESET);
+    s_dev = dev;
+    HAL_GPIO_WritePin(s_cs[dev].port, s_cs[dev].pin, GPIO_PIN_RESET);
 
     if (HAL_SPI_TransmitReceive_DMA(&hspi1, (uint8_t *)s_tx, (uint8_t *)s_rx,
-                                    ENC_PER_CHAIN) != HAL_OK)
+                                    ENC_WORDS) != HAL_OK)
     {
-        HAL_GPIO_WritePin(s_cs[chain].port, s_cs[chain].pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(s_cs[dev].port, s_cs[dev].pin, GPIO_PIN_SET);
         return -1;
     }
     return 0;
@@ -178,7 +188,7 @@ void enc_start_read(void)
     s_new_valid  = 0;
     s_busy       = 1;
 
-    if (start_chain(0u) != 0)
+    if (start_device(0u) != 0)
     {
         s_busy = 0;
     }
@@ -186,14 +196,13 @@ void enc_start_read(void)
 
 void enc_on_dma_complete(void)
 {
-    uint8_t chain = s_chain;
+    uint8_t dev = s_dev;
 
-    HAL_GPIO_WritePin(s_cs[chain].port, s_cs[chain].pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(s_cs[dev].port, s_cs[dev].pin, GPIO_PIN_SET);
 
-    for (uint8_t w = 0; w < ENC_PER_CHAIN; w++)
     {
-        uint8_t  e     = s_slot[chain][w];
-        uint16_t reply = s_rx[w];
+        uint8_t  e     = s_slot[dev];
+        uint16_t reply = s_rx[0];
         uint16_t asked = s_cmd[e];
 
         /* Even parity is computed over bits 0..14, with bit 15 carrying it. */
@@ -213,15 +222,15 @@ void enc_on_dma_complete(void)
                        : AS5047P_CMD_READ_ANGLECOM;
     }
 
-    /* Left chain done: straight on to the right one, in the same tick. */
-    if ((chain + 1u) < ENC_CHAINS)
+    /* On to the next sensor, in the same tick. */
+    if ((dev + 1u) < ENC_DEVICES)
     {
-        if (start_chain((uint8_t)(chain + 1u)) == 0)
+        if (start_device((uint8_t)(dev + 1u)) == 0)
         {
             return;
         }
-        /* The right chain would not start. The left readings still count;
-           the right ones are simply not valid this tick. */
+        /* That one would not start. The sensors already read still count;
+           the rest are simply not valid this tick. */
     }
 
     s_busy_ticks = 0;

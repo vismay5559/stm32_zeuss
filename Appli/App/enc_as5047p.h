@@ -18,35 +18,40 @@
  * idea of where the foot was badly wrong.
  *
  * ---------------------------------------------------------------------------
- * WIRING: two daisy chains, one per leg, sharing SPI1
+ * WIRING: four sensors on one SPI bus, one chip select each
  *
- *   STM32 pin           Nucleo header    goes to
- *   PB3  SPI1_SCK       -                CLK  of all four sensors
- *   PD7  SPI1_MOSI      -                MOSI of both HIP sensors
- *   PB4  SPI1_MISO      -                MISO of both KNEE sensors
- *   PF1  enc_cs_left    -                CSn  of both LEFT sensors
- *   PD14 enc_cs_right   Arduino D10      CSn  of both RIGHT sensors
+ *   STM32 pin            Nucleo header       goes to
+ *   PB3  SPI1_SCK        CN7 pin 15 (D23)    SCK  of all four sensors
+ *   PD7  SPI1_MOSI       CN11 pin 45         MOSI of all four sensors
+ *   PB4  SPI1_MISO       CN7 pin 19 (D25)    MISO of all four sensors
+ *   PF1  enc_cs_l_hip    CN9 pin 19 (D69)    CSn of the LEFT  HIP  sensor
+ *   PD15 enc_cs_l_knee   CN7 pin 18 (D9)     CSn of the LEFT  KNEE sensor
+ *   PD14 enc_cs_r_hip    CN7 pin 16 (D10)    CSn of the RIGHT HIP  sensor
+ *   PF5  enc_cs_r_knee   CN7 pin 20 (D8)     CSn of the RIGHT KNEE sensor
  *
- *   and within each leg:  HIP MISO -> KNEE MOSI
+ * Plus 3.3 V and GND to every sensor. SCK, MOSI and MISO are COMMON - all four
+ * sensors sit on the same three wires. Only the chip selects are separate, and
+ * exactly one of them is low at a time, so only the selected sensor drives
+ * MISO. The other three let go of it.
  *
- *        MOSI ──► [hip] ──► [knee] ──► MISO          (per leg, own CSn)
+ * This replaced two daisy chains of two. In a chain the sensors are one long
+ * shift register, so the ORDER of the words coming back carried meaning: the
+ * first word was from whichever sensor sat nearest MISO. Wire hip and knee the
+ * other way round and the two springs swapped in the data, silently. With a
+ * select per sensor that cannot happen - a reply can only have come from the
+ * one sensor that was selected.
  *
- * Plus 3.3 V and GND to every sensor. With its CSn high a sensor lets go of
- * MISO, so the two knees can share the MISO line.
- *
- * Why that order matters: a daisy chain is one long shift register. In a
- * two-word transfer the FIRST word back is from the sensor nearest MISO (the
- * knee) and the SECOND from the one nearest MOSI (the hip). Swap hip and knee
- * in the wiring and the two springs swap in the data, silently - so after
- * wiring, press one spring by hand and check which spring_angle moves.
- * s_slot[] in enc_as5047p.c is the one place to change if the harness differs.
+ * If a spring is reported as another one now, the cause is a CS wire on the
+ * wrong pin. s_cs[] in enc_as5047p.c is the one place to change.
  *
  * Resulting order, NEXUS_ENC_* in link_proto.h:
  *   0 left hip pitch   1 left knee pitch   2 right hip pitch   3 right knee pitch
  * ---------------------------------------------------------------------------
  *
- * Each tick reads the left chain, then the right chain straight after it, both
- * in the background: the driver is told when each is done.
+ * Each tick reads the four sensors one after another, all in the background:
+ * the driver is told when each one is done and starts the next. Four short
+ * transfers instead of two longer ones costs a little more SPI overhead and
+ * buys back the silent hip/knee swap.
  */
 
 /*

@@ -51,7 +51,7 @@ NUM_ENCODERS = 4
 NUM_CONTACTS = 2
 
 # Spring encoder order in spring_angle[] and the `enc_valid` bitmask, as
-# NEXUS_ENC_* in link_proto.h: two AS5047P daisy chains, one per leg.
+# NEXUS_ENC_* in link_proto.h: four AS5047P on one SPI bus, a chip select each.
 ENC_L_HIP_PITCH = 0
 ENC_L_KNEE_PITCH = 1
 ENC_R_HIP_PITCH = 2

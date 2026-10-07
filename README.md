@@ -28,34 +28,45 @@ subsystem up at a time.
 | Board | NUCLEO-H7S3L8 |
 | External flash | Macronix MX25UW25645G, 256 Mbit octal, on XSPI2 |
 | IMU | BNO085, SHTP over UART1 @ 3 Mbaud, 400 Hz |
-| Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: two daisy chains (one per leg), one CS each |
+| Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: one shared bus, **one chip select per sensor** |
 | Actuators | 8 × ODrive S1 — 4 per bus on 2 × FDCAN (two legs, no waist — see the joint map) |
 | Contacts | 2 × mechanical foot switches (one per foot, sole centre) |
 | Host link | USB High Speed (480 Mbit), CDC |
 
 ### Spring encoder wiring
 
-Two AS5047P daisy chains share SPI1; each leg has its own chip select.
+Four AS5047P share SPI1. Every sensor sees the same SCK, MOSI and MISO; each
+has its **own chip select**, and exactly one is low at a time.
 
-| STM32 pin | Nucleo | Signal | Goes to |
+| STM32 pin | Nucleo header | Signal | Goes to |
 |---|---|---|---|
-| PB3 | — | SPI1_SCK | CLK of all four sensors |
-| PD7 | — | SPI1_MOSI | MOSI of both **hip** sensors |
-| PB4 | — | SPI1_MISO | MISO of both **knee** sensors |
-| PF1 | — | `enc_cs_left` | CSn of both left sensors |
-| PD14 | Arduino **D10** | `enc_cs_right` | CSn of both right sensors |
+| PB3 | CN7 pin 15 (**D23**) | SPI1_SCK | SCK of **all four** sensors |
+| PD7 | CN11 pin 45 | SPI1_MOSI | MOSI of **all four** sensors |
+| PB4 | CN7 pin 19 (**D25**) | SPI1_MISO | MISO of **all four** sensors |
+| PF1 | CN9 pin 19 (**D69**) | `enc_cs_l_hip` | CSn of the **left hip** sensor |
+| PD15 | CN7 pin 18 (**D9**) | `enc_cs_l_knee` | CSn of the **left knee** sensor |
+| PD14 | CN7 pin 16 (**D10**) | `enc_cs_r_hip` | CSn of the **right hip** sensor |
+| PF5 | CN7 pin 20 (**D8**) | `enc_cs_r_knee` | CSn of the **right knee** sensor |
 
-Within each leg: **hip MISO → knee MOSI**. So each chain runs
-MOSI → hip → knee → MISO. All sensors also need 3.3 V and GND.
+All sensors also need 3.3 V and GND.
+
+This replaced two daisy chains of two. In a chain the sensors form one shift
+register, so the ORDER of the returned words carried meaning — the first word
+came from whichever sensor sat nearest MISO. Wiring hip and knee the other way
+round swapped two springs in the data, silently, and the only way to catch it
+was to press a spring by hand and watch which number moved. With one select per
+sensor a reply can only have come from the sensor that was selected.
+
+If a spring is now reported as another one, a CS wire is on the wrong pin.
+`s_cs[]` in `enc_as5047p.c` is the one place to change.
 
 | `spring_angle[i]` | 0 | 1 | 2 | 3 |
 |---|---|---|---|---|
 | spring | left hip pitch | left knee pitch | right hip pitch | right knee pitch |
 
-The order within a chain comes from the wiring, not the code: the sensor
-nearest MISO answers first. After wiring, press each spring by hand and check
-the right `spring_angle` moves. If a leg's hip and knee come out swapped, swap
-that leg's two entries in `s_slot[]` in `Appli/App/enc_as5047p.c`.
+The index is fixed by which pin a sensor's CS is on, not by the order of
+anything on the wire.
+
 
 ### Verified clock tree
 
@@ -973,7 +984,7 @@ Nominal timing changed with it: `NominalTimeSeg1 = 69`, `NominalTimeSeg2 = 10`
 **87.5%** to match what the ODrive S1 uses.
 
 The sample points are the point. The S1s sample at 87.5%; we were sampling at
-75% on the data phase and self-checking at 50%, which on a daisy chain at 2 Mbit
+75% on the data phase and self-checking at 50%, which on a CAN bus at 2 Mbit
 lands on edges that have not settled. Every mis-read frame gets error-flagged,
 and error flags are what drove the counters.
 

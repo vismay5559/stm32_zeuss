@@ -8,8 +8,8 @@
  * check digit and its own "I am unwell" flag, and the whole point of this
  * file is that both are honoured.
  *
- * The sensors sit on two chains, one per leg, each behind its own chip
- * select. The left chain is read, then the right one straight after. The
+ * Each sensor sits behind its own chip select on a shared SPI bus, and they
+ * are read one after another in NEXUS_ENC_* order. The
  * other half of this file is what happens when a reading never arrives. The
  * sensors are read by the hardware on its own, in the background, and the
  * driver is told afterwards. If that "afterwards" never comes - a bus glitch,
@@ -23,12 +23,16 @@
  *   check digit  a single bit chosen so the number of 1s in the word is even.
  *              Flip any one bit in transit and the count goes odd, which is
  *              how a corrupted word is spotted.
- *   CS         the wire that says "I am talking to you now". One per leg,
- *              held low for that leg's read and released afterwards.
+ *   CS         the wire that says "I am talking to you now". One per SENSOR,
+ *              held low for that sensor's read and released afterwards.
+ *              Exactly one may be low at a time: two sensors driving MISO
+ *              together is a bus fight, and the data is whatever wins.
  *   in flight  a read that has been started but not yet answered.
  *
- * A chain answers in wiring order: word 0 from the sensor nearest MISO (the
- * knee), word 1 from the one nearest MOSI (the hip).
+ * This replaced two daisy chains of two, where the order of the words coming
+ * back carried meaning and a swapped pair of wires silently swapped two
+ * springs in the data. One select per sensor removes that: a reply can only
+ * have come from the sensor that was selected.
  */
 
 #include "enc_as5047p.h"
@@ -88,14 +92,33 @@ static uint16_t corrupted(uint16_t word)
     return (uint16_t)(word ^ 0x0004u);
 }
 
-static int left_cs_released(void)
+/* The chip selects, in the order the driver reads them. */
+static const struct { const char *name; GPIO_TypeDef *port; uint16_t pin; } CS[] = {
+    { "left hip",   enc_cs_l_hip_GPIO_Port,   enc_cs_l_hip_Pin   },
+    { "left knee",  enc_cs_l_knee_GPIO_Port,  enc_cs_l_knee_Pin  },
+    { "right hip",  enc_cs_r_hip_GPIO_Port,   enc_cs_r_hip_Pin   },
+    { "right knee", enc_cs_r_knee_GPIO_Port,  enc_cs_r_knee_Pin  },
+};
+
+static int cs_released(int dev)
 {
-    return HAL_GPIO_ReadPin(enc_cs_left_GPIO_Port, enc_cs_left_Pin) == GPIO_PIN_SET;
+    return HAL_GPIO_ReadPin(CS[dev].port, CS[dev].pin) == GPIO_PIN_SET;
 }
 
-static int right_cs_released(void)
+/* How many sensors are selected right now. Must never exceed one. */
+static int cs_held_count(void)
 {
-    return HAL_GPIO_ReadPin(enc_cs_right_GPIO_Port, enc_cs_right_Pin) == GPIO_PIN_SET;
+    int n = 0;
+    for (int i = 0; i < NEXUS_NUM_ENCODERS; i++)
+    {
+        n += !cs_released(i);
+    }
+    return n;
+}
+
+static int all_cs_released(void)
+{
+    return cs_held_count() == 0;
 }
 
 static void fresh_board(void)
@@ -105,19 +128,20 @@ static void fresh_board(void)
     enc_init();
 }
 
-/* Answer the chain in flight: words in wire order, knee first. */
-static void reply_chain(uint16_t knee_word, uint16_t hip_word)
+/* Answer the one sensor in flight. */
+static void reply_one(uint16_t word)
 {
-    uint16_t w[2] = { knee_word, hip_word };
-    host_spi_reply(w, 2u);
+    host_spi_reply(&word, 1u);
 }
 
-/* A whole tick: start, left chain answers, right chain answers. */
+/* A whole tick: start, then each sensor answers in turn. */
 static void one_read(uint16_t l_hip, uint16_t l_knee, uint16_t r_hip, uint16_t r_knee)
 {
     enc_start_read();
-    reply_chain(l_knee, l_hip);
-    reply_chain(r_knee, r_hip);
+    reply_one(l_hip);
+    reply_one(l_knee);
+    reply_one(r_hip);
+    reply_one(r_knee);
 }
 
 static void one_good_read(uint16_t l_hip, uint16_t l_knee, uint16_t r_hip, uint16_t r_knee)
@@ -127,41 +151,49 @@ static void one_good_read(uint16_t l_hip, uint16_t l_knee, uint16_t r_hip, uint1
 
 /* ===================================================================== */
 
-static void test_a_clean_read_goes_left_then_right(void)
+static void test_a_clean_read_visits_each_sensor_in_turn(void)
 {
-    printf("a clean read: left chain, then right chain\n");
+    printf("a clean read: each sensor selected in turn, one at a time\n");
 
     fresh_board();
 
-    CHECK(left_cs_released() && right_cs_released(),
+    CHECK(all_cs_released(),
           "a talk-to-me wire was held down before any read started");
 
     enc_start_read();
 
-    CHECK(!left_cs_released(), "the left chain was not selected first");
-    CHECK(right_cs_released(), "both chains were selected at once");
     CHECK(host_spi_busy() && host_spi_started() == 1u, "no read was started");
-    CHECK(host_spi_sent_word(0) == READ_ANGLE && host_spi_sent_word(1) == READ_ANGLE,
-          "the left chain was asked 0x%04X 0x%04X, expected two 0xFFFF",
-          host_spi_sent_word(0), host_spi_sent_word(1));
+    CHECK(host_spi_sent_word(0) == READ_ANGLE,
+          "the first sensor was asked 0x%04X, expected 0xFFFF", host_spi_sent_word(0));
 
-    reply_chain(good_word(0x0002u), good_word(0x0001u));        /* left knee, left hip */
-
-    CHECK(left_cs_released(), "the left chain was still selected after it answered");
-    CHECK(!right_cs_released(), "the right chain was not read straight after the left");
-    CHECK(host_spi_started() == 2u, "the right chain's read was not started");
-
+    /*
+     * The whole reason for four selects: walk all four, and at every step
+     * exactly one wire may be low. Two at once is a bus fight on MISO, and
+     * whichever sensor wins is the one whose angle you get.
+     */
+    const uint16_t angles[NEXUS_NUM_ENCODERS] = { 0x0001u, 0x0002u, 0x1234u, 0x3FFFu };
     uint16_t angle[NEXUS_NUM_ENCODERS];
     uint8_t  valid;
-    enc_get(angle, &valid);
-    CHECK(valid == 0u,
-          "readings were published halfway through the tick (mask 0x%X)", valid);
 
-    reply_chain(good_word(0x3FFFu), good_word(0x1234u));        /* right knee, right hip */
+    for (int dev = 0; dev < NEXUS_NUM_ENCODERS; dev++)
+    {
+        CHECK(cs_held_count() == 1, "%d sensors were selected at once, reading %s",
+              cs_held_count(), CS[dev].name);
+        CHECK(!cs_released(dev), "the %s was not the one selected", CS[dev].name);
 
-    CHECK(left_cs_released() && right_cs_released(),
+        enc_get(angle, &valid);
+        CHECK(valid == 0u,
+              "readings were published partway through the tick (mask 0x%X)", valid);
+
+        reply_one(good_word(angles[dev]));
+        CHECK(cs_released(dev), "the %s was still selected after it answered", CS[dev].name);
+    }
+
+    CHECK(all_cs_released(),
           "a talk-to-me wire was left held down after the read finished");
-    CHECK(!host_spi_busy(), "a third transfer was started");
+    CHECK(host_spi_started() == (unsigned)NEXUS_NUM_ENCODERS,
+          "%u transfers for four sensors", host_spi_started());
+    CHECK(!host_spi_busy(), "a fifth transfer was started");
 
     enc_get(angle, &valid);
     CHECK(valid == ALL_VALID,
@@ -227,16 +259,19 @@ static void test_an_unwell_sensor_is_refused_then_cleared(void)
     /* Tick 2: the knee is asked for its error register, which is what clears
        the flag. Its hip neighbour is still asked for the angle. */
     enc_start_read();
+    CHECK(host_spi_sent_word(0) == READ_ANGLE,
+          "the left hip was asked 0x%04X; only the unwell sensor should change",
+          host_spi_sent_word(0));
+    reply_one(good_word(112u));                         /* left hip, as usual */
+
     CHECK(host_spi_sent_word(0) == READ_ERRFL,
           "the left knee was asked 0x%04X, expected an error-register read 0x4001",
           host_spi_sent_word(0));
-    CHECK(host_spi_sent_word(1) == READ_ANGLE,
-          "the left hip was asked 0x%04X; only the unwell sensor should change",
-          host_spi_sent_word(1));
 
     /* The reply is the error register - a clean word, but NOT an angle. */
-    reply_chain(good_word(0x0004u), good_word(112u));
-    reply_chain(good_word(445u), good_word(334u));
+    reply_one(good_word(0x0004u));
+    reply_one(good_word(334u));
+    reply_one(good_word(445u));
 
     enc_get(angle, &valid);
     CHECK((valid & BIT(NEXUS_ENC_L_KNEE_PITCH)) == 0u && angle[NEXUS_ENC_L_KNEE_PITCH] == 200u,
@@ -246,11 +281,13 @@ static void test_an_unwell_sensor_is_refused_then_cleared(void)
 
     /* Tick 3: back to the angle, and it is believed again. */
     enc_start_read();
+    reply_one(good_word(113u));                         /* left hip */
     CHECK(host_spi_sent_word(0) == READ_ANGLE,
           "after reading the error register the knee was asked 0x%04X, not the angle",
           host_spi_sent_word(0));
-    reply_chain(good_word(223u), good_word(113u));
-    reply_chain(good_word(446u), good_word(335u));
+    reply_one(good_word(223u));
+    reply_one(good_word(335u));
+    reply_one(good_word(446u));
 
     enc_get(angle, &valid);
     CHECK(valid == ALL_VALID && angle[NEXUS_ENC_L_KNEE_PITCH] == 223u,
@@ -270,10 +307,12 @@ static void test_a_read_that_never_comes_back_is_given_up_on(void)
     enc_get(angle, &valid);
     CHECK(valid == ALL_VALID, "the four good readings were not accepted");
 
-    /* The left chain answers; the right chain never does. */
+    /* The first three answer; the last one never does. */
     enc_start_read();
-    reply_chain(good_word(201u), good_word(101u));
-    CHECK(host_spi_busy() && !right_cs_released(), "the right chain's read was not started");
+    reply_one(good_word(101u));
+    reply_one(good_word(201u));
+    reply_one(good_word(301u));
+    CHECK(host_spi_busy() && !cs_released(3), "the last sensor's read was not started");
 
     uint32_t stalls_before = enc_stalls();
 
@@ -294,7 +333,7 @@ static void test_a_read_that_never_comes_back_is_given_up_on(void)
     CHECK(enc_stalls() == stalls_before + 1u,
           "a read that never came back was not counted as a stall");
     CHECK(host_spi_aborted() == 1u, "the stuck read was not abandoned at the hardware");
-    CHECK(left_cs_released() && right_cs_released(),
+    CHECK(all_cs_released(),
           "a talk-to-me wire was left held down after giving up");
 
     /* The readings are marked as not to be trusted - the health check watches
@@ -306,7 +345,7 @@ static void test_a_read_that_never_comes_back_is_given_up_on(void)
     /* Having given up, the next tick starts again from the left chain. */
     uint32_t started_before = host_spi_started();
     enc_start_read();
-    CHECK(host_spi_started() == started_before + 1u && !left_cs_released(),
+    CHECK(host_spi_started() == started_before + 1u && !cs_released(0),
           "no new read of the left chain was started after the stuck one was abandoned");
 }
 
@@ -320,7 +359,7 @@ static void test_a_read_that_will_not_start_is_retried(void)
     enc_start_read();
 
     CHECK(!host_spi_busy(), "the refused read was recorded as in progress");
-    CHECK(left_cs_released() && right_cs_released(),
+    CHECK(all_cs_released(),
           "a talk-to-me wire was left held down after a refused read");
 
     uint32_t started_before = host_spi_started();
@@ -328,17 +367,19 @@ static void test_a_read_that_will_not_start_is_retried(void)
     CHECK(host_spi_started() == started_before + 1u, "the next attempt did not start a read");
     CHECK(enc_stalls() == 0u, "a read that never started was counted as a stall");
 
-    /* Now the right chain refuses: the left readings still count, the right
-       ones are not valid this tick, and nothing is left hanging. */
+    /* Now a start is refused partway through the sweep: the sensors already
+       read still count, the rest are not valid this tick, and nothing is left
+       hanging. The left two answer, then starting the right hip is refused. */
+    reply_one(good_word(10u));          /* left hip  */
     host_spi_refuse(1u);
-    reply_chain(good_word(20u), good_word(10u));
+    reply_one(good_word(20u));          /* left knee; the next start is refused */
 
     uint16_t angle[NEXUS_NUM_ENCODERS];
     uint8_t  valid;
     enc_get(angle, &valid);
     CHECK(valid == (BIT(NEXUS_ENC_L_HIP_PITCH) | BIT(NEXUS_ENC_L_KNEE_PITCH)),
-          "with the right chain refused, the mask was 0x%X, expected the left two", valid);
-    CHECK(!host_spi_busy() && right_cs_released(),
+          "with a start refused midway, the mask was 0x%X, expected the left two", valid);
+    CHECK(!host_spi_busy() && all_cs_released(),
           "the refused right chain was left in progress or selected");
 
     started_before = host_spi_started();
@@ -371,7 +412,7 @@ static void test_a_bus_error_gives_up_immediately(void)
 
     CHECK(enc_errors() == errors_before + 1u, "the bus error was not counted");
     CHECK(host_spi_aborted() == 1u, "the read was not abandoned");
-    CHECK(left_cs_released() && right_cs_released(),
+    CHECK(all_cs_released(),
           "a talk-to-me wire was left held down after a bus error");
     CHECK(enc_stalls() == 0u,
           "a bus error was also counted as a stall; they are different things");
@@ -473,7 +514,7 @@ int main(void)
     printf("enc_as5047p.c host tests\n");
     printf("------------------------\n");
 
-    test_a_clean_read_goes_left_then_right();
+    test_a_clean_read_visits_each_sensor_in_turn();
     test_a_corrupted_word_is_refused();
     test_an_unwell_sensor_is_refused_then_cleared();
     test_a_read_that_never_comes_back_is_given_up_on();

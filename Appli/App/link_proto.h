@@ -109,8 +109,8 @@
 
 /*
  * Spring encoder order, used by spring_angle[] and the `enc_valid` bitmask
- * (bit i = index i). Two AS5047P daisy chains, one per leg; enc_as5047p.h
- * has the wiring.
+ * (bit i = index i). Four AS5047P share one SPI bus with a chip select each;
+ * enc_as5047p.h has the wiring.
  */
 #define NEXUS_ENC_L_HIP_PITCH   0
 #define NEXUS_ENC_L_KNEE_PITCH  1

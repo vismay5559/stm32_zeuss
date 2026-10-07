@@ -62,16 +62,20 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define L_TOE_Pin GPIO_PIN_2
 #define L_TOE_GPIO_Port GPIOE
-#define enc_cs_left_Pin GPIO_PIN_1
-#define enc_cs_left_GPIO_Port GPIOF
+#define enc_cs_l_hip_Pin GPIO_PIN_1
+#define enc_cs_l_hip_GPIO_Port GPIOF
 #define R_TOE_Pin GPIO_PIN_4
 #define R_TOE_GPIO_Port GPIOE
 #define R_HEEL_Pin GPIO_PIN_5
 #define R_HEEL_GPIO_Port GPIOE
 #define L_HEEL_Pin GPIO_PIN_3
 #define L_HEEL_GPIO_Port GPIOE
-#define enc_cs_right_Pin GPIO_PIN_14
-#define enc_cs_right_GPIO_Port GPIOD
+#define enc_cs_r_hip_Pin GPIO_PIN_14
+#define enc_cs_r_hip_GPIO_Port GPIOD
+#define enc_cs_l_knee_Pin GPIO_PIN_15
+#define enc_cs_l_knee_GPIO_Port GPIOD
+#define enc_cs_r_knee_Pin GPIO_PIN_5
+#define enc_cs_r_knee_GPIO_Port GPIOF
 
 /* USER CODE BEGIN Private defines */
 
