@@ -27,7 +27,7 @@ subsystem up at a time.
 | MCU | STM32H7S3L8Hx, Cortex-M7 @ 600 MHz, TFBGA225 |
 | Board | NUCLEO-H7S3L8 |
 | External flash | Macronix MX25UW25645G, 256 Mbit octal, on XSPI2 |
-| IMU | BNO085, SHTP over UART1 @ 3 Mbaud, 400 Hz |
+| IMU | BNO085, SHTP over **UART2** (PD5/PD6) @ 3 Mbaud, 400 Hz |
 | Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: one shared bus, **one chip select per sensor** |
 | Actuators | 8 × ODrive S1 — 4 per bus on 2 × FDCAN (two legs, no waist — see the joint map) |
 | Contacts | 2 × mechanical foot switches (one per foot, sole centre) |
@@ -78,7 +78,7 @@ HSE 24 MHz → PLL1 (M2 N100 P2) → **600 MHz** CPU, 300 MHz AHB, 150 MHz APB.
 | Timestamp (TIM2) | 300 MHz / 300, 32-bit | 1 MHz, wraps @ 71.6 min |
 | FDCAN | PLL2P = 80 MHz | 1 Mbit nominal / 2 Mbit data |
 | SPI1 | PLL1Q = 100 MHz / 16 | 6.25 MHz, mode 1 |
-| USART1 | PCLK2 150 MHz, OVER8 | 3.000 Mbaud, 0% error |
+| USART2 (IMU) | PCLK1 150 MHz, OVER8 | 3.000 Mbaud, 0% error |
 | XSPI2 | PLL2S = 400 MHz | see *Known issues* |
 
 ---
@@ -1220,7 +1220,7 @@ mechanical.
 
 ### `NEXUS_MODE_IMU` — BNO085 over UART
 
-Exercises **USART1 only** (PA9 tx / PA10 rx, 3 Mbaud) — no CAN, no encoders, no
+Exercises **USART2 only** (PD5 tx / PD6 rx, 3 Mbaud) — no CAN, no encoders, no
 USB. Working, on hardware:
 
 ```
@@ -1237,12 +1237,12 @@ problem.
 
 Per the CEVA datasheet §1.2.3 and the Adafruit pinout:
 
-| STM32 | Breakout | Note |
-|---|---|---|
-| PA9 (TX) | **SCL** | "UART data IN to sensor" |
-| PA10 (RX) | **SDA** | "UART data OUT from sensor" |
-| 3V3 | Vin | |
-| GND | GND | |
+| STM32 | Nucleo header | Breakout | Note |
+|---|---|---|---|
+| PD5 — `USART2_TX` | CN9 pin 6 (**D53**) | **SCL** | "UART data IN to sensor" |
+| PD6 — `USART2_RX` | CN9 pin 4 (**D52**) | **SDA** | "UART data OUT from sensor" |
+| 3V3 | CN8 pin 7 | Vin | |
+| GND | CN8 pin 11 | GND | |
 | — | **PS1 → 3V3, PS0 left alone** | selects UART-SHTP |
 
 No reset pin needed for UART. The straps are sampled **at the sensor's reset**,

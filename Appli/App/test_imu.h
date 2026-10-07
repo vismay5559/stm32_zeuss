@@ -4,7 +4,7 @@
 /*
  * BNO085 IMU bring-up test.
  *
- * Exercises USART1 and nothing else - no CAN, no encoders, no USB. Prints the
+ * Exercises USART2 and nothing else - no CAN, no encoders, no USB. Prints the
  * quaternion, linear acceleration and angular velocity on the ST-LINK serial
  * console at 115200 8N1, along with the actual measured sample rate.
  */

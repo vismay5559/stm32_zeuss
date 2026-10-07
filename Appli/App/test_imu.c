@@ -7,7 +7,7 @@
 
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim6;
-extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
 
 /* ===================================================================== */
 /*  CONFIGURATION                                                         */
@@ -27,7 +27,7 @@ extern UART_HandleTypeDef huart1;
 #define EXPECTED_HZ         400u
 
 /*
- * Loopback: set to 1, rebuild, and jumper PA9 directly to PA10 with the IMU
+ * Loopback: set to 1, rebuild, and jumper PD5 directly to PD6 with the IMU
  * DISCONNECTED.
  *
  * This is the one test that separates "the STM32 is not listening" from "the
@@ -88,13 +88,13 @@ void imutest_init(void)
     BSP_LED_Off(LED_RED);
 
     printf("\r\n============= BNO085 IMU TEST =============\r\n");
-    printf("uart     : USART1 @ 3 Mbaud (PA9 tx / PA10 rx)\r\n");
+    printf("uart     : USART2 @ 3 Mbaud (PD5 tx / PD6 rx)\r\n");
     printf("protocol : SHTP over UART\r\n");
     printf("requested: rotation vector + linear accel + gyro @ %u Hz\r\n",
            (unsigned)EXPECTED_HZ);
     printf("\r\nWiring (Adafruit BNO08x breakout):\r\n");
-    printf("  STM32 PA9  -> SCL pin  (sensor UART RX)\r\n");
-    printf("  STM32 PA10 <- SDA pin  (sensor UART TX)\r\n");
+    printf("  STM32 PD5  -> SCL pin  (sensor UART RX)\r\n");
+    printf("  STM32 PD6 <- SDA pin  (sensor UART TX)\r\n");
     printf("  Vin -> 3V3, GND -> GND\r\n");
     printf("\r\nMode straps - both pins are pulled LOW on the breakout:\r\n");
     printf("  PS1  PS0   mode\r\n");
@@ -105,9 +105,9 @@ void imutest_init(void)
 #if IMUTEST_LOOPBACK
     printf("\r\n*** LOOPBACK MODE ***\r\n");
     printf("  Two ways to wire this:\r\n");
-    printf("   (a) IMU disconnected, PA9 jumpered straight to PA10.\r\n");
+    printf("   (a) IMU disconnected, PD5 jumpered straight to PD6.\r\n");
     printf("       Tests the STM32 alone - UART, DMA, pin mux, clocks.\r\n");
-    printf("   (b) IMU connected, PA9 -> SCL as usual, and PA10 moved from\r\n");
+    printf("   (b) IMU connected, PD5 -> SCL as usual, and PD6 moved from\r\n");
     printf("       SDA to SCL as well. Reads our own transmission back off\r\n");
     printf("       the wire the sensor actually listens on, so corruption\r\n");
     printf("       there is corruption the sensor sees too.\r\n");
@@ -121,13 +121,13 @@ void imutest_init(void)
 #if IMUTEST_RVC
     /* RVC is 115200 by definition; no point making the user set both. */
     printf("*** UART-RVC MODE: strap PS0 HIGH, PS1 LOW, power-cycle ***\r\n\r\n");
-    huart1.Init.BaudRate = 115200;
+    huart2.Init.BaudRate = 115200;
 #else
     printf("*** BAUD OVERRIDE: %u (SHTP normally needs 3000000) ***\r\n\r\n",
            (unsigned)IMUTEST_BAUD);
-    huart1.Init.BaudRate = IMUTEST_BAUD;
+    huart2.Init.BaudRate = IMUTEST_BAUD;
 #endif
-    if (HAL_UART_Init(&huart1) != HAL_OK)
+    if (HAL_UART_Init(&huart2) != HAL_OK)
     {
         printf("!! HAL_UART_Init failed at %u baud\r\n", (unsigned)IMUTEST_BAUD);
     }
@@ -314,7 +314,7 @@ static void print_stats(void)
     {
         printf("\r\n     <-- bytes ARE arriving but corrupt. Wrong baud, or the\r\n");
         printf("         wiring cannot carry %lu baud - try IMUTEST_BAUD 115200",
-               (unsigned long)huart1.Init.BaudRate);
+               (unsigned long)huart2.Init.BaudRate);
     }
 
     /*
@@ -347,7 +347,7 @@ static void print_stats(void)
         else if (d.dma_ndtr == 1024u)
         {
             printf("     -> listening, but not one byte has ever arrived.\r\n");
-            printf("        Sensor not transmitting, or PA10 not connected to SDA.\r\n");
+            printf("        Sensor not transmitting, or PD6 not connected to SDA.\r\n");
         }
         if (d.uart_isr & 0x8u)  { printf("     -> ORE: bytes arrived and were dropped\r\n"); }
         if (d.uart_isr & 0x2u)  { printf("     -> FE: framing error, baud mismatch\r\n"); }
@@ -401,7 +401,7 @@ static void rvc_run(void)
     for (;;)
     {
         uint8_t b;
-        HAL_StatusTypeDef st = HAL_UART_Receive(&huart1, &b, 1, 100);
+        HAL_StatusTypeDef st = HAL_UART_Receive(&huart2, &b, 1, 100);
 
         if (st != HAL_OK)
         {
@@ -420,15 +420,15 @@ static void rvc_run(void)
                        (st == HAL_TIMEOUT) ? "TIMEOUT (line is silent)"
                                            : ((st == HAL_BUSY) ? "BUSY (DMA still owns RX)"
                                                                : "ERROR"),
-                       (unsigned long)huart1.Instance->ISR,
-                       (unsigned long)huart1.RxState,
-                       (unsigned long)huart1.Init.BaudRate);
+                       (unsigned long)huart2.Instance->ISR,
+                       (unsigned long)huart2.RxState,
+                       (unsigned long)huart2.Init.BaudRate);
 
                 /* Clear sticky error flags so one glitch does not wedge every
                    subsequent read the way it did on the SHTP path. */
-                __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_PEF | UART_CLEAR_FEF |
+                __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_PEF | UART_CLEAR_FEF |
                                                UART_CLEAR_NEF | UART_CLEAR_OREF);
-                huart1.ErrorCode = HAL_UART_ERROR_NONE;
+                huart2.ErrorCode = HAL_UART_ERROR_NONE;
             }
             continue;
         }

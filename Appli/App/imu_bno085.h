@@ -116,7 +116,7 @@ void imu_soft_reset(void);
 /*
  * Flush the sensor's frame parser with a burst of bare SHTP delimiters.
  *
- * PA9 floats from power-on until the UART is initialised, and the sensor boots
+ * PD5 floats from power-on until the UART is initialised, and the sensor boots
  * in that same instant and reads the floating line as data - leaving its parser
  * stuck mid-frame, swallowing every later command including the reset that
  * would fix it. A run of delimiters closes the phantom frame. Harmless if the
@@ -170,9 +170,9 @@ uint32_t imu_frames(void);
 typedef struct
 {
     uint32_t arm_status;    /* HAL status returned when RX DMA was armed; 0 = OK */
-    uint32_t uart_isr;      /* USART1->ISR: bit0 PE, 1 FE, 2 NE, 3 ORE, 5 RXNE  */
-    uint32_t uart_error;    /* huart1.ErrorCode                                 */
-    uint32_t rx_state;      /* huart1.RxState; 0x22 = busy receiving            */
+    uint32_t uart_isr;      /* USART2->ISR: bit0 PE, 1 FE, 2 NE, 3 ORE, 5 RXNE  */
+    uint32_t uart_error;    /* huart2.ErrorCode                                 */
+    uint32_t rx_state;      /* huart2.RxState; 0x22 = busy receiving            */
     uint32_t dma_ndtr;      /* bytes left in the circular buffer; must move     */
     uint32_t rx_events;     /* idle/half/full callbacks seen                    */
     uint32_t errors;        /* UART errors recovered from                       */
@@ -265,7 +265,7 @@ void imu_request_feature_status(uint8_t report_id);
 uint16_t imu_tx_snapshot(uint8_t *out, uint16_t max);
 
 /* Transmit a byte pattern on the IMU UART. Only used by the loopback test:
-   with PA9 jumpered to PA10 the bytes come straight back, which proves the
+   with PD5 jumpered to PD6 the bytes come straight back, which proves the
    STM32 side works without the sensor being involved at all. */
 /* Send a known pattern of bytes to the sensor, as a wiring test. */
 void imu_tx_test_pattern(void);

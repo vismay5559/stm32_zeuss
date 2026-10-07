@@ -3,7 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 
-extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
 
 /*
  * BNO085 SHTP over UART. Transport framing is SLIP-like: 0x7E delimits a frame,
@@ -104,7 +104,17 @@ extern UART_HandleTypeDef huart1;
  * Pulling RST low is the only thing proven to recover this part from its wedged
  * power-up state - the software reset has to travel over the very link that is
  * broken, so it cannot be relied on to fix it. One wire makes recovery
- * unconditional, and PA8 is free and sits next to PA9/PA10 on the header.
+ * unconditional.
+ *
+ * PA8 is the pin named below, and it is a POOR CHOICE: UM3276 Table 9 has PA8
+ * carrying I2C_SCL to the TCPP03-M20 USB-C controller, with solder bridge SB31
+ * closed by default. Driving it as a reset output fights whatever else is on
+ * that net. Pick a free pin and open SB31, or pick a different pin entirely,
+ * before setting this to 1.
+ *
+ * The README also records that UART mode needs no reset line at all - the
+ * mode straps are PS1 high, PS0 alone - so this is a recovery aid, not a
+ * requirement.
  */
 #define IMU_USE_RST_PIN   0
 #define IMU_RST_PORT      GPIOA
@@ -211,7 +221,7 @@ static void uart_tx_spaced(const uint8_t *p, uint16_t n)
 {
     for (uint16_t i = 0; i < n; i++)
     {
-        HAL_UART_Transmit(&huart1, (uint8_t *)&p[i], 1u, 10u);
+        HAL_UART_Transmit(&huart2, (uint8_t *)&p[i], 1u, 10u);
         delay_us(IMU_TX_BYTE_GAP_US);
     }
 }
@@ -519,7 +529,7 @@ void imu_init(void)
 #endif
 
     /*
-     * Drive PA9 as hard as the pin allows. CubeMX sets it to HIGH speed, which
+     * Drive PD5 as hard as the pin allows. CubeMX sets it to HIGH speed, which
      * is marginal for 3 Mbaud through the breakout's level shifter: a slow
      * rising edge is still climbing when the sensor samples the bit, so it
      * reads the wrong value and rejects the frame. Costs nothing to raise, and
@@ -533,7 +543,7 @@ void imu_init(void)
         g.Mode      = GPIO_MODE_AF_PP;
         g.Pull      = GPIO_PULLUP;
         g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
-        g.Alternate = GPIO_AF7_USART1;
+        g.Alternate = GPIO_AF7_USART2;
         HAL_GPIO_Init(GPIOA, &g);
     }
 
@@ -541,7 +551,7 @@ void imu_init(void)
        downstream counter reads zero for a reason that has nothing to do with
        the sensor - which is indistinguishable from a wiring fault unless the
        failure is recorded here. */
-    s_arm_status = (uint32_t)HAL_UARTEx_ReceiveToIdle_DMA(&huart1, s_dma, IMU_RX_BUF);
+    s_arm_status = (uint32_t)HAL_UARTEx_ReceiveToIdle_DMA(&huart2, s_dma, IMU_RX_BUF);
 
     /*
      * The BNO085 needs a moment after power-up before it accepts control
@@ -576,8 +586,8 @@ void imu_init(void)
 /*
  * Flush the sensor's frame parser with a burst of bare delimiters.
  *
- * This is the likeliest reason the part comes up wedged. PA9 is an undriven
- * input from the moment power arrives until MX_USART1_UART_Init() runs, and
+ * This is the likeliest reason the part comes up wedged. PD5 is an undriven
+ * input from the moment power arrives until MX_USART2_UART_Init() runs, and
  * the sensor - which boots in the same instant - sees that floating line as
  * data. It starts assembling a frame from noise and never receives a
  * terminator, so its parser sits mid-frame forever. Everything we send
@@ -713,12 +723,12 @@ uint16_t imu_tx_snapshot(uint8_t *out, uint16_t max)
  */
 static uint16_t imu_write_index(void)
 {
-    if (huart1.hdmarx == NULL)
+    if (huart2.hdmarx == NULL)
     {
         return s_rd;
     }
 
-    uint32_t remaining = __HAL_DMA_GET_COUNTER(huart1.hdmarx);
+    uint32_t remaining = __HAL_DMA_GET_COUNTER(huart2.hdmarx);
 
     /* remaining == 0 means the block just finished and is about to reload;
        remaining > IMU_RX_BUF means the channel is not running yet. Both map
@@ -847,7 +857,7 @@ void imu_get(imu_sample_t *out)
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance != USART1)
+    if (huart->Instance != USART2)
     {
         return;
     }
@@ -978,16 +988,16 @@ uint8_t imu_recover_step(void)
 void imu_diag(imu_diag_t *out)
 {
     out->arm_status = s_arm_status;
-    out->uart_isr   = huart1.Instance->ISR;
-    out->uart_error = s_last_error ? s_last_error : huart1.ErrorCode;
+    out->uart_isr   = huart2.Instance->ISR;
+    out->uart_error = s_last_error ? s_last_error : huart2.ErrorCode;
     out->errors     = s_errors;
-    out->rx_state   = (uint32_t)huart1.RxState;
+    out->rx_state   = (uint32_t)huart2.RxState;
     out->rx_events  = s_rx_events;
 
     /* NDTR counts down as the DMA fills the buffer and reloads at the wrap.
        A value frozen at IMU_RX_BUF means not one byte has ever arrived. */
-    out->dma_ndtr = (huart1.hdmarx != NULL)
-                        ? __HAL_DMA_GET_COUNTER(huart1.hdmarx)
+    out->dma_ndtr = (huart2.hdmarx != NULL)
+                        ? __HAL_DMA_GET_COUNTER(huart2.hdmarx)
                         : 0xFFFFFFFFu;
 }
 
