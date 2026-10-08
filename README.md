@@ -35,20 +35,9 @@ subsystem up at a time.
 
 ### Spring encoder wiring
 
-Four AS5047P share SPI1. Every sensor sees the same SCK, MOSI and MISO; each
-has its **own chip select**, and exactly one is low at a time.
-
-| STM32 pin | Nucleo header | Signal | Goes to |
-|---|---|---|---|
-| PB3 | CN7 pin 15 (**D23**) | SPI1_SCK | SCK of **all four** sensors |
-| PD7 | CN11 pin 45 | SPI1_MOSI | MOSI of **all four** sensors |
-| PB4 | CN7 pin 19 (**D25**) | SPI1_MISO | MISO of **all four** sensors |
-| PF1 | CN9 pin 19 (**D69**) | `enc_cs_l_hip` | CSn of the **left hip** sensor |
-| PD15 | CN7 pin 18 (**D9**) | `enc_cs_l_knee` | CSn of the **left knee** sensor |
-| PD14 | CN7 pin 16 (**D10**) | `enc_cs_r_hip` | CSn of the **right hip** sensor |
-| PF5 | CN7 pin 20 (**D8**) | `enc_cs_r_knee` | CSn of the **right knee** sensor |
-
-All sensors also need 3.3 V and GND.
+**Pin-by-pin wiring, with header positions, is in [docs/PINOUT.md](docs/PINOUT.md).**
+Summary: four AS5047P share SPI1 (PB3 SCK, PD7 MOSI, PB4 MISO) with one chip
+select each — PF1 left hip, PD15 left knee, PD14 right hip, PF5 right knee.
 
 This replaced two daisy chains of two. In a chain the sensors form one shift
 register, so the ORDER of the returned words carried meaning — the first word
@@ -1235,15 +1224,12 @@ problem.
 
 #### Wiring
 
-Per the CEVA datasheet §1.2.3 and the Adafruit pinout:
+**Pin-by-pin wiring is in [docs/PINOUT.md](docs/PINOUT.md).** Summary: PD5
+(`USART2_TX`) to the breakout's **SCL**, PD6 (`USART2_RX`) to its **SDA**, plus
+3V3 and GND. The labels are not I²C — in UART mode SCL is the sensor's receive
+and SDA its transmit.
 
-| STM32 | Nucleo header | Breakout | Note |
-|---|---|---|---|
-| PD5 — `USART2_TX` | CN9 pin 6 (**D53**) | **SCL** | "UART data IN to sensor" |
-| PD6 — `USART2_RX` | CN9 pin 4 (**D52**) | **SDA** | "UART data OUT from sensor" |
-| 3V3 | CN8 pin 7 | Vin | |
-| GND | CN8 pin 11 | GND | |
-| — | **PS1 → 3V3, PS0 left alone** | selects UART-SHTP |
+Mode straps: **PS1 → 3V3, PS0 left alone**, which selects UART-SHTP.
 
 No reset pin needed for UART. The straps are sampled **at the sensor's reset**,
 so after changing them you must fully power-cycle — `-rst` and the black button

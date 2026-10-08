@@ -43,7 +43,32 @@ Note that `nexus_proto.py` is a **copy**. The canonical file is
 copy is that file with a six-line banner on top. Copy it over rather than
 editing by hand, or the two drift.
 
-## 2. Nothing else
+## 2. Two facts in AGENTS.md that the firmware has moved on from
+
+Both in "The hardware, concretely". Neither breaks anything; they are the
+orientation an agent reads before touching the repo, so they should be true.
+
+```diff
+ - **Series-elastic** hip pitch and knee pitch: the drive reports the motor side,
+   an **AS5047P** encoder reports the spring's deflection, and the real joint
+-  angle is their sum. Two SPI daisy chains, one per leg, one chip-select each.
++  angle is their sum. Four encoders share SPI1 with **one chip select each**
++  (PF1 / PD15 / PD14 / PF5).
+-- **BNO085 IMU**, on the torso. The estimator uses its raw accel and gyro; its
+-  own fused quaternion comes across too, but only for comparison.
++- **BNO085 IMU**, on the torso, SHTP over **USART2** (PD5/PD6) at 3 Mbaud. The
++  estimator uses its raw accel and gyro; its own fused quaternion comes across
++  too, but only for comparison.
++- **Every pin into the STM32** — CAN, encoders, IMU, foot switches, supply
++  rails, and the wiring traps — is in `stm32_zeuss/docs/PINOUT.md`. That is the
++  soldering reference.
+```
+
+The IMU moved off PA9/PA10 because PA9 is not a free pin on this board: it
+carries I2C_SDA to the TCPP03-M20 USB-C controller through solder bridge SB35,
+closed by default.
+
+## 3. Nothing else
 
 The protocol, the joint map, the message definitions and the URDF are all
 current. `check_proto.py` and `test_msg_matches_proto.py` pass against the
