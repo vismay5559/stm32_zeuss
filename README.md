@@ -65,7 +65,7 @@ HSE 24 MHz → PLL1 (M2 N100 P2) → **600 MHz** CPU, 300 MHz AHB, 150 MHz APB.
 |---|---|---|
 | Control tick (TIM6) | 300 MHz / 300 / 1000 | 1.0000 kHz |
 | Timestamp (TIM2) | 300 MHz / 300, 32-bit | 1 MHz, wraps @ 71.6 min |
-| FDCAN | PLL2P = 80 MHz | 1 Mbit nominal / 2 Mbit data |
+| FDCAN | PLL2P = 80 MHz | 1 Mbit nominal / 2.5 Mbit data |
 | SPI1 | PLL1Q = 100 MHz / 16 | 6.25 MHz, mode 1 |
 | USART2 (IMU) | PCLK1 150 MHz, OVER8 | 3.000 Mbaud, 0% error |
 | XSPI2 | PLL2S = 400 MHz | see *Known issues* |
@@ -880,31 +880,39 @@ SOF 1 · ID 11 · RTR/IDE/r0 3 · DLC 4 · DATA 64 · CRC 15
 At 1 Mbit that is **121 µs per frame**, and 3210 frames/s fills 39% of the
 second. The measurement and the arithmetic agree exactly.
 
-**CAN FD would help, by about 2.5x — not 5x.** Only the data field and CRC use
-the faster rate; the ID, acknowledgement and end-of-frame always run at the
-nominal rate:
+**CAN FD helps, but by less than the headline ratio.** Only the data field and
+CRC use the faster rate; the ID, acknowledgement and end-of-frame always run at
+the nominal rate:
 
 ```
-CLASSIC   |------------ 121 bits at 1 Mbit ------------|   121 us
-FD+BRS    |-17 bits-||--- 92 bits at 2 Mbit ---||-12 b-|    75 us
+CLASSIC   |------------ 121 bits at 1 Mbit -------------|   121 us
+FD+BRS    |-17 bits-||-- 92 bits at 2.5 Mbit --||-12 b-|     65 us
             1 Mbit           data + CRC          1 Mbit
 ```
 
-| Config | 1 node | 5 nodes/bus |
-|---|---|---|
-| Classic, 1 ms telemetry (today) | 39% | ~195% |
-| Classic, torque at 100 Hz | 27% | ~134% |
-| FD, 1 ms telemetry | 15% | ~76% — tight |
-| **FD, torque at 100 Hz** | **11%** | **~52%** |
+So ~29 us of every FD frame is fixed cost. Going 2 -> 2.5 Mbit saves 9 us of
+75; going on to 4 Mbit would save another 13. The data rate is not the biggest
+lever available.
 
-So the full robot needs **both**: FD framing *and* torque telemetry slowed down.
-Neither alone is enough. Encoder estimates have to stay at 1 kHz because the
-estimator's prediction step runs on them.
+Per node at 1 kHz commands, 1 kHz encoder estimates, 100 Hz heartbeat and
+100 Hz torque — **2200 frames/s**:
 
-That makes getting this drive into genuine FD mode a real prerequisite for the
-second leg, not a nice-to-have. It currently sends CLASSIC frames despite being
-configured for a 5 Mbit data rate, which is worth resolving with ODrive before
-the bus has ten nodes on it.
+| Config | us/frame | 1 node | **4 nodes/bus** |
+|---|---|---|---|
+| Classic 2.0, 1 Mbit | 121 | 27% | **106% — does not fit** |
+| FD + BRS, 2 Mbit | 75 | 16% | 66% |
+| **FD + BRS, 2.5 Mbit** | **65** | **14%** | **58%** |
+| FD + BRS, 4 Mbit | 52 | 11% | 46% |
+
+**Classic cannot carry four drives at these rates**, which is what made genuine
+FD mode a prerequisite rather than an optimisation. 2.5 Mbit at 58% leaves
+usable margin against the ~50-60% that is comfortable for a bus with
+retransmissions.
+
+Encoder estimates stay at 1 kHz: the estimator's prediction step runs on them,
+and halving them to buy 14 points of bus load would cost up to 2 ms of
+staleness on every joint angle the contact kinematics use. Torque at 100 Hz is
+where the saving was taken instead.
 
 The test prints a live `bus~NN%` estimate so you can watch this directly.
 
@@ -937,55 +945,65 @@ Reading it:
   misconfigured ODrive shows up here rather than vanishing.
 - `SILENT` = nothing heard from that node for 500 ms.
 
-### Why the data phase runs at 2 Mbit, not 5
+### Why the data phase runs at 2.5 Mbit
 
-The first attempt ran the data phase at 5 Mbit and the bus died under load:
-`TEC=248` climbing to bus-off while **`REC=0`**. Receive errors of zero with a
-saturated transmit counter is decisive — every fault was on frames *we* sent,
-not frames we received. A wiring or termination problem corrupts both
-directions.
+**1 Mbit arbitration / 2.5 Mbit data, FD with BRS, sample point 87.5% on both
+phases.** `80 MHz / 32 tq = 2.5 Mbit`.
 
-At 5 Mbit a bit is 200 ns. The ISO1042 isolated transceivers have a 152 ns
-loop delay — 76% of a bit time. Transmitter Delay Compensation corrects the
-*average* delay, which is why the SSP offset is configured, but it cannot
-correct the isolator's **pulse-width distortion**: tens of ns of asymmetry that
-varies with the bit pattern. That is why the failures were intermittent and
-load-dependent rather than immediate.
+Three things drove that number.
 
-At 2 Mbit a bit is 500 ns and the same 152 ns of delay is 30% of it, with
-distortion a correspondingly smaller fraction. The bus has run clean since:
-`TEC=0 REC=0`, no form or stuff errors, across every run.
+**Classic CAN does not fit this robot.** Eight drives, four to a bus, at 1 kHz
+`Set_Input_Pos` and 1 kHz encoder telemetry is **8800 frames/s per bus**. A
+classic 8-byte frame is 120 us on the wire — **106% of the bus**. The earlier
+single-leg tests fitted only because three joints is 75% of that load.
 
-Timing at 80 MHz PLL2P, `DataPrescaler = 1`:
+**5 Mbit failed** and the post-mortem is worth keeping. `TEC=248` climbing to
+bus-off with **`REC=0`** — every fault on frames *we* sent, none on frames we
+received, which rules out wiring and termination because those corrupt both
+directions. At 5 Mbit a bit is 200 ns and the `TdcOffset` had been left at
+20 tq = **250 ns**, so the transmitter was checking its own bits *past the end
+of the bit entirely*. The TDC offset had never been adjusted when the data rate
+changed. (The ISO1042's 152 ns loop delay was suspected first; it is 76% of a
+200 ns bit, so it did not help, but the SSP is the simpler explanation.)
 
-| | 5 Mbit (failed) | 2 Mbit (first fix) | 2 Mbit (now) |
-|---|---|---|---|
-| `DataTimeSeg1` | 11 | 29 | **32** |
-| `DataTimeSeg2` | 4 | 10 | **7** |
-| `DataSyncJumpWidth` | 4 | 10 | **7** |
-| total | 16 tq | 40 tq | 40 tq |
-| data sample point | 75% | 75% | **82.5%** |
-| `TdcOffset` (SSP) | 20 tq = 250 ns | 20 tq = 250 ns | **33 tq = 412.5 ns** |
-| SSP as % of bit | **125%** | 50% | **82.5%** |
+**2.5 Mbit is the fastest rate that still samples at 87.5%.** The S1 samples
+there, and matching it is what fixed the error counters. The peripheral's
+`DataTimeSeg1` tops out at 32 (`IS_FDCAN_DATA_TSEG1`), so:
 
-Nominal timing changed with it: `NominalTimeSeg1 = 69`, `NominalTimeSeg2 = 10`
-(was 63 / 16), still 80 tq and 1 Mbit, but the sample point moves from 80% to
-**87.5%** to match what the ODrive S1 uses.
+| data rate | tq | Seg1 / Seg2 | sample point | bit | ISO1042 delay as % of bit |
+|---|---|---|---|---|---|
+| 2 Mbit | 40 | 32 / 7 | **82.5%** — 87.5% needs Seg1 = 34, over the limit | 500 ns | 30% |
+| **2.5 Mbit** | **32** | **27 / 4** | **87.5% exactly** | 400 ns | 38% |
+| 4 Mbit | 20 | 16 / 3 | 85% or 90%, cannot express 87.5% | 250 ns | 61% |
+| 5 Mbit | 16 | 13 / 2 | 87.5% exactly — but see above | 200 ns | 76% |
 
-The sample points are the point. The S1s sample at 87.5%; we were sampling at
-75% on the data phase and self-checking at 50%, which on a CAN bus at 2 Mbit
-lands on edges that have not settled. Every mis-read frame gets error-flagged,
-and error flags are what drove the counters.
+So 2 Mbit could never reach the S1's sample point, and 4 Mbit cannot either.
+2.5 Mbit is the one rate that is both fast enough and lands exactly.
 
-Worth noting what the 5 Mbit column shows: a 200 ns bit with the SSP at 250 ns
-was checking **past the end of the bit entirely**. That is a more likely
-explanation for the transmit-only errors than the isolator pulse-width
-distortion originally suspected — the TDC offset was never adjusted when the
-data rate changed.
+Current timing at 80 MHz PLL2P, `DataPrescaler = 1`:
 
-`80 MHz / 40 = 2 Mbit`. Set the same rate in every ODrive
-(`odrv0.can.config.data_baud_rate`) — a drive left at 5 Mbit is electrically
-fine and completely silent, which looks exactly like a broken wire.
+| phase | Seg1 | Seg2 | SJW | tq | bitrate | sample point |
+|---|---|---|---|---|---|---|
+| nominal | 69 | 10 | 10 | 80 | 1 Mbit | 87.5% |
+| data | **27** | **4** | **4** | **32** | **2.5 Mbit** | **87.5%** |
+
+`TdcOffset = 28 tq = 350 ns`, which is 87.5% of a 400 ns bit — the SSP at the
+same point in the bit as the data sample point. **Change it with the timing;
+they are one decision.** Robot mode had it at 8 tq (25%) for a long time while
+the leg test used 33, and nothing caught it because robot mode had never run on
+a live bus.
+
+Resulting load: **65 us per frame, 8800 frames/s, 58% of the bus.** Note that
+~29 us of every FD frame is spent at the nominal rate regardless — arbitration,
+ACK, EOF, interframe space — so raising the data rate buys less than it looks.
+The cheaper lever is telemetry: encoder estimates at 1 kHz are as much traffic
+as every command combined, and halving them takes 58% to 44%.
+
+Set the same rate in **every** ODrive (`odrv0.can.config.data_baud_rate`) and
+confirm FD is enabled on each. A drive left at another rate, or in classic
+mode, is electrically fine and completely silent — which looks exactly like a
+broken wire. The S1s were measured sending classic frames and refusing to ACK
+FD ones at one point; that is drive configuration, not a wiring fault.
 
 One related trap: bus-off recovery was a no-op for a long time because
 `HAL_FDCAN_Start()` only acts when the peripheral is in READY, and it is

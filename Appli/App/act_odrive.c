@@ -40,12 +40,32 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define CMD_SEGMENT_TICKS         4u
 
 /*
- * Classic CAN 2.0. Measured on hardware: the S1 sends CLASSIC frames and will
- * not acknowledge FD ones, which drives our transmit error counter to bus-off
- * while reception still looks perfect. Flip both back to FD only after the leg
- * test's frame trace shows the drive actually sending FD.
+ * CAN FD with BRS, 1 Mbit arbitration / 2.5 Mbit data.
+ *
+ * This was classic 2.0 for a while: the S1s were measured sending CLASSIC
+ * frames and not acknowledging FD ones, which drives our transmit error
+ * counter to bus-off while reception still looks perfect. That is a drive
+ * configuration, not a wiring fault - the S1 does support FD.
+ *
+ * Classic cannot carry this robot. Eight drives, four to a bus, at 1 kHz with
+ * 1 kHz encoder telemetry is 8800 frames a second per bus; a classic frame is
+ * 120 us on the wire, which is 106% of the bus. It does not fit. FD at 2.5
+ * Mbit is 65 us and 58%.
+ *
+ * IF THE DRIVES STILL WILL NOT ACK FD: the symptom is TEC climbing to bus-off
+ * with REC at 0, and the fallback is to set this to 0 - but then the telemetry
+ * rates have to come down a long way first, because classic at these rates is
+ * over capacity. Check every drive has FD enabled and data_baud_rate at 2.5
+ * Mbit; one left behind is electrically fine and completely silent.
  */
-#define ODRV_USE_FD               0     /* 1 = FD + BRS, 0 = classic 2.0 */
+#define ODRV_USE_FD               1     /* 1 = FD + BRS, 0 = classic 2.0 */
+
+/*
+ * Secondary sample point, in time quanta, matched to the data sample point in
+ * MX_FDCAN1_Init: 87.5% of 32 tq. One tq is 12.5 ns at the 80 MHz kernel
+ * clock, so this is 350 ns into a 400 ns bit.
+ */
+#define ODRV_TDC_OFFSET           28u
 
 #if ODRV_USE_FD
 #define ODRV_TX_FORMAT            FDCAN_FD_CAN
@@ -157,10 +177,23 @@ static void bus_setup(FDCAN_HandleTypeDef *h)
     HAL_FDCAN_ConfigGlobalFilter(h, FDCAN_REJECT, FDCAN_REJECT,
                                  FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE);
 #if ODRV_USE_FD
-    /* See test_leg_can.c: an isolated transceiver's loop delay is most of a
-       data bit at 5 Mbit, so without TDC every FD frame fails its own bit
-       check. Classic CAN has no data phase and never needs this. */
-    HAL_FDCAN_ConfigTxDelayCompensation(h, 8u, 0u);
+    /*
+     * The secondary sample point, for the transmitter checking its own bits.
+     *
+     * The ISO1042's loop delay is 152 ns - a large fraction of a data bit - so
+     * without TDC every FD frame fails its own bit check. The offset must put
+     * the SSP at the SAME point in the bit as the data sample point, which is
+     * 87.5% of 32 tq = 28 tq = 350 ns at 2.5 Mbit.
+     *
+     * This read 8 tq, which is 25% of the bit. Nobody noticed because the leg
+     * test configures its own value (ODRV_TDC_OFFSET's twin, LEGTEST_TDC_OFFSET)
+     * and robot mode has never run on a live bus. Checking a bit at 25% while
+     * the receivers check at 87.5% is exactly the mismatch that drove the error
+     * counters before.
+     *
+     * Change this with the timing in MX_FDCAN1_Init - they are one decision.
+     */
+    HAL_FDCAN_ConfigTxDelayCompensation(h, ODRV_TDC_OFFSET, 0u);
     HAL_FDCAN_EnableTxDelayCompensation(h);
 #endif
 

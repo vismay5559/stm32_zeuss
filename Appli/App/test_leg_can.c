@@ -407,12 +407,20 @@ static uint8_t   s_cap_dumped;
  * which is the likelier cause of the transmit-only errors (TEC climbing to
  * bus-off with REC at 0) than the isolator distortion first suspected.
  */
-#define LEGTEST_TDC_OFFSET           33u
+#define LEGTEST_TDC_OFFSET           28u
 #define LEGTEST_TX_DIV               1u
 #define NODE_SILENT_TICKS            500u
 
+/*
+ * Airtime for one 8-byte frame, used only for the bus-load estimate.
+ *
+ * About 29 us of every FD frame is spent at the NOMINAL rate - arbitration,
+ * ACK, EOF, interframe space - and roughly 91 bits in the data phase. So the
+ * data rate buys less than it looks: 2 -> 2.5 Mbit saves 9 us of 75, not 20%.
+ * A classic frame has no data phase at all and runs end to end at 1 Mbit.
+ */
 #if LEGTEST_USE_CAN_FD
-#define FRAME_US                     75u 
+#define FRAME_US                     65u    /* 29 + 91/2.5 Mbit */
 #else
 #define FRAME_US                     121u
 #endif
@@ -1238,7 +1246,9 @@ static void bus_setup(void)
                           + 1250u;  /* heartbeat + encoder + torques */
         uint32_t load = (per_node * JOINT_COUNT * FRAME_US) / 10000u;
 
-        printf("CAN: CLASSIC 2.0, no BRS, 1 Mbit - CAN-FD is DISABLED\r\n");
+        printf("CAN: %s\r\n", LEGTEST_USE_CAN_FD
+                   ? "FD + BRS, 1 Mbit arbitration / 2.5 Mbit data"
+                   : "CLASSIC 2.0, no BRS, 1 Mbit - CAN-FD is DISABLED");
         printf("     %u us per frame. %d node(s) at current rates ~= %lu%% of"
                " the bus.\r\n",
                (unsigned)FRAME_US, JOINT_COUNT, (unsigned long)load);

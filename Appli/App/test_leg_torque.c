@@ -115,7 +115,7 @@ static const float s_limit_deg[JOINT_COUNT] = { 25.0f, 35.0f, 35.0f };
 #define LEGTQ_RAMP_MS                1000u  /* fade torque in over this    */
 #define LEGTQ_STOP_BUTTON            1
 #define LEGTQ_USE_CAN_FD             1
-#define LEGTQ_TDC_OFFSET             33u
+#define LEGTQ_TDC_OFFSET             28u
 #define NODE_SILENT_TICKS            100u   /* telemetry watchdog, ms      */
 
 #define TWO_PI                       6.28318530718f

@@ -11,7 +11,7 @@ project, nothing paraphrased.
 | FDCAN kernel clock | PLL2P = **80 MHz**, `ClockDivider = FDCAN_CLOCK_DIV1` |
 | Transceiver | TI **ISO1042** isolated, STM32 side only |
 | Drives | ODrive **S1**, fw **0.6.12**, hw **5.2.0** |
-| Nominal / data bitrate | 1 Mbit / **2 Mbit**, BRS on |
+| Nominal / data bitrate | 1 Mbit / **2.5 Mbit**, BRS on |
 | Topology | linear daisy chain: STM32 -> node 1 -> node 3 -> node 4 |
 | Node IDs | 1 = hip_pitch, 3 = knee, 4 = ankle |
 | Control rate | 1 kHz `Set_Input_Pos` per node |
@@ -27,14 +27,16 @@ with two nodes streaming.
 | phase | Seg1 | Seg2 | SJW | tq | bitrate | sample point |
 |---|---|---|---|---|---|---|
 | nominal | 69 | 10 | 10 | 80 | 1 Mbit | 87.5% |
-| data | 32 | 7 | 7 | 40 | 2 Mbit | 82.5% |
+| data | 27 | 4 | 4 | 32 | 2.5 Mbit | 87.5% |
 
-TDC enabled, `TdcOffset = 33 tq` = 412.5 ns = **82.5%** of a 500 ns data bit,
+TDC enabled, `TdcOffset = 28 tq` = 350 ns = **87.5%** of a 400 ns data bit,
 i.e. the SSP is placed at the same point in the bit as the data sample point.
 
-`DataTimeSeg1 = 32` is the peripheral's ceiling (`IS_FDCAN_DATA_TSEG1` allows
-1..32), so 82.5% is the highest data-phase sample point reachable at 2 Mbit with
-`DataPrescaler = 1`. 87.5% would need `Seg1 = 34`.
+The data rate is 2.5 Mbit rather than 2 because of the peripheral's ceiling:
+`DataTimeSeg1` allows 1..32 (`IS_FDCAN_DATA_TSEG1`), so at 2 Mbit (40 tq) the
+highest reachable sample point is 82.5% — 87.5% would need `Seg1 = 34`. At
+2.5 Mbit the bit is 32 tq and `Seg1 = 27` lands on 87.5% exactly, matching the
+S1. 4 Mbit (20 tq) cannot express 87.5% at all; the nearest are 85% and 90%.
 
 History, since it may be relevant:
 
@@ -44,9 +46,13 @@ History, since it may be relevant:
   **past the end of a 200 ns bit**. That was probably the fault.
 * **2 Mbit at 75% / SSP 50%** ran clean on the bench (`TEC=0 REC=0`) but nodes
   further down the daisy chain later went silent one at a time.
-* **2 Mbit at 82.5% / SSP 82.5%** (above) is the current configuration, on the
-  advice that the S1 samples at 87.5% and the earlier sampling was too early
-  for a daisy chain. Not yet validated on hardware at the time of writing.
+* **2 Mbit at 82.5% / SSP 82.5%** ran on the advice that the S1 samples at
+  87.5% and the earlier sampling was too early for a daisy chain.
+* **2.5 Mbit at 87.5% / SSP 87.5%** (above) is the current configuration — the
+  fastest rate this peripheral can sample at 87.5%, and chosen because classic
+  2.0 cannot carry the full robot: eight drives, four to a bus, at 1 kHz
+  commands and 1 kHz encoder telemetry is 8800 frames/s per bus, which is 106%
+  of a classic 1 Mbit bus and 58% at FD 2.5 Mbit.
 
 ## Peripheral init (CubeMX-generated)
 

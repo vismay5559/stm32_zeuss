@@ -145,13 +145,35 @@ Run `NEXUS_MODE_IMU` and look at the first bytes received:
 | **PB6** | `FDCAN2_TX` | — | **CN12 pin 17** | **bus 1 — right leg** |
 | **PB5** | `FDCAN2_RX` | CN7 pin 14 (**D11**) | CN12 pin 29 | bus 1 — right leg |
 
-1 Mbit nominal / 2 Mbit data, sample point 87.5% to match the ODrive S1.
+**FD with BRS: 1 Mbit arbitration / 2.5 Mbit data**, sample point 87.5% on both
+phases to match the ODrive S1. Every drive must be set to the same — one left at
+another rate, or in classic mode, is electrically fine and completely silent.
 
 **PB6 is only on the ST morpho header**, which is not fitted from the factory —
 it is the one signal here that needs CN12 populated.
 
-Joint index is **`bus * 4 + (node - 1)`**: bus 0 is FDCAN1 and the left leg,
-bus 1 is FDCAN2 and the right. Nodes 1–4 per bus.
+### Node IDs — set these in odrivetool
+
+Joint index is **`bus * 4 + (node - 1)`**. Node IDs repeat per bus: each bus has
+its own nodes 1–4, so both legs use the same four numbers.
+
+| Bus | Node | Joint | Packet index |
+|---|---|---|---|
+| **0** — FDCAN1, PD1/PB8 | **1** | left hip pitch | 0 |
+| 0 | **2** | left hip roll | 1 |
+| 0 | **3** | left knee pitch | 2 |
+| 0 | **4** | left ankle pitch | 3 |
+| **1** — FDCAN2, PB6/PB5 | **1** | right hip pitch | 4 |
+| 1 | **2** | right hip roll | 5 |
+| 1 | **3** | right knee pitch | 6 |
+| 1 | **4** | right ankle pitch | 7 |
+
+Node 5 on each bus was the waist and is neither commanded nor expected. The RX
+filter still accepts it, so an ODrive left at node 5 shows up in the `unknown`
+counter rather than vanishing.
+
+The ODrive arbitration ID is `node_id << 5 | cmd_id`, so node 1 occupies
+0x020–0x03F, node 2 0x040–0x05F, and so on.
 
 ### Isolated transceivers (ISO1042B)
 
