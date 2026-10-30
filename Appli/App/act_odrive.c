@@ -32,7 +32,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
    part of this build - see the joint map in link_proto.h. The RX filter is
    left open to node 5 so an unexpected drive still shows up as a dropped
    frame rather than silence. */
-#define ODRV_NODES_PER_BUS        4
+#define ODRV_NODES_PER_BUS        5
 #define ODRV_FILTER_ID_LOW        0x020u   /* node 1, cmd 0  */
 #define ODRV_FILTER_ID_HIGH       0x0BFu   /* node 5, cmd 31 */
 
@@ -47,10 +47,22 @@ extern FDCAN_HandleTypeDef hfdcan2;
  * counter to bus-off while reception still looks perfect. That is a drive
  * configuration, not a wiring fault - the S1 does support FD.
  *
- * Classic cannot carry this robot. Eight drives, four to a bus, at 1 kHz with
- * 1 kHz encoder telemetry is 8800 frames a second per bus; a classic frame is
- * 120 us on the wire, which is 106% of the bus. It does not fit. FD at 2.5
- * Mbit is 65 us and 58%.
+ * Classic cannot carry this robot. TEN drives, five to a bus, at 1 kHz with
+ * 1 kHz encoder telemetry is 11000 frames a second per bus; a classic frame is
+ * 120 us on the wire, which is 132% of the bus. It does not fit. FD at 2.5
+ * Mbit is 65 us and 73%.
+ *
+ * 73% is tighter than the 58% this bus ran at with four drives, and raising the
+ * DATA rate buys less than it looks: every frame also spends a fixed ~30 us in
+ * the ARBITRATION phase at 1 Mbit, which no data rate shortens. 3.333 Mbit (24
+ * tq, still exactly 87.5%) would give 57 us and 63%; 4 Mbit gives 53 us and
+ * 58%; an infinitely fast data phase would still leave 33%.
+ *
+ * The cheaper saving is fewer frames. Set_Input_Pos at 1 kHz is 5000 of the
+ * 11000, while commands arrive at 250 Hz and the policy runs at 50 Hz, and each
+ * drive closes its own position loop at 8 kHz off the last target it was given.
+ * Halving the set rate to 500 Hz saves 16 points of bus load for nothing, which
+ * is more than the jump to 4 Mbit, and changes no timing on either side.
  *
  * IF THE DRIVES STILL WILL NOT ACK FD: the symptom is TEC climbing to bus-off
  * with REC at 0, and the fallback is to set this to 0 - but then the telemetry

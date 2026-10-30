@@ -58,7 +58,7 @@ static int s_fail;
 #define CMD_CLEAR_ERRORS  0x018u
 #define CMD_GET_TORQUES   0x01Cu
 
-#define NODES_PER_BUS  4
+#define NODES_PER_BUS  5
 
 /* ---- reading and writing the eight bytes of a frame ------------------ */
 
@@ -559,9 +559,9 @@ static void test_it_keeps_asking_until_every_motor_confirms(void)
 
     CHECK(act_all_closed_loop() == 0u,
           "it reported every motor running before any had said so");
-    CHECK(act_not_closed_loop_mask() == 0x0FFu,
-          "the list of joints not yet running was 0x%03X, expected all eight "
-          "(0x0FF)", act_not_closed_loop_mask());
+    CHECK(act_not_closed_loop_mask() == 0x3FFu,
+          "the list of joints not yet running was 0x%03X, expected all ten "
+          "(0x3FF)", act_not_closed_loop_mask());
 
     /* Nothing has confirmed, so the request is repeated - slowly. */
     host_can_forget_sent();
@@ -627,10 +627,10 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     host_can_wire_blocked(0, 1);
 
     set_all_targets(1.0f);
-    ticks(5);                        /* 5 ticks x 4 joints = 20 commands */
+    ticks(5);                        /* 5 ticks x 5 joints = 25 commands */
 
-    CHECK(act_tx_dropped(0) == 2u,
-          "the blocked wire lost %u commands; expected 20 sent minus the 18 "
+    CHECK(act_tx_dropped(0) == 7u,
+          "the blocked wire lost %u commands; expected 25 sent minus the 18 "
           "it can hold", act_tx_dropped(0));
     CHECK(act_tx_dropped(1) == 0u,
           "the healthy wire lost %u commands and should have lost none",
@@ -645,7 +645,7 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     CHECK(host_can_sent_count(0) == 15u,
           "%u queued commands went out after the wire recovered, expected the "
           "15 that were waiting", host_can_sent_count(0));
-    CHECK(act_tx_dropped(0) == 2u,
+    CHECK(act_tx_dropped(0) == 7u,
           "the lost-command count changed after recovery, to %u",
           act_tx_dropped(0));
 }
@@ -685,7 +685,7 @@ static void test_replies_land_on_the_right_joint(void)
 
     uint32_t before = act_rx_count(1);
 
-    /* Joint 7 is the fourth motor on the second wire. */
+    /* Joint 7 is the third motor on the second wire: 7 = 1 * 5 + (3 - 1). */
     drive_reports_position(7, 7.5f, -1.25f);
 
     act_telemetry_t t;
@@ -717,10 +717,11 @@ static void test_replies_land_on_the_right_joint(void)
     uint8_t d[8] = { 0 };
 
     host_can_deliver(1, (0u << 5) | CMD_GET_ENCODER, d);   /* node 0          */
-    host_can_deliver(1, (5u << 5) | CMD_GET_ENCODER, d);   /* node 5: the
-                                                              waist, not part
-                                                              of this build   */
-    host_can_deliver(1, (6u << 5) | CMD_GET_ENCODER, d);   /* node 6          */
+    host_can_deliver(1, (6u << 5) | CMD_GET_ENCODER, d);   /* node 6: one past
+                                                              ankle roll, which
+                                                              took node 5 from
+                                                              the old waist    */
+    host_can_deliver(1, (7u << 5) | CMD_GET_ENCODER, d);   /* node 7          */
     act_on_rx(1);
 
     CHECK(act_rx_count(1) == before,

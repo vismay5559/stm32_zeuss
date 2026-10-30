@@ -59,7 +59,11 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "Appli", "App")
 HOSTTEST = os.path.join(ROOT, "tools", "hosttest")
-DEFAULT_URDF = os.path.join(os.path.dirname(ROOT), "zeus_26", "zeus_description", "urdf", "zeus.urdf")
+# The policy's model, not ours. mukesh.urdf is what the network was trained
+# against; the estimator has to measure the same robot or every foot position
+# it reports is of a leg the policy has never seen.
+DEFAULT_URDF = os.path.join(os.path.dirname(ROOT), "zeus_26_mukesh_deploy",
+                            "mukesh_description", "urdf", "mukesh.urdf")
 
 # q, per leg. Must match the ZEUS_KIN_Q_* enum in zeus_kinematics.h (checked
 # below). Fixed by name, not by the URDF's nesting, so a re-export of the real
@@ -69,6 +73,7 @@ Q = [
     ("HIP_ROLL", "{s}_hip_roll"),
     ("KNEE_PITCH", "{s}_knee_pitch"),
     ("ANKLE_PITCH", "{s}_ankle_pitch"),
+    ("ANKLE_ROLL", "{s}_ankle_roll"),
     ("HIP_PITCH_SPRING", "{s}_hip_pitch_spring"),
     ("KNEE_PITCH_SPRING", "{s}_knee_pitch_spring"),
 ]

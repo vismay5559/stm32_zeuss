@@ -31,13 +31,13 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     9u      /* v9: one foot switch per foot, not two      */
+#define NEXUS_PROTO_VERSION     10u     /* v10: ankle roll, ten joints                */
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
 #define NEXUS_MSG_GAINS         0x03u   /* Pi -> board, rare: drive gains     */
 
-#define NEXUS_NUM_JOINTS        8       /* see the joint map below            */
+#define NEXUS_NUM_JOINTS        10      /* see the joint map below            */
 #define NEXUS_NUM_ENCODERS      4       /* AS5047P, after-spring (SEA) joints */
 #define NEXUS_NUM_CONTACTS      2       /* mechanical foot switches, one a foot */
 
@@ -49,37 +49,26 @@
  * residual. The packet carries no names, so a reader that labels these by any
  * other table is labelling them wrong.
  *
- *     index = bus * 4 + (node - 1)      bus 0 = FDCAN1, bus 1 = FDCAN2
+ *     index = bus * 5 + (node - 1)      bus 0 = FDCAN1, bus 1 = FDCAN2
  *
  *   idx  bus  node   joint
  *    0    0    1     left_hip_pitch
  *    1    0    2     left_hip_roll
  *    2    0    3     left_knee_pitch
  *    3    0    4     left_ankle_pitch
- *    4    1    1     right_hip_pitch
- *    5    1    2     right_hip_roll
- *    6    1    3     right_knee_pitch
- *    7    1    4     right_ankle_pitch
+ *    4    0    5     left_ankle_roll
+ *    5    1    1     right_hip_pitch
+ *    6    1    2     right_hip_roll
+ *    7    1    3     right_knee_pitch
+ *    8    1    4     right_ankle_pitch
+ *    9    1    5     right_ankle_roll
  *
  * ---------------------------------------------------------------------------
- * TWO LEGS, NO WAIST.
+ * TWO LEGS, FIVE JOINTS EACH, NO WAIST.
  *
- * The robot had ten actuators: these eight plus waist roll (bus 0 node 5) and
- * waist pitch (bus 1 node 5). Node 5 on each bus is neither commanded nor
- * expected.
- *
- * The waist is gone from the MODEL too, not just undriven. It used to be
- * bolted at its zero pose while the estimator still carried both waist joints
- * in its chain - the IMU sat above them, so they were part of the path from
- * the IMU to each leg, held at zero with a small variance. The current CAD
- * bolts both hips straight to the torso, so there is no joint between the IMU
- * and the legs at all: ZEUS_KIN_NQ is 6 per leg, not 8.
- *
- * Putting the waist back now needs a CAD export that has the joints in it,
- * then zeus_model.yaml, then ZEUS_KIN_Q_* and gen_kinematics.py - as well as
- * NEXUS_NUM_JOINTS 10, ODRV_NODES_PER_BUS 5, the map above back to bus * 5,
- * the two NEXUS_J_WAIST_* indices, the waist entries in robot_config.c, and a
- * version bump. The tag `waist-10-actuators` marks the last commit with ten.
+ * Ankle roll takes node 5 on each bus, the slot the waist actuators used to
+ * have. The waist is gone from the machine and the model; nothing sits between
+ * the IMU and the legs.
  * ---------------------------------------------------------------------------
  *
  * Confirmed against the wiring. The Pi side names them in the same order in
@@ -89,10 +78,12 @@
 #define NEXUS_J_L_HIP_ROLL      1
 #define NEXUS_J_L_KNEE_PITCH    2
 #define NEXUS_J_L_ANKLE_PITCH   3
-#define NEXUS_J_R_HIP_PITCH     4
-#define NEXUS_J_R_HIP_ROLL      5
-#define NEXUS_J_R_KNEE_PITCH    6
-#define NEXUS_J_R_ANKLE_PITCH   7
+#define NEXUS_J_L_ANKLE_ROLL    4
+#define NEXUS_J_R_HIP_PITCH     5
+#define NEXUS_J_R_HIP_ROLL      6
+#define NEXUS_J_R_KNEE_PITCH    7
+#define NEXUS_J_R_ANKLE_PITCH   8
+#define NEXUS_J_R_ANKLE_ROLL    9
 
 /*
  * Foot switch order, used by contact[] in the policy block and by the

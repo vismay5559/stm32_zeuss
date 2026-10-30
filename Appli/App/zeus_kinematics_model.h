@@ -3,8 +3,8 @@
  *
  * Leg geometry for zeus_kinematics.c. Include it from there only.
  *
- * model   zeus_26/zeus_description/urdf/zeus.urdf
- * sha256  6e7d4e74a9e2f33e6da913ab0ceb2d3cf27dd4e92e106083d86ecfa5d7c68dcd
+ * model   zeus_26_mukesh_deploy/mukesh_description/urdf/mukesh.urdf
+ * sha256  6457caaed8d4571bb5b4a72182dcb100023a053dbca8415affcd15150d16ecf3
  * tools   pin 2.7.0, numpy 1.26.4
  */
 
@@ -16,11 +16,11 @@
 /*
  * Contact points in the IMU frame at q = 0 (m), as a sanity check against
  * the robot in front of you:
- *   left  contact  (+0.0056, +0.1024, -0.7922)
- *   right contact  (+0.0056, -0.0998, -0.7922)
+ *   left  contact  (-0.0159, +0.1025, -0.9460)
+ *   right contact  (-0.0159, -0.1025, -0.9460)
  */
 
-#define ZK_STEPS  6
+#define ZK_STEPS  7
 
 typedef struct
 {
@@ -41,75 +41,85 @@ static const zk_leg_t zk_legs[2] = {
     [ZEUS_KIN_LEFT] = {
         .step = {
             { /* left_hip_pitch */
-              .pre_R = { -0.0022425468f, 0.999997483f, 6.76453502e-05f, -0.999997333f, -0.00224250914f, -0.000551754731f, -0.000551601647f, -6.88825056e-05f, 0.999999845f },
-              .pre_p = { -9.25744968e-06f, 0.0443171234f, -0.0595120434f },
-              .axis  = { -0.999997333f, -0.00224250593f, -0.000551754731f },
+              .pre_R = { -3.20510345e-09f, -1.0f, 0.0f, -1.0f, 3.20510345e-09f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { -0.000199999858f, 0.043256605f, -0.17244118f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_HIP_PITCH },
             { /* left_hip_pitch_spring */
-              .pre_R = { 0.0f, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f },
-              .pre_p = { 0.01649995f, 3.7e-05f, 9.11e-06f },
-              .axis  = { -0.000551754731f, 0.00224250593f, -0.999997333f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { 0.01f, 0.0f, 0.0f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_HIP_PITCH_SPRING },
             { /* left_hip_roll */
-              .pre_R = { 0.0f, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f },
-              .pre_p = { -0.13587644f, -0.04420863f, -0.06883264f },
-              .axis  = { -0.00224254359f, 0.999997483f, 6.7645352e-05f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+              .pre_p = { -0.06494194f, 0.04079577f, -0.13571764f },
+              .axis  = { 0.0f, 1.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_HIP_ROLL },
             { /* left_knee_pitch */
-              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f },
-              .pre_p = { 0.05463318f, -0.03840442f, -0.23633269f },
-              .axis  = { -0.999997333f, -0.00224250593f, -0.000551754731f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { 0.05519956f, -0.03864847f, -0.23289449f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_KNEE_PITCH },
             { /* left_knee_pitch_spring */
-              .pre_R = { 0.0f, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f },
-              .pre_p = { 0.01499984f, 6.727e-05f, 1.655e-05f },
-              .axis  = { -0.000551754731f, 0.00224250593f, -0.999997333f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { 0.01f, 0.0f, 0.0f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_KNEE_PITCH_SPRING },
             { /* left_ankle_pitch */
-              .pre_R = { 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f },
-              .pre_p = { -0.27052349f, 0.00048422f, -0.10781471f },
-              .axis  = { -0.999997333f, 0.00224250593f, 0.000551754731f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { -0.11677326f, 0.0015f, -0.20571883f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_ANKLE_PITCH },
+            { /* left_ankle_roll */
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+              .pre_p = { 0.04727573f, -0.0457f, 0.1192521f },
+              .axis  = { 0.0f, -1.0f, 0.0f },
+              .sign  = 1.0f, .q = ZEUS_KIN_Q_ANKLE_ROLL },
         },
-        .point = { { 0.0328232312f, -0.00010520166f, 0.0900125516f } },  /* sole centre */
+        .point = { { -3.48500001e-06f, 0.0650473f, 0.07997576f } },  /* sole centre */
     },
     [ZEUS_KIN_RIGHT] = {
         .step = {
             { /* right_hip_pitch */
-              .pre_R = { -0.0022425468f, -0.999997483f, -6.76453502e-05f, -0.999997333f, 0.00224250914f, 0.000551754731f, -0.000551601647f, 6.88825056e-05f, -0.999999845f },
-              .pre_p = { 1.85779177e-05f, -0.0419008989f, -0.0595120365f },
-              .axis  = { -0.999997333f, 0.00224250593f, 0.000551754731f },
+              .pre_R = { -3.20510345e-09f, -1.0f, 0.0f, -1.0f, 3.20510345e-09f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { -0.000200000135f, -0.043256605f, -0.17244118f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_HIP_PITCH },
             { /* right_hip_pitch_spring */
-              .pre_R = { 0.0f, 0.0f, -1.0f, 0.0f, -1.0f, 0.0f, -1.0f, 0.0f, 0.0f },
-              .pre_p = { -0.01649996f, 3.7e-05f, 9.11e-06f },
-              .axis  = { -0.000551754731f, -0.00224250593f, 0.999997333f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { -0.01f, 0.0f, 0.0f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_HIP_PITCH_SPRING },
             { /* right_hip_roll */
-              .pre_R = { 0.0f, 0.0f, -1.0f, 0.0f, -1.0f, 0.0f, -1.0f, 0.0f, 0.0f },
-              .pre_p = { -0.13567555f, 0.04439738f, -0.06859977f },
-              .axis  = { -0.00224254359f, -0.999997483f, -6.7645352e-05f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { 0.06494194f, 0.04079577f, -0.13571764f },
+              .axis  = { 0.0f, -1.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_HIP_ROLL },
             { /* right_knee_pitch */
               .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f },
-              .pre_p = { -0.05419955f, 0.03864848f, 0.23639449f },
-              .axis  = { -0.999997333f, 0.00224250593f, 0.000551754731f },
+              .pre_p = { -0.05519955f, 0.03864847f, 0.23289449f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_KNEE_PITCH },
             { /* right_knee_pitch_spring */
-              .pre_R = { 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 0.0f },
-              .pre_p = { -0.015f, 0.0f, 0.0f },
-              .axis  = { -0.000551754731f, 0.00224250593f, -0.999997333f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, -1.0f },
+              .pre_p = { -0.01f, 0.0f, 0.0f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_KNEE_PITCH_SPRING },
             { /* right_ankle_pitch */
-              .pre_R = { 0.0f, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f },
-              .pre_p = { -0.27040435f, 0.0f, 0.10808226f },
-              .axis  = { -0.999997333f, -0.00224250593f, -0.000551754731f },
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+              .pre_p = { 0.11677325f, 0.0015f, -0.20571883f },
+              .axis  = { -1.0f, 0.0f, 0.0f },
               .sign  = 1.0f, .q = ZEUS_KIN_Q_ANKLE_PITCH },
+            { /* right_ankle_roll */
+              .pre_R = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+              .pre_p = { -0.04727573f, 0.0457f, -0.1192521f },
+              .axis  = { 0.0f, 1.0f, 0.0f },
+              .sign  = 1.0f, .q = ZEUS_KIN_Q_ANKLE_ROLL },
         },
-        .point = { { -0.032691938f, 4.98163595e-05f, -0.0901720268f } },  /* sole centre */
+        .point = { { 3.48500001e-06f, -0.0650473f, -0.07997576f } },  /* sole centre */
     },
 };
 
-const char zeus_kin_model_sha[] = "6e7d4e74a9e2f33e";
+const char zeus_kin_model_sha[] = "6457caaed8d4571b";
 
 #endif /* ZEUS_KINEMATICS_MODEL_H */

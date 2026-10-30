@@ -8,8 +8,9 @@
  * the joints - from the robot's URDF, not from hand-measured lengths.
  *
  * The geometry lives in zeus_kinematics_model.h, which tools/gen_kinematics.py
- * writes from zeus_26/zeus_description/urdf/zeus.urdf (itself made from the
- * Fusion 360 export). This file and zeus_kinematics.c never change when the
+ * writes from zeus_26_mukesh_deploy/mukesh_description/urdf/mukesh.urdf -
+ * the model the RL policy was trained against, which is the one the
+ * estimator must agree with. This file and zeus_kinematics.c never change when the
  * robot does: re-export, regenerate, rebuild.
  *
  * Everything is in imu_link - the IMU chip's own axes, origin at the chip -
@@ -24,10 +25,17 @@
  *
  * q, per leg, in ZEUS_KIN_Q_* order (rad):
  *
+ *   - the five DRIVEN joints come first, in chain order, so the q index of a
+ *     drive is its CAN node minus one (node 5 is ankle roll). The two spring
+ *     deflections follow. Inserting ankle roll at 4 renumbered both springs;
+ *     nothing indexes q by a literal, and gen_kinematics.py fails the build if
+ *     this enum and its own joint list disagree.
  *   - hip pitch and knee are series-elastic. The drive reports the motor side
  *     (HIP_PITCH, KNEE_PITCH), the AS5047P reports the spring's deflection
  *     (the *_SPRING entries), and the leg's real angle is their sum. Passing 0
  *     for a spring treats it as rigid.
+ *   - ANKLE_ROLL is driven and NOT series-elastic: there is no spring on it, so
+ *     the drive's own angle is the whole joint.
  *   - there are no waist joints. Earlier models put two between the torso and
  *     the hips, held at zero because the waist was bolted, and they stayed in
  *     the chain because the IMU sits above them. The current model bolts both
@@ -44,9 +52,10 @@ enum
     ZEUS_KIN_Q_HIP_ROLL          = 1,
     ZEUS_KIN_Q_KNEE_PITCH        = 2,   /* motor side                    */
     ZEUS_KIN_Q_ANKLE_PITCH       = 3,
-    ZEUS_KIN_Q_HIP_PITCH_SPRING  = 4,   /* spring deflection             */
-    ZEUS_KIN_Q_KNEE_PITCH_SPRING = 5,   /* spring deflection             */
-    ZEUS_KIN_NQ                  = 6
+    ZEUS_KIN_Q_ANKLE_ROLL        = 4,
+    ZEUS_KIN_Q_HIP_PITCH_SPRING  = 5,   /* spring deflection             */
+    ZEUS_KIN_Q_KNEE_PITCH_SPRING = 6,   /* spring deflection             */
+    ZEUS_KIN_NQ                  = 7
 };
 
 typedef enum

@@ -240,12 +240,35 @@ static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
         uint8_t right;
         uint8_t col;
         float   left_sign;
-    } map[4] = {
+    } map[] = {
         { NEXUS_J_L_HIP_PITCH,   NEXUS_J_R_HIP_PITCH,   GAIT_COL_HIP_PITCH,  1.0f },
         { NEXUS_J_L_HIP_ROLL,    NEXUS_J_R_HIP_ROLL,    GAIT_COL_HIP_ROLL,  -1.0f },
         { NEXUS_J_L_KNEE_PITCH,  NEXUS_J_R_KNEE_PITCH,  GAIT_COL_KNEE,       1.0f },
         { NEXUS_J_L_ANKLE_PITCH, NEXUS_J_R_ANKLE_PITCH, GAIT_COL_ANKLE,      1.0f },
     };
+    enum { MAP_CLASSES = (int)(sizeof(map) / sizeof(map[0])) };
+
+    /*
+     * ANKLE ROLL HAS NO REFERENCE YET, AND THAT IS WHY THIS COUNT IS CHECKED.
+     *
+     * The loop below zeroes all ten joints and then fills only the classes in
+     * `map`, so a joint the map forgets is not left out of the packet - it is
+     * published as a confident ref_angle of 0.0 and driven there, which looks
+     * exactly like a joint the gait genuinely holds still. Both ankle rolls are
+     * in that state now: this build's gait_ref.c is the old four-column table
+     * (GAIT_JOINTS 4) and has no ANKLE_ROLL column to read.
+     *
+     * The assert deliberately allows the gap at four and nothing else, so
+     * dropping in the policy's five-column table (GAIT_JOINTS 5, stride
+     * 1.5646 s) fails the build until this map gains its ankle roll row with
+     * left_sign -1.0f - roll mirrors, like hip roll above.
+     */
+    _Static_assert(MAP_CLASSES == 4,
+                   "gait map and GAIT_JOINTS disagree: add the ANKLE_ROLL row "
+                   "(left_sign -1.0f) and raise this to ROBOT_LEG_MOTORS");
+    _Static_assert(GAIT_JOINTS == 4,
+                   "the five-column gait landed: build_reference() must gain "
+                   "its ANKLE_ROLL row before ankle roll can be commanded");
 
     float right[GAIT_JOINTS];
     float left[GAIT_JOINTS];
@@ -258,7 +281,7 @@ static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
         ref_turns[j] = 0.0f;
     }
 
-    for (int k = 0; k < 4; k++)
+    for (int k = 0; k < MAP_CLASSES; k++)
     {
         ref_turns[map[k].left]  = left[map[k].col] * map[k].left_sign;
         ref_turns[map[k].right] = right[map[k].col];

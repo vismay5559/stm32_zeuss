@@ -59,7 +59,11 @@
  * NEXUS_ENC_*), and confirmed against the wiring:
  *
  *     node 1 hip_pitch   node 2 hip_roll   node 3 knee   node 4 ankle
- *     (node 5, the waist, is not part of this build)
+ *     node 5 ankle_roll
+ *
+ * Node 5 USED to be the waist, which this robot does not have. It is now
+ * ankle roll - a driven joint like any other, and the reason the joint map
+ * is bus * 5 + (node - 1) rather than bus * 4.
  *
  * What is still NOT measured is every sign and offset in these tables. The
  * convention they must match is the URDF's: every pitch joint positive about
@@ -78,12 +82,13 @@ typedef struct
     float   offset;      /* radians added after the sign: the joint zero  */
 } joint_src_t;
 
-/* Slots in g_leg_joints[leg][], same order as ZEUS_KIN_Q_* 0..3. */
+/* Slots in g_leg_joints[leg][], same order as ZEUS_KIN_Q_* 0..4. */
 #define ROBOT_JOINT_HIP_PITCH    0
 #define ROBOT_JOINT_HIP_ROLL     1
 #define ROBOT_JOINT_KNEE         2
 #define ROBOT_JOINT_ANKLE        3
-#define ROBOT_LEG_MOTORS         4
+#define ROBOT_JOINT_ANKLE_ROLL   4
+#define ROBOT_LEG_MOTORS         5
 
 extern const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS];   /* [0]=left [1]=right */
 
