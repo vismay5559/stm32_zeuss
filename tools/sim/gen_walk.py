@@ -4,7 +4,7 @@ A simulated walk with exact ground truth, for testing the estimator.
 
 The estimator's maths can only be judged against the true motion, and on the
 robot nobody knows the true motion. So this makes one up that is exactly
-consistent with the robot's own geometry (zeus.urdf):
+consistent with the robot's own geometry (tools/model/mukesh.urdf):
 
   - The legs follow smooth joint trajectories: a step, a knee lift on the
     swing leg, a little hip-roll sway, spring wind-up on the stance leg. The
@@ -34,7 +34,7 @@ engine would only add its own contact model's errors to the truth.
 
 Needs Pinocchio (tools/requirements-kinematics.txt):
 
-    env -u PYTHONPATH ~/kin_venv/bin/python tools/sim/gen_walk.py
+    env -u PYTHONPATH ~/kinvenv/bin/python tools/sim/gen_walk.py
 """
 
 from __future__ import annotations
