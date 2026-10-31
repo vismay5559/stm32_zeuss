@@ -94,32 +94,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The URDF lives in the Pi workspace repo, which is PRIVATE while this
-      # repo is public. So the check is in two halves:
-      #
-      #   1. the generated tables against tools/model/mukesh_urdf.sha256, a
-      #      pinned hash committed here. Always runs, needs nothing external,
-      #      and catches the common mistake - hand-edited tables, or tables
-      #      from a different model.
-      #   2. that pin against the workspace's ACTUAL urdf, which catches the
-      #      model moving on. Needs the private repo, so it runs only when a
-      #      read-only WORKSPACE_TOKEN secret exists, and says so when not.
-      #
-      # See tools/model/README.md.
-      - name: Kinematics tables match the pinned model
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pinocchio
+        run: pip install -r tools/requirements-kinematics.txt
+
+      # The model is vendored at tools/model/mukesh.urdf, so this needs nothing
+      # external. It catches the mistake that actually happens: tables edited
+      # by hand, or committed from a different model than the one in the tree.
+      - name: Kinematics tables match the model in the tree
         run: |
-          want=$(cat tools/model/mukesh_urdf.sha256)
+          urdf=tools/model/mukesh.urdf
+          want=$(sha256sum "$urdf" | cut -d' ' -f1)
           have=$(grep -m1 -o 'sha256  [0-9a-f]*' Appli/App/zeus_kinematics_model.h | cut -d' ' -f3)
+          pin=$(cat tools/model/mukesh_urdf.sha256)
           if [ "$want" != "$have" ]; then
             echo "zeus_kinematics_model.h was generated from a different URDF"
             echo "  tables: $have"
-            echo "  pinned: $want"
-            echo "run: python tools/gen_kinematics.py   (then re-pin the sha256)"
+            echo "  model:  $want"
+            echo "run: python tools/gen_kinematics.py"
             exit 1
           fi
-          echo "tables match the pinned model ($want)"
+          if [ "$want" != "$pin" ]; then
+            echo "tools/model/mukesh_urdf.sha256 does not match the URDF beside it"
+            echo "  pin:   $pin"
+            echo "  model: $want"
+            exit 1
+          fi
+          echo "tables, model and pin all agree ($want)"
 
-      - name: Fetch the Pi workspace (for the model and the walk sim)
+      - name: Simulated walk through fusion.c
+        env:
+          URDF: tools/model/mukesh.urdf
+          OUT: sim_out
+        run: tools/sim/run.sh --check
+
+      # Separately: has the WORKSPACE's model moved on without us? Needs the
+      # private repo, so it runs only when a read-only token is available and
+      # says so plainly when it is not. Everything above has already run.
+      - name: Fetch the Pi workspace
         id: workspace
         continue-on-error: true
         uses: actions/checkout@v4
@@ -128,45 +143,27 @@ jobs:
           path: workspace
           token: ${{ secrets.WORKSPACE_TOKEN }}
 
-      - name: The pinned model is still the workspace's model
+      - name: The vendored model is still the workspace's model
         if: steps.workspace.outcome == 'success'
         run: |
-          urdf=workspace/mukesh_description/urdf/mukesh.urdf
-          want=$(sha256sum "$urdf" | cut -d' ' -f1)
+          want=$(sha256sum workspace/mukesh_description/urdf/mukesh.urdf | cut -d' ' -f1)
           have=$(cat tools/model/mukesh_urdf.sha256)
           if [ "$want" != "$have" ]; then
-            echo "the workspace's URDF has moved on and the firmware has not"
-            echo "  pinned:    $have"
+            echo "::error title=Model drift::the workspace URDF has moved on and the firmware has not"
+            echo "  vendored:  $have"
             echo "  workspace: $want"
-            echo "run: python tools/gen_kinematics.py   (then re-pin the sha256)"
+            echo "refresh: cp .../mukesh.urdf tools/model/ && python tools/gen_kinematics.py"
             exit 1
           fi
-          echo "the pin is current ($want)"
+          echo "the vendored model is current ($want)"
 
-      - name: NOT CHECKED - no workspace access
+      - name: Model drift NOT checked
         if: steps.workspace.outcome != 'success'
         run: |
           echo "::warning title=Model drift not checked::zeus_26_mukesh_deploy could not be"
-          echo "cloned, so CI did NOT verify that the pinned URDF is still the workspace's"
-          echo "current one, and the walk simulation did NOT run. Both need a read-only"
-          echo "WORKSPACE_TOKEN secret - see tools/model/README.md. The pinned-hash check"
-          echo "above DID run."
-
-      - uses: actions/setup-python@v5
-        if: steps.workspace.outcome == 'success'
-        with:
-          python-version: '3.12'
-
-      - name: Install Pinocchio
-        if: steps.workspace.outcome == 'success'
-        run: pip install -r tools/requirements-kinematics.txt
-
-      - name: Simulated walk through fusion.c
-        if: steps.workspace.outcome == 'success'
-        env:
-          URDF: workspace/mukesh_description/urdf/mukesh.urdf
-          OUT: sim_out
-        run: tools/sim/run.sh --check
+          echo "cloned, so CI did NOT verify that tools/model/mukesh.urdf is still the"
+          echo "workspace's current model. Needs a read-only WORKSPACE_TOKEN secret - see"
+          echo "tools/model/README.md. Every other kinematics check DID run."
 
   firmware:
     name: Firmware build (arm-none-eabi)

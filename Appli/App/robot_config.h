@@ -192,6 +192,56 @@ typedef struct
 
 extern const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS];
 
+/* ===================================================================== */
+/*  Gearing, and the spring the policy models                             */
+/* ===================================================================== */
+
+/*
+ * Series spring stiffness at the OUTPUT shaft, Nm per radian.
+ *
+ * 3437.75 Nm/rad is 60 Nm/deg, and is the value the policy was trained
+ * against. With ROBOT_SPRING_MAX_DEFLECTION_RAD (0.0297, +/-1.7 deg) it is the
+ * whole spring model: the firmware uses it to pre-deflect a series-elastic
+ * joint's target, because the drive holds the MOTOR side and the limb sits
+ * behind the spring.
+ *
+ *     limb angle = motor angle + deflection,   deflection = tau / K
+ *
+ * so to put the limb at the reference the motor must go to ref - tau/K.
+ * Without it the limb sits short by the wind-up every stride, in the same
+ * direction, for the whole of stance - a bias, not noise.
+ *
+ * TO MEASURE: hang known masses at a known lever arm, read the deflection,
+ * fit the line. Both this and the travel are the policy's numbers, not yet
+ * this robot's.
+ */
+#define ROBOT_SPRING_K_NM_PER_RAD   3437.75f
+
+/*
+ * Gear ratio per joint, in NEXUS_J_* order.
+ *
+ * Needed because the ODrive's Torque_FF is always MOTOR torque while the gait
+ * table's torques are at the output, so what goes on the wire is
+ * g_gait_tau / g_joint_gear. Getting this wrong by a factor of 47 is not a
+ * tuning error.
+ *
+ * NOTE this is NOT applied to position or velocity. robot_config.h above
+ * states that every drive reports output-shaft position with the ratio
+ * already applied, which is how the drives are expected to be configured, so
+ * positions pass through 1:1. docs/ODRIVE_COMMANDS.md disagrees for the
+ * ankles - it says their encoders sit on the MOTOR side - and if that is what
+ * the drives actually do then their positions and velocities need this ratio
+ * too. The drives are the authority; confirm before the first ankle move.
+ */
+extern const float g_joint_gear[NEXUS_NUM_JOINTS];
+
+/*
+ * 1 where a joint is series-elastic - a spring between the motor and the limb,
+ * and therefore a joint whose target needs pre-deflecting. Hip pitch and knee
+ * pitch on each leg. Everything else is rigid and gets no correction.
+ */
+extern const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS];
+
 /* Convenience for anything that wants to say "this is not trustworthy yet". */
 /*
  * Has this robot actually been measured?

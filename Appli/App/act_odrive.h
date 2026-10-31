@@ -88,6 +88,35 @@ void act_on_rx(uint8_t bus_index);
 void act_set_targets(const float target_pos[NEXUS_NUM_JOINTS]);
 
 /*
+ * The gait's own velocity and torque at the current phase, one per joint, in
+ * OUTPUT-shaft units (turns/s and Nm). Call it every tick, before
+ * act_tick_1khz().
+ *
+ * These are FEEDFORWARD: they tell each drive what the motion needs before it
+ * has any position error to work from. Without them a drive has to manufacture
+ * the whole gait torque out of error alone, so the limb lags its reference,
+ * the lag compounds across the stride, and the trained policy falls at 1.5 s
+ * in simulation. With the torque between 0.8x and 1.3x of what the optimiser
+ * solved for it survives; at 0.5x it falls at 6.8 s. So this is not a
+ * refinement, and the scale has to be about right.
+ *
+ * Why it is separate from act_set_targets(): a target arrives with a command,
+ * at 250 Hz, and is then interpolated. The feedforward comes from the gait
+ * clock, which moves every tick, so latching it with the command would feed
+ * the drives a value up to 4 ms stale and a staircase instead of a curve.
+ *
+ * TORQUE IS CONVERTED HERE, not by the caller: Torque_FF on the wire is MOTOR
+ * Nm and these are output Nm, so each is divided by its own gear ratio
+ * (g_joint_gear). Velocity passes through unscaled - see the note on
+ * g_joint_gear about the ankles.
+ *
+ * Calling it with NULLs, or never calling it, leaves both at zero, which is
+ * what the firmware did before and is still what the single-leg test does.
+ */
+void act_set_feedforward(const float vel_turns_s[NEXUS_NUM_JOINTS],
+                         const float torque_out_nm[NEXUS_NUM_JOINTS]);
+
+/*
  * What each drive was last actually told, in output-shaft turns - the
  * interpolated value act_tick_1khz() put on the wire, not the target it was
  * working towards. Returns 0 if nothing is being driven, in which case the

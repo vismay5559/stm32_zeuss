@@ -64,10 +64,47 @@ SIDES = ("left", "right")
 #
 # Measured from the frames this file used to read, relative to the contact
 # point, in the foot frame. Identical on both feet to nine decimal places.
-SOLE_EDGE = {
-    "heel": np.array([ 0.104972816,  0.002389133, -0.000004580]),
-    "toe":  np.array([-0.104972816, -0.002389133,  0.000004580]),
-}
+# How far the sole reaches either side of the contact point, along the foot's
+# own fore-aft direction. The foot is 161 mm long and the contact frame sits at
+# its middle to within a millimetre.
+#
+# ONLY THE TWO LENGTHS ARE CONSTANTS. The DIRECTION is worked out from the URDF
+# at run time by sole_edges(), because it is the thing that went wrong: the old
+# values were a single vector along the foot frame's +X, shared by both feet,
+# measured from an export whose feet were 210 mm long and whose foot frames
+# happened to be aligned that way.
+#
+# In mukesh.urdf the fore-aft axis is the foot frame's Y, and the two feet are
+# MIRRORED - forward is -Y on the left and +Y on the right. So a shared vector
+# puts one foot's heel exactly where its toe should be, and a vector along X
+# puts both of them 80 mm out sideways. Either way the stance foot pivots about
+# a point that is not on the sole, the body trajectory is wrong by about a
+# decimetre, and the estimator is then measured against it. That is what it
+# cost: foot_z rms 0.108 m and 0.138 m of height drift.
+#
+# Re-derive after a new export (needs the workspace's meshes):
+#   project every foot-mesh vertex onto the forward axis in the foot frame and
+#   take the extremes either side of the contact point.
+SOLE_AHEAD_M  = 0.081047      # contact point -> toe edge
+SOLE_BEHIND_M = 0.079953      # contact point -> heel edge
+
+
+def sole_edges(robot):
+    """
+    {side: {"heel": v, "toe": v}} in each foot's OWN frame, from the URDF.
+
+    Forward is the robot's +X, which base_link declares; expressing it in the
+    foot frame is what makes this survive a re-export that rotates or mirrors
+    the feet.
+    """
+    f = robot.frames({})
+    out = {}
+    for side in SIDES:
+        R_foot = f[f"{side}_foot"][:3, :3]
+        fwd = R_foot.T @ np.array([1.0, 0.0, 0.0])
+        fwd = fwd / np.linalg.norm(fwd)
+        out[side] = {"toe": SOLE_AHEAD_M * fwd, "heel": -SOLE_BEHIND_M * fwd}
+    return out
 
 GRAVITY = 9.81
 ENC_COUNTS = 16384
@@ -271,7 +308,20 @@ def main(argv=None):
     ap.add_argument("--knee0", type=float, default=0.45)
     ap.add_argument("--knee-lift", type=float, default=0.30)
     ap.add_argument("--sway", type=float, default=0.04)
-    ap.add_argument("--spring", type=float, default=0.06, help="rad of knee spring wind-up at mid-stance")
+    # 0.004 rad is 0.23 deg, which is what the real spring actually does: the
+    # gait's peak knee torque is 10.8 Nm and the spring is 3437.75 Nm/rad, so
+    # 10.8 / 3437.75 = 0.0031 rad, and hip pitch's 13.6 Nm gives 0.0040.
+    #
+    # It was 0.06 - fifteen times that, and 206 Nm through this spring. It
+    # looked harmless while the spring's travel was believed to be 20 deg. Once
+    # ROBOT_SPRING_MAX_DEFLECTION_RAD became the policy's real +/-1.7 deg, the
+    # board started REJECTING every one of those readings as a deflection the
+    # spring cannot reach - correctly - and substituting zero, so the estimator
+    # lost its spring information through most of stance and its height drifted
+    # 0.14 m over 4.5 m of walking.
+    ap.add_argument("--spring", type=float, default=0.004,
+                    help="rad of knee spring wind-up at mid-stance "
+                         "(0.004 = the real spring at the gait's peak torque)")
     ap.add_argument("--roll", type=float, default=0.15, help="rad of heel-strike and toe-off foot roll")
     ap.add_argument("--heel-phase", type=float, default=0.15, help="part of stance on the heel alone")
     ap.add_argument("--toe-phase", type=float, default=0.80, help="part of stance after which only the toe is down")
@@ -327,18 +377,20 @@ def main(argv=None):
 
     A = []
 
+    edge = sole_edges(robot)
+
     def foot_world(i, s):
         st = gait.stance(i)
         heel, toe = gait.stance_pitch(i, s)
-        c_heel = (A[i] @ np.append(local[st] + SOLE_EDGE["heel"], 1.0))[:3]
-        c_toe = (A[i] @ np.append(local[st] + SOLE_EDGE["toe"], 1.0))[:3]
+        c_heel = (A[i] @ np.append(local[st] + edge[st]["heel"], 1.0))[:3]
+        c_toe = (A[i] @ np.append(local[st] + edge[st]["toe"], 1.0))[:3]
         return pivot(c_heel, heel) @ pivot(c_toe, toe) @ A[i]
 
     T_wb = T_wb0
     for i in range(gait.n):
         st = gait.stance(i)
         T_wF = T_wb @ robot.frames(gait.q(i, 0.0))[f"{st}_foot"]
-        c_heel = (T_wF @ np.append(local[st] + SOLE_EDGE["heel"], 1.0))[:3]
+        c_heel = (T_wF @ np.append(local[st] + edge[st]["heel"], 1.0))[:3]
         A.append(pivot(c_heel, gait.heel_strike(i)) @ T_wF)     # undo the landing roll
         T_wb = foot_world(i, 1.0) @ inv(robot.frames(gait.q(i, 1.0))[f"{st}_foot"])
 

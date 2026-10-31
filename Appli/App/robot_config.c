@@ -111,6 +111,44 @@ const uint8_t g_leg_springs[2][2] = {
 };
 
 /*
+ * Gear ratio per joint. 47:1 hip pitch and knee, 26:1 hip roll, 15:1 both
+ * ankles - confirmed on the assembled robot, 2026-10-31.
+ *
+ * The ankles read 9:1 in this repo until that date, from the first bench leg.
+ * test_leg_can.c's s_cmd_scale[] is the other live copy of this number.
+ */
+const float g_joint_gear[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch   */ 47.0f,
+    /* L hip_roll    */ 26.0f,
+    /* L knee_pitch  */ 47.0f,
+    /* L ankle_pitch */ 15.0f,
+    /* L ankle_roll  */ 15.0f,
+    /* R hip_pitch   */ 47.0f,
+    /* R hip_roll    */ 26.0f,
+    /* R knee_pitch  */ 47.0f,
+    /* R ankle_pitch */ 15.0f,
+    /* R ankle_roll  */ 15.0f,
+};
+
+/*
+ * Which joints have a spring between the motor and the limb. Only these get
+ * their target pre-deflected, and only these have an AS5047P - which is why
+ * NEXUS_NUM_ENCODERS is 4 and not 10.
+ */
+const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch   */ 1u,
+    /* L hip_roll    */ 0u,
+    /* L knee_pitch  */ 1u,
+    /* L ankle_pitch */ 0u,
+    /* L ankle_roll  */ 0u,
+    /* R hip_pitch   */ 1u,
+    /* R hip_roll    */ 0u,
+    /* R knee_pitch  */ 1u,
+    /* R ankle_pitch */ 0u,
+    /* R ankle_roll  */ 0u,
+};
+
+/*
  * Zero at count 0 means "no zero has been measured" - the deflection is then
  * just the raw angle wrapped into +/-pi, which is at least signed and
  * continuous rather than a 0..2pi ramp with a cliff in it.

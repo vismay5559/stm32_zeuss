@@ -3,7 +3,7 @@
  *
  * Reference answers from Pinocchio: double precision, J by central differences.
  *
- * model   zeus_26_mukesh_deploy/mukesh_description/urdf/mukesh.urdf
+ * model   stm32_zeuss/tools/model/mukesh.urdf
  * sha256  6457caaed8d4571bb5b4a72182dcb100023a053dbca8415affcd15150d16ecf3
  * tools   pin 2.7.0, numpy 1.26.4
  */

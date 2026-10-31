@@ -59,11 +59,15 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "Appli", "App")
 HOSTTEST = os.path.join(ROOT, "tools", "hosttest")
-# The policy's model, not ours. mukesh.urdf is what the network was trained
-# against; the estimator has to measure the same robot or every foot position
-# it reports is of a leg the policy has never seen.
-DEFAULT_URDF = os.path.join(os.path.dirname(ROOT), "zeus_26_mukesh_deploy",
-                            "mukesh_description", "urdf", "mukesh.urdf")
+# The policy's model. mukesh.urdf is what the network was trained against; the
+# estimator has to measure the same robot or every foot position it reports is
+# of a leg the policy has never seen.
+#
+# This reads the VENDORED copy in tools/model/, not the workspace's, so a
+# regeneration here and a regeneration in CI read the same bytes and neither
+# needs the Pi workspace checked out. tools/model/README.md has the refresh
+# procedure and the drift check.
+DEFAULT_URDF = os.path.join(ROOT, "tools", "model", "mukesh.urdf")
 
 # q, per leg. Must match the ZEUS_KIN_Q_* enum in zeus_kinematics.h (checked
 # below). Fixed by name, not by the URDF's nesting, so a re-export of the real
