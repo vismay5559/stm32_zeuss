@@ -98,18 +98,18 @@ Then verify, and do not skip this:
 If step 4 does not match step 1 the offset did not persist, and you have a
 per-power-up procedure rather than an absolute zero.
 
-### Ankle — motor-side encoder, 9:1, cannot persist
+### Ankle — motor-side encoder, 15:1, cannot persist
 
 This one does not work the same way, and it is worth being precise about why.
 
 ```
 joint range          ±35°  =  70° of output
-motor turns for that  70° × 9  =  630°  =  1.75 turns
+motor turns for that  70° × 15 =  1050° =  2.92 turns
 ```
 
 A **single-turn** absolute encoder repeats every 360° of motor shaft, which is
-40° of output. So a single reading is consistent with several different joint
-angles, 40° apart, and 1.75 turns of travel means the joint genuinely visits
+24° of output. So a single reading is consistent with several different joint
+angles, 24° apart, and 2.92 turns of travel means the joint genuinely visits
 more than one of them.
 
 **A single-turn absolute encoder on the motor side cannot determine this
@@ -135,7 +135,7 @@ absolute joint reference setup
   pos_vel_mapper offset, persisted by save_configuration.
   Only the ANKLE is declared here - put it at mechanical 0 deg
   before powering the STM32, because a motor-side encoder on a
-  9:1 cannot hold a zero across a power cycle.
+  15:1 cannot hold a zero across a power cycle.
   ankle     CAN 0x19: Set_Absolute_Position(0.0 turns)
   ankle     reference: pos_estimate=+0.000000 turns  [OK]
 ```

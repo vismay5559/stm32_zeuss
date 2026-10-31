@@ -149,13 +149,20 @@ Run `NEXUS_MODE_IMU` and look at the first bytes received:
 phases to match the ODrive S1. Every drive must be set to the same — one left at
 another rate, or in classic mode, is electrically fine and completely silent.
 
+Ten drives, five to a bus, is **8500 frames/s per bus**: `Set_Input_Pos` at
+500 Hz, encoder estimates at 1 kHz, heartbeat and torque at 100 Hz, times five
+nodes. At 65 µs a frame that is **56%** of the bus. It was 73% while commands
+went out at 1 kHz; `ODRV_CMD_DIVIDER` in `act_odrive.h` says why they no longer
+do. Raising the data rate is the weaker lever — ~30 µs of every frame is the
+1 Mbit arbitration phase, which no data rate shortens.
+
 **PB6 is only on the ST morpho header**, which is not fitted from the factory —
 it is the one signal here that needs CN12 populated.
 
 ### Node IDs — set these in odrivetool
 
-Joint index is **`bus * 4 + (node - 1)`**. Node IDs repeat per bus: each bus has
-its own nodes 1–4, so both legs use the same four numbers.
+Joint index is **`bus * 5 + (node - 1)`**. Node IDs repeat per bus: each bus has
+its own nodes 1–5, so both legs use the same five numbers.
 
 | Bus | Node | Joint | Packet index |
 |---|---|---|---|
@@ -163,14 +170,22 @@ its own nodes 1–4, so both legs use the same four numbers.
 | 0 | **2** | left hip roll | 1 |
 | 0 | **3** | left knee pitch | 2 |
 | 0 | **4** | left ankle pitch | 3 |
-| **1** — FDCAN2, PB6/PB5 | **1** | right hip pitch | 4 |
-| 1 | **2** | right hip roll | 5 |
-| 1 | **3** | right knee pitch | 6 |
-| 1 | **4** | right ankle pitch | 7 |
+| 0 | **5** | **left ankle roll** | 4 |
+| **1** — FDCAN2, PB6/PB5 | **1** | right hip pitch | 5 |
+| 1 | **2** | right hip roll | 6 |
+| 1 | **3** | right knee pitch | 7 |
+| 1 | **4** | right ankle pitch | 8 |
+| 1 | **5** | **right ankle roll** | 9 |
 
-Node 5 on each bus was the waist and is neither commanded nor expected. The RX
-filter still accepts it, so an ODrive left at node 5 shows up in the `unknown`
-counter rather than vanishing.
+**Node 5 used to be the waist**, which this robot does not have. It is ankle
+roll now — a driven joint like any other, added with protocol v10, and the
+reason the map is `bus * 5` rather than `bus * 4`. A drive still configured for
+the old eight-joint build will answer on the wrong index.
+
+Gear ratios: **47:1** hip pitch and knee, **26:1** hip roll, **15:1** both
+ankles. The ankles' encoders sit on the MOTOR side of their gearbox, so every
+position, velocity and torque number for them is in motor units — see
+`docs/ODRIVE_COMMANDS.md`.
 
 The ODrive arbitration ID is `node_id << 5 | cmd_id`, so node 1 occupies
 0x020–0x03F, node 2 0x040–0x05F, and so on.

@@ -12,7 +12,7 @@
  * carry a byte - and there was no way to watch a leg run except by printing a
  * CSV over the ST-LINK console and plotting it afterwards.
  *
- * With this, the leg test sends the SAME 444-byte packet at 1 kHz. Everything
+ * With this, the leg test sends the SAME 478-byte packet at 1 kHz. Everything
  * on the Pi side works unchanged: link_check, link_node, /zeus/state, Rerun.
  *
  * Only what the leg test actually has is filled in:
