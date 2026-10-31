@@ -164,7 +164,10 @@ are newer:
 
 - **`tools/model/mukesh.urdf` is vendored**, and `gen_kinematics.py` reads that
   copy, not the workspace's. Refresh all four steps together or CI fails —
-  `tools/model/README.md` has them.
+  `tools/model/README.md` has them. **Run
+  `tools/model/check_drift.sh` after pulling the workspace**: it is the one
+  model check CI cannot do, because the workspace is a private repo owned by
+  another personal account and a fine-grained token cannot be scoped to one.
 - **Commands go out at 500 Hz**, not 1 kHz (`ODRV_CMD_DIVIDER` in
   `act_odrive.h`). Tests counting frames on the wire use the `cmd_tick()`
   helper; tests measuring elapsed milliseconds use raw `ticks()`.

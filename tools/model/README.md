@@ -44,8 +44,43 @@ tools/hosttest/run.sh
 Pinocchio's. The venv needs the pins in `tools/requirements-kinematics.txt` —
 `pin==2.7.0` with `numpy<2`, because every 3.x/4.x wheel dies on import.
 
-## To turn check 3 on
+## Check 3 without CI — do this instead
 
-Add a fine-grained PAT with read access to
-`Maverick280306/zeus_26_mukesh_deploy` as the `WORKSPACE_TOKEN` repository
-secret.
+```bash
+tools/model/check_drift.sh                      # finds the sibling clone
+tools/model/check_drift.sh /path/to/workspace   # or say where it is
+```
+
+It compares all four hashes — upstream, vendored, pin, generated tables — and
+prints the refresh commands when they disagree. Run it after pulling the
+workspace. **This is the recommended way**, because it needs no credential at
+all and the laptop already has both clones.
+
+## Check 3 in CI, if you really want it
+
+**A fine-grained PAT cannot do this.** Fine-grained tokens can only be scoped
+to repositories owned by your own account or by an organisation you belong to,
+and the workspace is a private repo owned by **another personal account**
+(`Maverick280306`). It will not appear as a resource owner however you are
+added to the repo. That is a GitHub limitation, not a permissions problem.
+
+Three real options, best first:
+
+1. **Read-only deploy key.** The workspace's owner adds the public half to that
+   repo (Settings → Deploy keys, "Allow write access" OFF); you store the
+   private half here as a secret and have the checkout step use `ssh-key`. The
+   most tightly scoped thing available: one repo, read only, no account rights,
+   nothing else reachable if it leaks. Needs one action from the owner.
+
+2. **The owner creates the fine-grained token.** He *can* scope one to his own
+   repo, read-only on Contents, and hand it over for the `WORKSPACE_TOKEN`
+   secret. It authenticates as him and it expires, so it needs renewing.
+
+3. **A classic PAT of your own.** Works immediately with no involvement from
+   anyone, because classic tokens just carry your existing access. But the only
+   scope that reaches a private repo is `repo`, which is **read AND write on
+   every repository you can touch** — far more authority than this check needs.
+   Use it only if the alternatives are blocked, and revoke it when done.
+
+The workflow already has the plumbing: set `WORKSPACE_TOKEN` and the step stops
+skipping.

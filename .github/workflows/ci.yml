@@ -160,10 +160,19 @@ jobs:
       - name: Model drift NOT checked
         if: steps.workspace.outcome != 'success'
         run: |
-          echo "::warning title=Model drift not checked::zeus_26_mukesh_deploy could not be"
-          echo "cloned, so CI did NOT verify that tools/model/mukesh.urdf is still the"
-          echo "workspace's current model. Needs a read-only WORKSPACE_TOKEN secret - see"
-          echo "tools/model/README.md. Every other kinematics check DID run."
+          echo "::warning title=Model drift not checked::zeus_26_mukesh_deploy was not"
+          echo "cloned, so CI did NOT check whether tools/model/mukesh.urdf is still the"
+          echo "workspace's current model. Every other kinematics check DID run."
+          echo
+          echo "This is EXPECTED unless a WORKSPACE_TOKEN secret has been set, and it is"
+          echo "not a simple thing to set: the workspace is a private repo owned by"
+          echo "another personal account, and GitHub fine-grained tokens cannot be scoped"
+          echo "to one of those at all. The options are a read-only deploy key, a classic"
+          echo "PAT, or not bothering."
+          echo
+          echo "Not bothering is reasonable, because the check does not need CI: run"
+          echo "tools/model/check_drift.sh on any machine with both clones. See"
+          echo "tools/model/README.md."
 
   firmware:
     name: Firmware build (arm-none-eabi)
