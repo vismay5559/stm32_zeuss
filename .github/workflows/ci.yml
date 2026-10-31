@@ -13,7 +13,7 @@
 #                                        whatever variable is next and nothing
 #                                        says a word.
 #   estimator   - is the estimate right? Simulates a walk from the robot's
-#                                        URDF (zeus_26) with exact ground truth,
+#                                        URDF (the Pi workspace) with ground truth,
 #                                        runs the real fusion.c on the sensor
 #                                        data that walk produces, and fails if
 #                                        tilt, velocity or height are off. Also
@@ -94,38 +94,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The URDF lives in the Pi workspace repo.
-      - uses: actions/checkout@v4
+      # The URDF lives in the Pi workspace repo, which is PRIVATE while this
+      # repo is public. So the check is in two halves:
+      #
+      #   1. the generated tables against tools/model/mukesh_urdf.sha256, a
+      #      pinned hash committed here. Always runs, needs nothing external,
+      #      and catches the common mistake - hand-edited tables, or tables
+      #      from a different model.
+      #   2. that pin against the workspace's ACTUAL urdf, which catches the
+      #      model moving on. Needs the private repo, so it runs only when a
+      #      read-only WORKSPACE_TOKEN secret exists, and says so when not.
+      #
+      # See tools/model/README.md.
+      - name: Kinematics tables match the pinned model
+        run: |
+          want=$(cat tools/model/mukesh_urdf.sha256)
+          have=$(grep -m1 -o 'sha256  [0-9a-f]*' Appli/App/zeus_kinematics_model.h | cut -d' ' -f3)
+          if [ "$want" != "$have" ]; then
+            echo "zeus_kinematics_model.h was generated from a different URDF"
+            echo "  tables: $have"
+            echo "  pinned: $want"
+            echo "run: python tools/gen_kinematics.py   (then re-pin the sha256)"
+            exit 1
+          fi
+          echo "tables match the pinned model ($want)"
+
+      - name: Fetch the Pi workspace (for the model and the walk sim)
+        id: workspace
+        continue-on-error: true
+        uses: actions/checkout@v4
         with:
-          repository: vismay5559/zeus_26
-          path: zeus_26
+          repository: Maverick280306/zeus_26_mukesh_deploy
+          path: workspace
+          token: ${{ secrets.WORKSPACE_TOKEN }}
+
+      - name: The pinned model is still the workspace's model
+        if: steps.workspace.outcome == 'success'
+        run: |
+          urdf=workspace/mukesh_description/urdf/mukesh.urdf
+          want=$(sha256sum "$urdf" | cut -d' ' -f1)
+          have=$(cat tools/model/mukesh_urdf.sha256)
+          if [ "$want" != "$have" ]; then
+            echo "the workspace's URDF has moved on and the firmware has not"
+            echo "  pinned:    $have"
+            echo "  workspace: $want"
+            echo "run: python tools/gen_kinematics.py   (then re-pin the sha256)"
+            exit 1
+          fi
+          echo "the pin is current ($want)"
+
+      - name: NOT CHECKED - no workspace access
+        if: steps.workspace.outcome != 'success'
+        run: |
+          echo "::warning title=Model drift not checked::zeus_26_mukesh_deploy could not be"
+          echo "cloned, so CI did NOT verify that the pinned URDF is still the workspace's"
+          echo "current one, and the walk simulation did NOT run. Both need a read-only"
+          echo "WORKSPACE_TOKEN secret - see tools/model/README.md. The pinned-hash check"
+          echo "above DID run."
 
       - uses: actions/setup-python@v5
+        if: steps.workspace.outcome == 'success'
         with:
           python-version: '3.12'
 
       - name: Install Pinocchio
+        if: steps.workspace.outcome == 'success'
         run: pip install -r tools/requirements-kinematics.txt
 
-      # The generated tables carry the sha256 of the URDF they came from. If
-      # zeus_26 has a newer URDF, the firmware is still walking the old robot.
-      - name: Kinematics tables match the URDF
-        run: |
-          urdf=zeus_26/zeus_description/urdf/zeus.urdf
-          want=$(sha256sum "$urdf" | cut -d' ' -f1)
-          have=$(grep -m1 -o 'sha256  [0-9a-f]*' Appli/App/zeus_kinematics_model.h | cut -d' ' -f3)
-          if [ "$want" != "$have" ]; then
-            echo "zeus_kinematics_model.h was generated from a different zeus.urdf"
-            echo "  tables: $have"
-            echo "  URDF:   $want"
-            echo "run: python tools/gen_kinematics.py --urdf <zeus_26>/zeus_description/urdf/zeus.urdf"
-            exit 1
-          fi
-          echo "tables match $urdf ($want)"
-
       - name: Simulated walk through fusion.c
+        if: steps.workspace.outcome == 'success'
         env:
-          URDF: zeus_26/zeus_description/urdf/zeus.urdf
+          URDF: workspace/mukesh_description/urdf/mukesh.urdf
           OUT: sim_out
         run: tools/sim/run.sh --check
 
