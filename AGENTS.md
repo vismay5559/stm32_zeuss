@@ -15,6 +15,8 @@ firmware-specific quick start, so the two do not drift.
 (ten joints) and owns the URDF this firmware's kinematics are generated from.
 Any reference to `zeus_26` below or in `docs/` that survived is a bug.
 
+**[`HANDOFF.md`](HANDOFF.md) is where things stand right now** - what is done, what is not, what blocks the first walk, and what to do next. This file is the conventions and the traps; that one is the state.
+
 Push directly to `main`. Do not create branches.
 
 ## Two projects
