@@ -1,6 +1,31 @@
 #ifndef ACT_ODRIVE_H
 #define ACT_ODRIVE_H
 
+/*
+ * Set_Input_Pos goes out every OTHER tick - 500 Hz, not 1 kHz.
+ *
+ * 500 Hz is the rate the POLICY WAS TRAINED AT: zeus_env.py runs its drive law
+ * at DT_PHYS 0.002 and calls that "the only part that must run at 500 Hz". A
+ * board sending at 1 kHz is not more accurate, it is sending a rate nothing in
+ * training ever saw, four times faster than the 250 Hz command stream that
+ * feeds it, and each drive closes its own position loop at 8 kHz off whichever
+ * target arrived last either way.
+ *
+ * It is also half the bus. Set_Input_Pos was 5000 of the 11000 frames a second
+ * that ten drives generate; at 500 Hz the bus runs at 56% instead of 73%,
+ * which is better than buying a faster data phase would have given
+ * (4 Mbit at 1 kHz is 58%).
+ *
+ * ONLY this message is divided. Encoder estimates stay at 1 kHz because the
+ * estimator needs a fresh joint angle every tick, and the heartbeat and torque
+ * telemetry stay at 100 Hz.
+ *
+ * 4 (CMD_SEGMENT_TICKS) must stay a multiple of this, so the last tick of a
+ * segment is always a tick that transmits - otherwise the drive never receives
+ * the segment's endpoint and every command lands slightly short.
+ */
+#define ODRV_CMD_DIVIDER          2u
+
 #include <stdint.h>
 #include "link_proto.h"
 #include "robot_config.h"

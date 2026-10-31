@@ -104,9 +104,23 @@ extern const uint8_t g_leg_springs[2][2];
  * happens to sit), a slipped magnet, or a garbled read. The estimator treats
  * such a reading as unknown rather than bending the leg by it.
  *
- * TO MEASURE: the spring's mechanical travel. 20 degrees is a generous guess.
+ * This is the spring's MECHANICAL TRAVEL, from the policy's own model: the
+ * series spring is 3437.75 Nm/rad (60 Nm/deg) and bottoms out at +/-1.7 deg,
+ * which is 0.0297 rad. The policy clips its spring pre-deflection
+ * (tau_ff / K) to exactly that, so a guard looser than it would let the board
+ * believe a deflection the spring cannot physically reach.
+ *
+ * It was 0.35f - 20 degrees, described in this comment as "a generous guess".
+ * At 12x the real travel it rejected nothing: a garbled read of 15 degrees
+ * passed straight through into joint_pos and into the Pi's torque estimate,
+ * which is exactly the failure a hip encoder reading nonsense produces.
+ *
+ * STILL TO MEASURE on the bench, because 1.7 deg is the policy's model and not
+ * yet this robot: hold the motor, push the link to the spring's hard stop, and
+ * read the deflection. If the stop is further out than this, raise it here -
+ * but raise it to what was measured, not to a round number.
  */
-#define ROBOT_SPRING_MAX_DEFLECTION_RAD   0.35f
+#define ROBOT_SPRING_MAX_DEFLECTION_RAD   0.0297f
 
 /* ===================================================================== */
 /*  Drive gains                                                           */

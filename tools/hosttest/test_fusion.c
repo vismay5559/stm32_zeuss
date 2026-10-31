@@ -246,9 +246,9 @@ static void test_faulted_axis_invalidates_its_leg(void)
 
 /*
  * A series-elastic joint's real angle is the motor side plus the spring. So a
- * knee whose drive reads 0.10 rad with 0.05 rad of spring wind-up must put the
- * foot exactly where a rigid knee at 0.15 rad would - not at 0.10 (springs
- * ignored) and not at 0.05 (spring read as the joint angle), which are the two
+ * knee whose drive reads 0.10 rad with 0.02 rad of spring wind-up must put the
+ * foot exactly where a rigid knee at 0.12 rad would - not at 0.10 (springs
+ * ignored) and not at 0.02 (spring read as the joint angle), which are the two
  * ways this has been wrong before.
  */
 static float left_foot_z_after(float knee_drive_rad, float knee_spring_rad, uint8_t valid)
@@ -271,12 +271,17 @@ static void test_spring_deflection_adds_to_the_drive(void)
 {
     printf("a spring's deflection adds to its drive's angle\n");
 
-    float rigid   = left_foot_z_after(0.15f, 0.00f, 0x0Fu);
-    float sprung  = left_foot_z_after(0.10f, 0.05f, 0x0Fu);
+    /* 0.02 rad is 1.15 deg, inside the spring's +/-1.7 deg of travel. It was
+       0.05 rad, which the board now rejects as further than the spring can
+       physically bend (ROBOT_SPRING_MAX_DEFLECTION_RAD) - so the test was
+       feeding in a deflection this robot cannot produce, and the guard
+       catching it is correct behaviour, not a regression. */
+    float rigid   = left_foot_z_after(0.12f, 0.00f, 0x0Fu);
+    float sprung  = left_foot_z_after(0.10f, 0.02f, 0x0Fu);
     float ignored = left_foot_z_after(0.10f, 0.00f, 0x0Fu);
 
     CHECK(fabsf(sprung - rigid) < 1e-5f,
-          "drive 0.10 + spring 0.05 put the left foot at %f, a rigid 0.15 at %f",
+          "drive 0.10 + spring 0.02 put the left foot at %f, a rigid 0.12 at %f",
           (double)sprung, (double)rigid);
     CHECK(fabsf(ignored - rigid) > 1e-4f,
           "setup: 0.05 rad of knee made no difference to the foot");

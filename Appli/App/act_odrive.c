@@ -39,6 +39,10 @@ extern FDCAN_HandleTypeDef hfdcan2;
 /* Commands arrive at 250 Hz and are interpolated across the 1 kHz ticks between them. */
 #define CMD_SEGMENT_TICKS         4u
 
+/* ODRV_CMD_DIVIDER and why it is 2 are in act_odrive.h. */
+_Static_assert((CMD_SEGMENT_TICKS % ODRV_CMD_DIVIDER) == 0u,
+               "the segment endpoint would never be transmitted");
+
 /*
  * CAN FD with BRS, 1 Mbit arbitration / 2.5 Mbit data.
  *
@@ -126,6 +130,7 @@ static float    s_seg_end[NEXUS_NUM_JOINTS];
 static float    s_out[NEXUS_NUM_JOINTS];
 static float    s_prev_out[NEXUS_NUM_JOINTS];
 static uint32_t s_seg_tick;
+static uint32_t s_cmd_tick;     /* ticks since Set_Input_Pos last went out */
 static uint8_t  s_have_target;
 
 /* The gains every drive is given when it arms. Starts as the table in
@@ -300,6 +305,7 @@ void act_init(void)
     memset(s_prev_out, 0, sizeof(s_prev_out));
 
     s_seg_tick    = CMD_SEGMENT_TICKS;
+    s_cmd_tick    = 0u;
     s_have_target = 0;
 
     /* Start every joint at maximum age. Nothing has been heard from any drive
@@ -420,6 +426,7 @@ void act_disarm(void)
      */
     s_have_target = 0;
     s_seg_tick    = CMD_SEGMENT_TICKS;
+    s_cmd_tick    = 0u;
     s_arming      = 0;
 
     if (!s_disarmed)
@@ -840,6 +847,24 @@ void act_tick_1khz(void)
         s_seg_tick++;
     }
 
+    /*
+     * s_out is only advanced on a tick that TRANSMITS, so it always holds the
+     * value the drives were actually last given. The packet's act_target comes
+     * from it (act_get_targets), and that field means "what the drive was
+     * told" - computing a target every tick while sending every other one
+     * would publish a number no drive had received, which is the sort of
+     * quietly-wrong telemetry that sends someone tuning a gain that is fine.
+     *
+     * Sampling the same interpolation at 2 of the 4 segment ticks walks each
+     * drive along an identical path, just told at its midpoint and its end.
+     */
+    if (++s_cmd_tick < ODRV_CMD_DIVIDER)
+    {
+        act_tx_pump();
+        return;
+    }
+    s_cmd_tick = 0u;
+
     float alpha = (float)s_seg_tick / (float)CMD_SEGMENT_TICKS;
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
@@ -847,7 +872,11 @@ void act_tick_1khz(void)
         s_prev_out[j] = s_out[j];
         s_out[j]      = s_seg_start[j] + ((s_seg_end[j] - s_seg_start[j]) * alpha);
 
-        float vel_ff = (s_out[j] - s_prev_out[j]) * 1000.0f;
+        /* Over the interval between transmissions, not 1 ms. A vel_ff divided
+           by 1 ms while sending every 2 ms asks for twice the speed the
+           setpoint is really moving at. */
+        float vel_ff = (s_out[j] - s_prev_out[j]) *
+                       (1000.0f / (float)ODRV_CMD_DIVIDER);
 
         uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
         uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;

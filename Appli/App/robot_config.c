@@ -40,25 +40,53 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
  * AGAINST. They are here so a freshly flashed drive comes up with something
  * sane; the walk needs the numbers below instead.
  *
- * The policy's handoff (firmware_handoff/FIRMWARE_CHANGES.md item 5) gives the
- * trained stiffness, converted to the ODrive's own units on the OUTPUT shaft:
+ * The policy trained with KP/KD on the OUTPUT shaft, per joint class:
  *
- *     joint class                 KP      KD    pos_gain  vel_gain
- *     hip pitch, knee (47:1)     150      12      12.5      75.4
- *     hip roll (26:1)             60       4      15.0      25.1
- *     ankle pitch, ankle roll     30     1.2      25.0      7.54
+ *     class                     KP      KD     gear   encoder on
+ *     hip pitch, knee          150    12.0     47:1   load
+ *     hip roll                  60     4.0     26:1   load
+ *     ankle pitch, ankle roll   30     1.2     15:1   MOTOR
  *
- * with vel_integrator_gain 0 - training had no integrator at all, so the 50.0f
- * below is not a smaller version of the trained gain, it is a term that did not
- * exist. Simulation survives between x0.7 and x2.0 of the trained stiffness and
- * falls at x0.5, and today's hip value is about x0.32 of it.
+ * The ODrive's own law is  tau_motor = vel_gain * vel_err  and
+ * vel_setpoint = pos_gain * pos_err, both in turns of WHATEVER SHAFT THAT
+ * DRIVE'S ENCODER SITS ON, and its torque is always MOTOR torque. Converting:
  *
- * WHY THEY ARE NOT TYPED IN YET: the conversion assumes the drive's vel_gain
- * and Torque_FF are in OUTPUT Nm. If a drive reports motor-side torque instead,
- * both divide by that joint's gear ratio - a factor of 47 on the hip pitch -
- * and a gain wrong by 47x on a leg carrying the robot is not a tuning problem.
- * Confirm per drive which shaft its torque and its encoder refer to, then
- * replace this table wholesale.
+ *     pos_gain = KP / KD                      always - see below
+ *     vel_gain = KD * 2pi / N                 encoder on the load
+ *     vel_gain = KD * 2pi / N^2               encoder on the MOTOR
+ *
+ *     class                     pos_gain   vel_gain   vel_int
+ *     hip pitch, knee              12.5     1.6042        0
+ *     hip roll                     15.0     0.9666        0
+ *     ankle pitch, ankle roll      25.0     0.0335        0
+ *
+ * pos_gain is KP/KD whichever shaft the encoder is on, because it is a ratio
+ * of encoder units to encoder units per second - the gearbox cancels. vel_gain
+ * does NOT cancel: it carries motor Nm on one side and encoder turns/s on the
+ * other, so the ratio enters once for the torque and again, for the ankle
+ * only, because that encoder is before the gearbox. Hence 1/N^2 and an ankle
+ * vel_gain of 0.03 rather than 7.54.
+ *
+ * vel_integrator_gain is 0 because training had no integrator at all. The
+ * 50.0f below is not a smaller version of the trained gain, it is a term that
+ * did not exist. Simulation survives x0.7 to x2.0 of the trained stiffness and
+ * falls at x0.5.
+ *
+ * Torque feedforward follows the same rule: g_gait_tau is output Nm, so what
+ * goes into Torque_FF is g_gait_tau / N. Peaks become 0.29 Nm at hip pitch,
+ * 0.94 at hip roll, 0.23 at knee and 0.43 at the ankles. Nowhere near the
+ * int16 saturation at +/-32.767 Nm that mattered when these were thought to be
+ * output Nm - the live concern is now RESOLUTION, and 1 mNm against a 0.29 Nm
+ * peak is about 0.3%, which is fine.
+ *
+ * STILL TO CONFIRM PER DRIVE: which shaft each encoder is on. The table above
+ * takes hip pitch, knee and ankle from docs/ODRIVE_COMMANDS.md, which was
+ * written for the single-leg bench test - and HIP ROLL IS NOT IN IT, so its
+ * "load" is an assumption. Note too that robot_config.h above claims every
+ * drive reports output-shaft position with the ratio already applied, which
+ * contradicts that document's MOTOR entry for the ankle. One of the two is
+ * wrong and the drives themselves are the authority. Get this right before
+ * typing the table in: a vel_gain wrong by N^2 is a factor of 225.
  *
  * The ankle numbers below are worse than untuned: they were measured on a 9:1
  * ankle and this robot's ankles are 15:1. Ankle roll simply repeats ankle

@@ -203,6 +203,19 @@ static void ticks(int n)
     }
 }
 
+/*
+ * One COMMAND tick - ODRV_CMD_DIVIDER board ticks, which is how often
+ * Set_Input_Pos actually reaches a drive. The board loop runs at 1 kHz but
+ * addresses the motors at 500 Hz, the rate the policy was trained at
+ * (act_odrive.h says why), so a test that ticks once and looks for a frame
+ * finds nothing on half the ticks.
+ *
+ * Use this wherever a test is counting what went ON THE WIRE. Tests about
+ * elapsed milliseconds - staleness ages, arming retries - want raw ticks().
+ */
+static void cmd_tick(void)       { ticks((int)ODRV_CMD_DIVIDER); }
+static void cmd_ticks(int n)     { ticks(n * (int)ODRV_CMD_DIVIDER); }
+
 /* =====================================================================
  * MUST RUN FIRST - see the note at the top of the file.
  * ===================================================================== */
@@ -265,21 +278,24 @@ static void test_the_first_move_starts_from_where_the_leg_is(void)
     drive_reports_position(0, 1.0f, 0.0f);
 
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     /*
-     * Joint 0 knows where it is, so the first millisecond of the move should
-     * be a quarter of the way from THERE (1.0) to the target (2.0). Starting
-     * from the target instead would tell the drive "be somewhere else, now",
-     * and it would go there as fast as it physically can.
+     * Joint 0 knows where it is, so the first command of the move should be
+     * HALF the way from THERE (1.0) to the target (2.0). Half, not a quarter:
+     * the segment is still four board ticks long, but the drive is only
+     * addressed on two of them, so the first frame it sees is the segment's
+     * midpoint. Starting from the target instead would tell the drive "be
+     * somewhere else, now", and it would go there as fast as it physically
+     * can.
      */
     const host_can_frame_t *f0 = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f0 != NULL, "joint 0 was sent no position command at all");
     if (f0)
     {
-        CHECK(NEAR(get_f32(f0->data), 1.25f, 1e-6f),
-              "joint 0's first command was %.4f turns, expected 1.25 - a "
-              "quarter of the way from where it is",
+        CHECK(NEAR(get_f32(f0->data), 1.5f, 1e-6f),
+              "joint 0's first command was %.4f turns, expected 1.5 - half "
+              "the way from where it is",
               (double)get_f32(f0->data));
     }
 
@@ -309,10 +325,10 @@ static void test_an_old_or_nonsense_reading_is_not_used_as_a_start(void)
     ticks((int)ACT_POS_STALE_TICKS);          /* reading is now 100 ticks old */
     host_can_forget_sent();
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
-    CHECK(f && NEAR(get_f32(f->data), 1.25f, 1e-6f),
+    CHECK(f && NEAR(get_f32(f->data), 1.5f, 1e-6f),
           "a reading exactly %u ticks old was refused; it should still count",
           ACT_POS_STALE_TICKS);
 
@@ -322,7 +338,7 @@ static void test_an_old_or_nonsense_reading_is_not_used_as_a_start(void)
     ticks((int)ACT_POS_STALE_TICKS + 1);
     host_can_forget_sent();
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f && NEAR(get_f32(f->data), 2.0f, 1e-6f),
@@ -338,7 +354,7 @@ static void test_an_old_or_nonsense_reading_is_not_used_as_a_start(void)
     drive_reports_position(0, NAN, 0.0f);
     host_can_forget_sent();
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f != NULL, "joint 0 was sent no position command at all");
@@ -364,19 +380,25 @@ static void test_a_move_is_spread_over_four_ticks_and_then_stops(void)
     set_all_targets(1.0f);
 
     /*
-     * Commands arrive from the Pi at 250 Hz and the motors are addressed at
-     * 1 kHz, so each command is spread across the four ticks that follow it.
-     * A quarter, a half, three quarters, then there.
+     * Commands arrive from the Pi at 250 Hz and the segment is still spread
+     * over the four board ticks that follow - but the motors are addressed at
+     * 500 Hz, so the drive is told about the SECOND and FOURTH of those: the
+     * midpoint, then the endpoint. Half, then there.
+     *
+     * It still lands exactly on 1.0, which is the property that matters: a
+     * divider that did not divide CMD_SEGMENT_TICKS evenly would skip the
+     * endpoint and leave every move slightly short, and act_odrive.h has a
+     * static assert against precisely that.
      */
-    const float expected[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+    const float expected[2] = { 0.5f, 1.0f };
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 2; i++)
     {
         host_can_forget_sent();
-        act_tick_1khz();
+        cmd_tick();
 
         const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
-        CHECK(f != NULL, "no command on tick %d", i + 1);
+        CHECK(f != NULL, "no command on command-tick %d", i + 1);
         if (f)
         {
             CHECK(NEAR(get_f32(f->data), expected[i], 1e-6f),
@@ -393,12 +415,13 @@ static void test_a_move_is_spread_over_four_ticks_and_then_stops(void)
     for (int i = 0; i < 20; i++)
     {
         host_can_forget_sent();
-        act_tick_1khz();
+        cmd_tick();
 
         const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
         CHECK(f && NEAR(get_f32(f->data), 1.0f, 1e-6f),
-              "%d ticks after arriving, the leg was commanded to %.4f instead "
-              "of holding at 1.0", i + 1, f ? (double)get_f32(f->data) : 0.0);
+              "%d command-ticks after arriving, the leg was commanded to %.4f "
+              "instead of holding at 1.0", i + 1,
+              f ? (double)get_f32(f->data) : 0.0);
         CHECK(f && get_i16(&f->data[4]) == 0,
               "a leg that has arrived was still being told it is moving");
     }
@@ -423,8 +446,8 @@ static void test_a_fast_move_reports_a_capped_speed_not_a_reversed_one(void)
     drive_reports_position(0, 0.0f, 0.0f);
     host_can_forget_sent();
 
-    set_all_targets(1.0f);          /* a quarter turn per tick = 250 turns/s */
-    act_tick_1khz();
+    set_all_targets(1.0f);          /* half a turn per command tick = 250 turns/s */
+    cmd_tick();
 
     const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f != NULL, "no command sent");
@@ -441,7 +464,7 @@ static void test_a_fast_move_reports_a_capped_speed_not_a_reversed_one(void)
     host_can_forget_sent();
 
     set_all_targets(-1.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f != NULL, "no command sent");
@@ -627,7 +650,7 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     host_can_wire_blocked(0, 1);
 
     set_all_targets(1.0f);
-    ticks(5);                        /* 5 ticks x 5 joints = 25 commands */
+    cmd_ticks(5);                    /* 5 command ticks x 5 joints = 25 commands */
 
     CHECK(act_tx_dropped(0) == 7u,
           "the blocked wire lost %u commands; expected 25 sent minus the 18 "
@@ -659,7 +682,7 @@ static void test_a_refused_message_is_kept_not_thrown_away(void)
 
     /* The hardware refuses the very first message of this tick. */
     host_can_refuse_tx(0, 1u);
-    act_tick_1khz();
+    cmd_tick();
 
     /* It must still be there. Dropping it would leave one joint holding a
        position one command out of date, with nothing reporting anything. */
@@ -1076,7 +1099,7 @@ static void test_the_target_that_went_out_can_be_read_back(void)
     act_request_arm();
     all_drives_report_running();
     set_all_targets(1.0f);
-    ticks(1);
+    cmd_tick();
 
     CHECK(act_get_sent_targets(sent) == 1u, "a driving board claims it is not");
 
