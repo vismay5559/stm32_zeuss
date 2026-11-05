@@ -59,11 +59,7 @@
  * NEXUS_ENC_*), and confirmed against the wiring:
  *
  *     node 1 hip_pitch   node 2 hip_roll   node 3 knee   node 4 ankle
- *     node 5 ankle_roll
- *
- * Node 5 USED to be the waist, which this robot does not have. It is now
- * ankle roll - a driven joint like any other, and the reason the joint map
- * is bus * 5 + (node - 1) rather than bus * 4.
+ *     (node 5, the waist, is not part of this build)
  *
  * What is still NOT measured is every sign and offset in these tables. The
  * convention they must match is the URDF's: every pitch joint positive about
@@ -82,13 +78,12 @@ typedef struct
     float   offset;      /* radians added after the sign: the joint zero  */
 } joint_src_t;
 
-/* Slots in g_leg_joints[leg][], same order as ZEUS_KIN_Q_* 0..4. */
+/* Slots in g_leg_joints[leg][], same order as ZEUS_KIN_Q_* 0..3. */
 #define ROBOT_JOINT_HIP_PITCH    0
 #define ROBOT_JOINT_HIP_ROLL     1
 #define ROBOT_JOINT_KNEE         2
 #define ROBOT_JOINT_ANKLE        3
-#define ROBOT_JOINT_ANKLE_ROLL   4
-#define ROBOT_LEG_MOTORS         5
+#define ROBOT_LEG_MOTORS         4
 
 extern const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS];   /* [0]=left [1]=right */
 
@@ -104,23 +99,39 @@ extern const uint8_t g_leg_springs[2][2];
  * happens to sit), a slipped magnet, or a garbled read. The estimator treats
  * such a reading as unknown rather than bending the leg by it.
  *
- * This is the spring's MECHANICAL TRAVEL, from the policy's own model: the
- * series spring is 3437.75 Nm/rad (60 Nm/deg) and bottoms out at +/-1.7 deg,
- * which is 0.0297 rad. The policy clips its spring pre-deflection
- * (tau_ff / K) to exactly that, so a guard looser than it would let the board
- * believe a deflection the spring cannot physically reach.
+ * This is the spring's MECHANICAL TRAVEL. 0.0297 rad is +/-1.7 degrees, which
+ * with a stiffness of 3437.75 Nm/rad (60 Nm/deg) is the spring this robot has.
  *
- * It was 0.35f - 20 degrees, described in this comment as "a generous guess".
- * At 12x the real travel it rejected nothing: a garbled read of 15 degrees
- * passed straight through into joint_pos and into the Pi's torque estimate,
- * which is exactly the failure a hip encoder reading nonsense produces.
+ * It was 0.35f - 20 degrees, and this comment called it "a generous guess". At
+ * twelve times the real travel it rejected nothing: a garbled read of 15
+ * degrees passed straight through into joint_pos and into the Pi's torque
+ * estimate, which is exactly the failure a hip encoder reading nonsense
+ * produces. Tightening it immediately caught the walk simulation feeding in
+ * 0.06 rad of wind-up, which through this spring would be 206 Nm.
  *
- * STILL TO MEASURE on the bench, because 1.7 deg is the policy's model and not
- * yet this robot: hold the motor, push the link to the spring's hard stop, and
- * read the deflection. If the stop is further out than this, raise it here -
- * but raise it to what was measured, not to a round number.
+ * STILL TO MEASURE on the bench, because both numbers are modelled rather than
+ * weighed: hold the motor, push the limb to the spring's hard stop, read the
+ * deflection. If the stop is further out, raise this - but to what was
+ * measured, not to a round number.
  */
 #define ROBOT_SPRING_MAX_DEFLECTION_RAD   0.0297f
+
+/*
+ * Series spring stiffness at the OUTPUT shaft, Nm per radian.
+ *
+ * Nothing uses it at the moment. It earned its place when the drive command
+ * pre-deflected a series-elastic joint's target by tau/K, because the ODrive
+ * holds the MOTOR side and the limb sits behind the spring:
+ *
+ *     limb = motor + tau / K     =>     motor = ref - tau / K
+ *
+ * That went out with the ten-joint revert, because the gait table this build
+ * plays has no torque row to compute tau from. It is kept here because it is a
+ * measurement of a physical part, and because the pre-deflection is the right
+ * thing to do the moment there is a torque to do it with - see git history at
+ * 200d598.
+ */
+#define ROBOT_SPRING_K_NM_PER_RAD   3437.75f
 
 /* ===================================================================== */
 /*  Drive gains                                                           */
@@ -191,56 +202,6 @@ typedef struct
 } spring_enc_cal_t;
 
 extern const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS];
-
-/* ===================================================================== */
-/*  Gearing, and the spring the policy models                             */
-/* ===================================================================== */
-
-/*
- * Series spring stiffness at the OUTPUT shaft, Nm per radian.
- *
- * 3437.75 Nm/rad is 60 Nm/deg, and is the value the policy was trained
- * against. With ROBOT_SPRING_MAX_DEFLECTION_RAD (0.0297, +/-1.7 deg) it is the
- * whole spring model: the firmware uses it to pre-deflect a series-elastic
- * joint's target, because the drive holds the MOTOR side and the limb sits
- * behind the spring.
- *
- *     limb angle = motor angle + deflection,   deflection = tau / K
- *
- * so to put the limb at the reference the motor must go to ref - tau/K.
- * Without it the limb sits short by the wind-up every stride, in the same
- * direction, for the whole of stance - a bias, not noise.
- *
- * TO MEASURE: hang known masses at a known lever arm, read the deflection,
- * fit the line. Both this and the travel are the policy's numbers, not yet
- * this robot's.
- */
-#define ROBOT_SPRING_K_NM_PER_RAD   3437.75f
-
-/*
- * Gear ratio per joint, in NEXUS_J_* order.
- *
- * Needed because the ODrive's Torque_FF is always MOTOR torque while the gait
- * table's torques are at the output, so what goes on the wire is
- * g_gait_tau / g_joint_gear. Getting this wrong by a factor of 47 is not a
- * tuning error.
- *
- * NOTE this is NOT applied to position or velocity. robot_config.h above
- * states that every drive reports output-shaft position with the ratio
- * already applied, which is how the drives are expected to be configured, so
- * positions pass through 1:1. docs/ODRIVE_COMMANDS.md disagrees for the
- * ankles - it says their encoders sit on the MOTOR side - and if that is what
- * the drives actually do then their positions and velocities need this ratio
- * too. The drives are the authority; confirm before the first ankle move.
- */
-extern const float g_joint_gear[NEXUS_NUM_JOINTS];
-
-/*
- * 1 where a joint is series-elastic - a spring between the motor and the limb,
- * and therefore a joint whose target needs pre-deflecting. Hip pitch and knee
- * pitch on each leg. Everything else is rigid and gets no correction.
- */
-extern const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS];
 
 /* Convenience for anything that wants to say "this is not trustworthy yet". */
 /*

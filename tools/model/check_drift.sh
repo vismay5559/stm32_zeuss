@@ -3,10 +3,10 @@
 # Has the workspace's URDF moved on while our vendored copy stayed put?
 #
 # This is the one model check CI cannot do. The firmware's kinematics tables are
-# generated from mukesh.urdf, so if that file changes and nobody regenerates,
-# the board is measuring a DIFFERENT ROBOT from the one the policy was trained
-# on - every foot position it reports belongs to a leg the network has never
-# seen, and nothing else in the build would notice.
+# generated from the vendored URDF, so if the workspace's model changes and
+# nobody regenerates, the board is measuring a DIFFERENT ROBOT from the one the
+# CAD describes - every foot position it reports belongs to a leg that does not
+# exist, and nothing else in the build would notice.
 #
 # CI checks the tables against the vendored copy and the pin beside it, which
 # catches hand-edited tables and a half-done refresh. It cannot check the
@@ -24,13 +24,12 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VENDORED="$ROOT/tools/model/mukesh.urdf"
-PIN="$ROOT/tools/model/mukesh_urdf.sha256"
+VENDORED="$ROOT/tools/model/zeus.urdf"
+PIN="$ROOT/tools/model/zeus_urdf.sha256"
 
 WS="${1:-}"
 if [ -z "$WS" ]; then
-    for c in "$ROOT/../zeus_26_mukesh_deploy" "$HOME/zeus_26_mukesh_deploy" \
-             "$HOME/Downloads/zeus_26_mukesh_deploy"; do
+    for c in "$ROOT/../zeus_26" "$HOME/zeus_26" "$HOME/Downloads/zeus_26"; do
         [ -d "$c" ] && WS="$c" && break
     done
 fi
@@ -40,7 +39,7 @@ if [ -z "$WS" ] || [ ! -d "$WS" ]; then
     exit 1
 fi
 
-UPSTREAM="$WS/mukesh_description/urdf/mukesh.urdf"
+UPSTREAM="$WS/zeus_description/urdf/zeus.urdf"
 for f in "$VENDORED" "$PIN" "$UPSTREAM"; do
     if [ ! -f "$f" ]; then
         echo "missing: $f"
@@ -86,7 +85,7 @@ regenerating, or a regeneration without re-pinning, fails one of the checks
 above:
 
   cp "$UPSTREAM" tools/model/
-  sha256sum tools/model/mukesh.urdf | cut -d' ' -f1 > tools/model/mukesh_urdf.sha256
+  sha256sum tools/model/zeus.urdf | cut -d' ' -f1 > tools/model/zeus_urdf.sha256
   env -u PYTHONPATH ~/kinvenv/bin/python tools/gen_kinematics.py
   tools/hosttest/run.sh
 

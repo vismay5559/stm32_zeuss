@@ -5,8 +5,8 @@
 /*
  * Which telemetry index feeds each FK slot. The indices are the NEXUS_J_*
  * joint map in link_proto.h - node 1 hip_pitch, node 2 hip_roll, node 3 knee,
- * node 4 ankle_pitch, node 5 ankle_roll, left leg on bus 0 and right on bus 1.
- * Node 5 was the waist on an older robot, which this one does not have.
+ * node 4 ankle, left leg on bus 0 and right on bus 1. Node 5 on each bus would
+ * be a waist joint; this build has none.
  *
  * Every sign is +1 and every offset 0, which is another way of writing "not
  * measured". Both matter: the sign says whether the drive's positive
@@ -21,7 +21,6 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
         /* hip_roll    */ { NEXUS_J_L_HIP_ROLL,    1.0f, 0.0f },   /* node 2 */
         /* knee_pitch  */ { NEXUS_J_L_KNEE_PITCH,  1.0f, 0.0f },   /* node 3 */
         /* ankle_pitch */ { NEXUS_J_L_ANKLE_PITCH, 1.0f, 0.0f },   /* node 4 */
-        /* ankle_roll  */ { NEXUS_J_L_ANKLE_ROLL,  1.0f, 0.0f },   /* node 5 */
     },
     /* --- right leg, bus 1 --- */
     {
@@ -29,123 +28,56 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
         /* hip_roll    */ { NEXUS_J_R_HIP_ROLL,    1.0f, 0.0f },   /* node 2 */
         /* knee_pitch  */ { NEXUS_J_R_KNEE_PITCH,  1.0f, 0.0f },   /* node 3 */
         /* ankle_pitch */ { NEXUS_J_R_ANKLE_PITCH, 1.0f, 0.0f },   /* node 4 */
-        /* ankle_roll  */ { NEXUS_J_R_ANKLE_ROLL,  1.0f, 0.0f },   /* node 5 */
     },
 };
 
 /*
- * Starting gains, per joint, in the NEXUS_J_* order.
+ * Starting gains, per joint, in the NEXUS_J_* order. Hip pitch and knee carry
+ * the bench leg's tuned numbers; hip roll has never been tuned and starts
+ * where hip pitch did.
  *
- * THESE ARE STILL THE BENCH LEG'S, AND THEY ARE NOT WHAT THE POLICY TRAINED
- * AGAINST. They are here so a freshly flashed drive comes up with something
- * sane; the walk needs the numbers below instead.
+ * GEAR RATIOS, confirmed on the assembled robot 2026-10-31:
  *
- * The policy trained with KP/KD on the OUTPUT shaft, per joint class:
+ *     hip pitch, knee pitch   47:1   encoder on the load (output)
+ *     hip roll                26:1   encoder on the load - ASSUMED, not measured
+ *     ankle pitch             15:1   encoder on the MOTOR
  *
- *     class                     KP      KD     gear   encoder on
- *     hip pitch, knee          150    12.0     47:1   load
- *     hip roll                  60     4.0     26:1   load
- *     ankle pitch, ankle roll   30     1.2     15:1   MOTOR
+ * The ankle read 9:1 here and in docs/ODRIVE_COMMANDS.md until that date, from
+ * the first bench leg. It is 15:1. Anything scaled by the old 9 travels 9/15 =
+ * 0.6 of what it was asked for, which looks exactly like a gain that needs
+ * turning up. The other live copy of this number is s_cmd_scale[] in
+ * test_leg_can.c, which still reads 9.0f.
  *
- * The ODrive's own law is  tau_motor = vel_gain * vel_err  and
- * vel_setpoint = pos_gain * pos_err, both in turns of WHATEVER SHAFT THAT
- * DRIVE'S ENCODER SITS ON, and its torque is always MOTOR torque. Converting:
+ * WHICH SHAFT EACH NUMBER REFERS TO is the open question, and it decides
+ * whether these gains are right or out by a factor of the ratio squared:
  *
- *     pos_gain = KP / KD                      always - see below
- *     vel_gain = KD * 2pi / N                 encoder on the load
- *     vel_gain = KD * 2pi / N^2               encoder on the MOTOR
+ *   - the ODrive's position and velocity are turns of whatever shaft THAT
+ *     drive's encoder sits on, which is not the same shaft on every joint;
+ *   - its torque is always MOTOR torque;
+ *   - so pos_gain = KP/KD whichever shaft it is - a ratio of encoder units, so
+ *     the gearbox cancels - while vel_gain is KD*2pi/N on a load-side encoder
+ *     and KD*2pi/N^2 on a motor-side one.
  *
- *     class                     pos_gain   vel_gain   vel_int
- *     hip pitch, knee              12.5     1.6042        0
- *     hip roll                     15.0     0.9666        0
- *     ankle pitch, ankle roll      25.0     0.0335        0
- *
- * pos_gain is KP/KD whichever shaft the encoder is on, because it is a ratio
- * of encoder units to encoder units per second - the gearbox cancels. vel_gain
- * does NOT cancel: it carries motor Nm on one side and encoder turns/s on the
- * other, so the ratio enters once for the torque and again, for the ankle
- * only, because that encoder is before the gearbox. Hence 1/N^2 and an ankle
- * vel_gain of 0.03 rather than 7.54.
- *
- * vel_integrator_gain is 0 because training had no integrator at all. The
- * 50.0f below is not a smaller version of the trained gain, it is a term that
- * did not exist. Simulation survives x0.7 to x2.0 of the trained stiffness and
- * falls at x0.5.
- *
- * Torque feedforward follows the same rule: g_gait_tau is output Nm, so what
- * goes into Torque_FF is g_gait_tau / N. Peaks become 0.29 Nm at hip pitch,
- * 0.94 at hip roll, 0.23 at knee and 0.43 at the ankles. Nowhere near the
- * int16 saturation at +/-32.767 Nm that mattered when these were thought to be
- * output Nm - the live concern is now RESOLUTION, and 1 mNm against a 0.29 Nm
- * peak is about 0.3%, which is fine.
- *
- * STILL TO CONFIRM PER DRIVE: which shaft each encoder is on. The table above
- * takes hip pitch, knee and ankle from docs/ODRIVE_COMMANDS.md, which was
- * written for the single-leg bench test - and HIP ROLL IS NOT IN IT, so its
- * "load" is an assumption. Note too that robot_config.h above claims every
- * drive reports output-shaft position with the ratio already applied, which
- * contradicts that document's MOTOR entry for the ankle. One of the two is
- * wrong and the drives themselves are the authority. Get this right before
- * typing the table in: a vel_gain wrong by N^2 is a factor of 225.
- *
- * The ankle numbers below are worse than untuned: they were measured on a 9:1
- * ankle and this robot's ankles are 15:1. Ankle roll simply repeats ankle
- * pitch, which is also what the simulation assumed for it.
+ * Note that robot_config.h above states every drive reports output-shaft
+ * position with the ratio already applied, which contradicts the MOTOR entry
+ * for the ankle. The drives themselves are the authority; settle it before
+ * typing a tuned table in. Hang a known mass on a known lever arm and compare
+ * the drive's reported torque with m*g*r.
  */
 const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS] = {
     /* L hip_pitch   */ { 30.0f, 10.0f, 50.0f },
     /* L hip_roll    */ { 30.0f, 10.0f, 50.0f },
     /* L knee_pitch  */ { 30.0f, 10.0f, 50.0f },
     /* L ankle_pitch */ { 17.0f,  0.3f,  1.5f },
-    /* L ankle_roll  */ { 17.0f,  0.3f,  1.5f },
     /* R hip_pitch   */ { 30.0f, 10.0f, 50.0f },
     /* R hip_roll    */ { 30.0f, 10.0f, 50.0f },
     /* R knee_pitch  */ { 30.0f, 10.0f, 50.0f },
     /* R ankle_pitch */ { 17.0f,  0.3f,  1.5f },
-    /* R ankle_roll  */ { 17.0f,  0.3f,  1.5f },
 };
 
 const uint8_t g_leg_springs[2][2] = {
     { NEXUS_ENC_L_HIP_PITCH, NEXUS_ENC_L_KNEE_PITCH },
     { NEXUS_ENC_R_HIP_PITCH, NEXUS_ENC_R_KNEE_PITCH },
-};
-
-/*
- * Gear ratio per joint. 47:1 hip pitch and knee, 26:1 hip roll, 15:1 both
- * ankles - confirmed on the assembled robot, 2026-10-31.
- *
- * The ankles read 9:1 in this repo until that date, from the first bench leg.
- * test_leg_can.c's s_cmd_scale[] is the other live copy of this number.
- */
-const float g_joint_gear[NEXUS_NUM_JOINTS] = {
-    /* L hip_pitch   */ 47.0f,
-    /* L hip_roll    */ 26.0f,
-    /* L knee_pitch  */ 47.0f,
-    /* L ankle_pitch */ 15.0f,
-    /* L ankle_roll  */ 15.0f,
-    /* R hip_pitch   */ 47.0f,
-    /* R hip_roll    */ 26.0f,
-    /* R knee_pitch  */ 47.0f,
-    /* R ankle_pitch */ 15.0f,
-    /* R ankle_roll  */ 15.0f,
-};
-
-/*
- * Which joints have a spring between the motor and the limb. Only these get
- * their target pre-deflected, and only these have an AS5047P - which is why
- * NEXUS_NUM_ENCODERS is 4 and not 10.
- */
-const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS] = {
-    /* L hip_pitch   */ 1u,
-    /* L hip_roll    */ 0u,
-    /* L knee_pitch  */ 1u,
-    /* L ankle_pitch */ 0u,
-    /* L ankle_roll  */ 0u,
-    /* R hip_pitch   */ 1u,
-    /* R hip_roll    */ 0u,
-    /* R knee_pitch  */ 1u,
-    /* R ankle_pitch */ 0u,
-    /* R ankle_roll  */ 0u,
 };
 
 /*

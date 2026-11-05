@@ -164,7 +164,7 @@ typedef struct
 } leg_input_t;
 
 /*
- * Gather one leg's seven angles: five driven joints, two spring deflections.
+ * Gather one leg's eight angles.
  *
  * "fresh" answers whether this tick carries a NEW measurement, and only the
  * drives count. The contact update used to run every tick while the drives
@@ -183,16 +183,11 @@ static void leg_input(int leg,
                       leg_input_t *in)
 {
     static const uint8_t motor_q[ROBOT_LEG_MOTORS] = {
-        [ROBOT_JOINT_HIP_PITCH]  = ZEUS_KIN_Q_HIP_PITCH,
-        [ROBOT_JOINT_HIP_ROLL]   = ZEUS_KIN_Q_HIP_ROLL,
-        [ROBOT_JOINT_KNEE]       = ZEUS_KIN_Q_KNEE_PITCH,
-        [ROBOT_JOINT_ANKLE]      = ZEUS_KIN_Q_ANKLE_PITCH,
-        [ROBOT_JOINT_ANKLE_ROLL] = ZEUS_KIN_Q_ANKLE_ROLL,
+        [ROBOT_JOINT_HIP_PITCH] = ZEUS_KIN_Q_HIP_PITCH,
+        [ROBOT_JOINT_HIP_ROLL]  = ZEUS_KIN_Q_HIP_ROLL,
+        [ROBOT_JOINT_KNEE]      = ZEUS_KIN_Q_KNEE_PITCH,
+        [ROBOT_JOINT_ANKLE]     = ZEUS_KIN_Q_ANKLE_PITCH,
     };
-    _Static_assert(ROBOT_LEG_MOTORS == 5,
-                   "a driven joint was added or removed: motor_q must list "
-                   "every one, or the new joint is silently held at zero and "
-                   "the foot is reported where it is not");
     static const uint8_t spring_q[2] = {
         [ROBOT_SPRING_HIP]  = ZEUS_KIN_Q_HIP_PITCH_SPRING,
         [ROBOT_SPRING_KNEE] = ZEUS_KIN_Q_KNEE_PITCH_SPRING,

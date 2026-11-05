@@ -229,29 +229,9 @@ static void update_health_leds(void)
 
 static float s_phase;
 static float s_ref_turns[NEXUS_NUM_JOINTS];
-
-/*
- * The reference the DRIVES are given, which is not the one in the packet.
- *
- * s_ref_turns is the gait, and that is what goes out as ref_angle - the policy
- * reads it as part of its observation and rl_policy_node refuses to enable if
- * it differs from its own copy by more than a degree, so it has to stay the
- * pure gait.
- *
- * s_drive_ref_turns is the same thing with the series springs' pre-deflection
- * taken off, and is what safety.c bounds and the drives are commanded to. The
- * two differ by at most 0.23 deg, which is small enough to be invisible and
- * exactly the sort of difference that is worth two variables rather than one.
- */
-static float s_drive_ref_turns[NEXUS_NUM_JOINTS];
-static float s_gait_vel_turns[NEXUS_NUM_JOINTS];
-static float s_gait_tau_nm[NEXUS_NUM_JOINTS];
 static uint8_t s_gains_seq;   /* echo of the last gains message applied */
 
-static void build_reference(float phase,
-                            float ref_turns[NEXUS_NUM_JOINTS],
-                            float vel_turns_s[NEXUS_NUM_JOINTS],
-                            float tau_nm[NEXUS_NUM_JOINTS])
+static void build_reference(float phase, float ref_turns[NEXUS_NUM_JOINTS])
 {
     /* The right leg plays the table as generated; the left mirrors roll only. */
     static const struct
@@ -260,129 +240,28 @@ static void build_reference(float phase,
         uint8_t right;
         uint8_t col;
         float   left_sign;
-    } map[] = {
-        { NEXUS_J_L_HIP_PITCH,   NEXUS_J_R_HIP_PITCH,   GAIT_COL_HIP_PITCH,   1.0f },
-        { NEXUS_J_L_HIP_ROLL,    NEXUS_J_R_HIP_ROLL,    GAIT_COL_HIP_ROLL,   -1.0f },
-        { NEXUS_J_L_KNEE_PITCH,  NEXUS_J_R_KNEE_PITCH,  GAIT_COL_KNEE,        1.0f },
-        { NEXUS_J_L_ANKLE_PITCH, NEXUS_J_R_ANKLE_PITCH, GAIT_COL_ANKLE,       1.0f },
-        { NEXUS_J_L_ANKLE_ROLL,  NEXUS_J_R_ANKLE_ROLL,  GAIT_COL_ANKLE_ROLL, -1.0f },
+    } map[4] = {
+        { NEXUS_J_L_HIP_PITCH,   NEXUS_J_R_HIP_PITCH,   GAIT_COL_HIP_PITCH,  1.0f },
+        { NEXUS_J_L_HIP_ROLL,    NEXUS_J_R_HIP_ROLL,    GAIT_COL_HIP_ROLL,  -1.0f },
+        { NEXUS_J_L_KNEE_PITCH,  NEXUS_J_R_KNEE_PITCH,  GAIT_COL_KNEE,       1.0f },
+        { NEXUS_J_L_ANKLE_PITCH, NEXUS_J_R_ANKLE_PITCH, GAIT_COL_ANKLE,      1.0f },
     };
-    enum { MAP_CLASSES = (int)(sizeof(map) / sizeof(map[0])) };
 
-    /*
-     * Both ROLL joints mirror and both PITCH joints do not.
-     *
-     * The table is generated for the RIGHT leg. A pitch is in the sagittal
-     * plane, so the left leg's hip pitch sweeps the same way as the right one
-     * half a stride later - the phase shift below is the whole difference. A
-     * roll is in the frontal plane, where the two legs lean towards each other:
-     * the same physical motion is the opposite sign about the URDF's axis,
-     * which is why mukesh.urdf has left hip roll about +X and right about -X.
-     * Dropping either -1.0f makes the robot roll both legs the same way and
-     * fall sideways on the first step.
-     *
-     * The loop below zeroes all ten joints first, so a joint missing from this
-     * map is not left out of the packet - it is published as a confident
-     * ref_angle of 0.0 and driven there, indistinguishable from a joint the
-     * gait genuinely holds still. The assert is what makes that impossible to
-     * forget: it ties the map to the drive count, not to a literal.
-     */
-    _Static_assert(MAP_CLASSES == ROBOT_LEG_MOTORS,
-                   "every driven joint needs a gait column: a joint missing "
-                   "from map[] is silently commanded to the gait's zero");
-    _Static_assert(GAIT_JOINTS == ROBOT_LEG_MOTORS,
-                   "the gait table and the drive count disagree");
+    float right[GAIT_JOINTS];
+    float left[GAIT_JOINTS];
 
-    float right[GAIT_JOINTS],  left[GAIT_JOINTS];
-    float rvel[GAIT_JOINTS],   lvel[GAIT_JOINTS];
-    float rtau[GAIT_JOINTS],   ltau[GAIT_JOINTS];
-
-    gait_sample_all(phase,        right, rvel, rtau);
-    gait_sample_all(phase + 0.5f, left,  lvel, ltau);   /* half a stride behind */
+    gait_sample(phase, right);
+    gait_sample(phase + 0.5f, left);        /* half a stride behind */
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        ref_turns[j]   = 0.0f;
-        vel_turns_s[j] = 0.0f;
-        tau_nm[j]      = 0.0f;
+        ref_turns[j] = 0.0f;
     }
 
-    for (int k = 0; k < MAP_CLASSES; k++)
+    for (int k = 0; k < 4; k++)
     {
-        uint8_t L = map[k].left, R = map[k].right;
-        uint8_t c = map[k].col;
-        float   sg = map[k].left_sign;
-
-        /*
-         * The sign flip is the LEG's, not the quantity's, so velocity and
-         * torque take it as well as position. A left roll whose position
-         * mirrors while its torque does not is a joint being pushed one way
-         * and commanded the other.
-         */
-        ref_turns[L]   = left[c] * sg;
-        vel_turns_s[L] = lvel[c] * sg;
-        tau_nm[L]      = ltau[c] * sg;
-
-        ref_turns[R]   = right[c];
-        vel_turns_s[R] = rvel[c];
-        tau_nm[R]      = rtau[c];
-    }
-
-    /*
-     * The gait's velocity is quoted at nominal playback - one stride per
-     * GAIT_CYCLE_S. Playing the clock at any other rate has to scale it by the
-     * same factor, or the drive is told to travel at a speed the position
-     * setpoint is not going to reach.
-     */
-    if (APP_GAIT_SPEED != 1.0f)
-    {
-        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
-        {
-            vel_turns_s[j] *= APP_GAIT_SPEED;
-        }
-    }
-}
-
-/*
- * Take the series springs' wind-up off the targets the drives are given.
- *
- * The ODrive holds the MOTOR side of a series-elastic joint and the limb sits
- * behind the spring, so under torque tau the spring winds up by tau/K and the
- * limb ends up SHORT of where the motor was told to be:
- *
- *     limb = motor + tau / K        =>        motor = ref - tau / K
- *
- * Without this the limb trails the reference by the wind-up for the whole of
- * stance, every stride, in the same direction - a systematic bias, which the
- * policy cannot learn around because its simulator did not have one.
- *
- * Clamped to the spring's mechanical travel, because beyond that the spring is
- * on its stop and a larger correction is describing a deflection that cannot
- * exist. A wrong torque number therefore costs at most 1.7 deg of target.
- */
-static void apply_spring_predeflection(const float ref_turns[NEXUS_NUM_JOINTS],
-                                       const float tau_nm[NEXUS_NUM_JOINTS],
-                                       float out_turns[NEXUS_NUM_JOINTS])
-{
-    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
-    {
-        out_turns[j] = ref_turns[j];
-
-        if (!g_joint_is_sea[j])
-        {
-            continue;
-        }
-
-        float d = tau_nm[j] / ROBOT_SPRING_K_NM_PER_RAD;     /* rad at output */
-
-        if (!isfinite(d))
-        {
-            continue;
-        }
-        if (d >  ROBOT_SPRING_MAX_DEFLECTION_RAD) { d =  ROBOT_SPRING_MAX_DEFLECTION_RAD; }
-        if (d < -ROBOT_SPRING_MAX_DEFLECTION_RAD) { d = -ROBOT_SPRING_MAX_DEFLECTION_RAD; }
-
-        out_turns[j] -= d / 6.28318530718f;                  /* rad -> turns  */
+        ref_turns[map[k].left]  = left[map[k].col] * map[k].left_sign;
+        ref_turns[map[k].right] = right[map[k].col];
     }
 }
 
@@ -608,16 +487,7 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
         s_phase -= 1.0f;
     }
 
-    build_reference(s_phase, s_ref_turns, s_gait_vel_turns, s_gait_tau_nm);
-    apply_spring_predeflection(s_ref_turns, s_gait_tau_nm, s_drive_ref_turns);
-
-    /*
-     * Hand the drives the gait's own velocity and torque for this tick. Every
-     * tick, because the gait clock moves every tick while a command only
-     * arrives every fourth one - latching these with the command would feed a
-     * value up to 4 ms stale.
-     */
-    act_set_feedforward(s_gait_vel_turns, s_gait_tau_nm);
+    build_reference(s_phase, s_ref_turns);
 
     /* The packet reports the reference in radians on the output side, the same
        units and convention as joint_pos, so the Pi can subtract them. The
@@ -701,7 +571,7 @@ void app_run(void)
              * bounds are applied to the number the drives will actually be
              * given rather than to the correction on its own.
              */
-            if (safety_accept_command(&cmd, s_drive_ref_turns, targets))
+            if (safety_accept_command(&cmd, s_ref_turns, targets))
             {
                 act_set_targets(targets);
             }

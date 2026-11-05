@@ -1,155 +1,107 @@
-# Handoff — `stm32_zeuss`, as of 2026-10-31
+# Handoff — `stm32_zeuss`, as of 2026-11-06
 
-Written for an agent or engineer picking this up cold, in either this repo or
-the Pi workspace. **Read [`AGENTS.md`](AGENTS.md) first** for the build
-commands, the five things that will bite you, and the conventions. This file is
-only *where things stand right now and what to do next*, which AGENTS.md
-deliberately does not carry.
+Written for an agent or engineer picking this up cold. **Read
+[`AGENTS.md`](AGENTS.md) first** for the build commands, the five things that
+will bite you, and the conventions. This file is only *where things stand and
+what to do next*, which AGENTS.md deliberately does not carry.
 
-`HEAD` at writing: **`92339c6`**. CI green, all 14 host suites pass, firmware
-builds.
+CI green, all 14 host suites pass, firmware builds, walk simulation passes.
 
 ---
 
-## The one-paragraph version
+## The robot this firmware is built for
 
-Zeus is a **10-DOF biped**: five joints a leg — hip pitch, hip roll, knee
-pitch, ankle pitch, **ankle roll** — driven by ODrive S1 over two CAN-FD buses.
-There is **no waist**. An STM32H7 runs a 1 kHz loop doing all sensing, the
-state estimate, the stored gait and every safety decision, and streams a
-478-byte state packet to a Raspberry Pi 5 every millisecond over USB. The Pi
-runs a trained RL policy that answers with a **residual** at 250 Hz. The board
-drives each joint to `stored gait + residual`, so **a policy sending zeros
-walks the stored gait**.
+**8 actuated joints, four a leg** — hip pitch, hip roll, knee pitch, ankle
+pitch — on ODrive S1 over two CAN-FD buses, four nodes each. **No waist, and no
+ankle roll.** Protocol **v9**, 426-byte state packet at 1 kHz, 44-byte command
+at ~250 Hz.
 
-The firmware is now aligned with the policy: protocol v10, the policy's gait
-table, its spring model, its command rate and its feedforward. **It has never
-been flashed in this configuration and no joint has ever moved under it.**
+> **This repo was briefly taken to 10 joints** (ankle roll on node 5, protocol
+> v10) for the RL policy in `zeus_26_mukesh_deploy`, and **reverted on
+> 2026-11-06** because the robot went back to the eight-actuator design. If you
+> need any of that work it is in git history — `03285b8` through `6feb3b9`, and
+> `200d598` in particular has the torque feedforward, the spring pre-deflection
+> and the 500 Hz command rate. **Do not take facts from those commits without
+> checking them against the current tree.**
+
+What survived the revert, because it is true at any joint count: the **gear
+ratios** (47:1 hip pitch and knee, 26:1 hip roll, **15:1 ankle**), the
+**spring travel and stiffness**, the **IMU on USART2**, the vendored model and
+drift check, and this file.
 
 ## Where the work actually is
 
 | | state |
 |---|---|
 | USB link | **done and measured**: 1000.0 Hz at the board, 100% delivered, worst gap 1.28 ms over 60 s |
-| Protocol v10 | **done**: 478/52/130 bytes, 50-float policy block, `check_proto.py` agrees with the workspace field-for-field |
-| Kinematics | **done**: 7-number joint vector per leg, matched to Pinocchio 2.7.0 |
-| Gait + feedforward | **done**: position, velocity and torque tables, spring pre-deflection, commands at 500 Hz |
-| Estimator | **done in simulation**: velocity rms 0.019 m/s, tilt rms 0.247°, height drift 0.015 m over 4.49 m |
-| **Start sequencing** | **NOT DONE** — handoff item 4 |
-| **Joint envelope** | **NOT DONE** — handoff item 6, still `±10` turns |
-| **Gains** | **NOT DONE** — bench leg's values, wrong by ~3x and in unconfirmed units |
-| **Calibration** | **NOT DONE** — and it blocks everything, see below |
+| Protocol v9 | **done**: `check_proto.py` agrees C against Python, 8 joints |
+| Kinematics | **done**: 6-number joint vector per leg, matched to Pinocchio 2.7.0 |
+| Estimator | **done in simulation**: velocity rms 0.018 m/s, tilt rms 0.246°, height drift 0.014 m over 4.38 m |
+| CAN | **wired, never confirmed** — see below |
+| IMU | **wired, never confirmed** |
+| Spring encoders | **not wired yet** |
+| **Calibration** | **NOT DONE**, and it gates the estimator |
+| **Gains** | bench leg's values, and the ankle's predate the 15:1 gearbox |
 
-The authoritative list is
-`../zeus_26_mukesh_deploy/firmware_handoff/FIRMWARE_CHANGES.md`. Items 1, 2, 3,
-5 (partly) and 7 are done. **Items 4 and 6 are not.**
-
-## Three things that block the first walk
+## Three things to confirm before anything moves
 
 **1. `ROBOT_CONFIG_CALIBRATED` is 0** (`Appli/App/robot_config.h`). While it is
-0 the estimator refuses to report `NEXUS_FUSION_OK` however well its covariance
+0 the estimator will not report `NEXUS_FUSION_OK` however well its covariance
 converges — deliberately, because a converged filter on guessed geometry is
-confidently wrong. And `rl_policy_node` **will not engage** until `fused_valid`
-reads OK. So the policy cannot arm at all today.
+confidently wrong.
 
-Setting it to 1 honestly requires measuring, on the robot:
+It needs, measured on the robot:
 
-- every **sign and offset** in `g_leg_joints[2][5]` — all ten are `+1.0, 0.0`,
-  which is another way of writing "not measured". Put the robot in the URDF's
-  zero pose, read each drive, store the negated reading as the offset; then
-  move each joint by hand in its URDF-positive direction (pitch about +Y, roll
-  about +X) and flip the sign if the reading went the other way.
+- every **sign and offset** in `g_leg_joints[2][4]` — all eight are
+  `+1.0, 0.0`, which is another way of writing "not measured". Put the robot in
+  the URDF's zero pose, read each drive, store the negated reading as the
+  offset; then move each joint by hand in its URDF-positive direction (pitch
+  about +Y, roll about +X) and flip the sign if the reading went the other way.
 - every **spring encoder zero and sign** in `g_spring_enc[4]` — all
-  `{0u, 1.0f}`, same meaning. Unload the leg, read the raw counts off the
-  console, store them; then hold the motor and push the limb positive — the
-  deflection must read positive.
+  `{0u, 1.0f}`, same meaning. Those four are not wired yet.
 
 **2. The firmware is built as `NEXUS_MODE_LEG_CAN`** (`Appli/App/nexus_mode.h`
 line 40), the single-leg bench test. It only talks to bus 0 and most of the
 packet reads as deliberately absent. **Set `NEXUS_MODE_ROBOT` and reflash**
 before expecting anything from the right leg.
 
-**3. CAN was last seen dead** — a bus scan found nothing, `TEC=0 REC=0`. `TEC=0`
-is the informative half: the board never attempted a transmission that failed,
-so it is not detecting a bus fault, there is simply nothing answering. That
-predates the ISO1042B transceivers being fitted and the per-drive config pass,
-so **retest before believing it**. All ten drives must answer, FD with BRS,
-1 Mbit arbitration / 2.5 Mbit data, sample point 87.5%, and **node 5 on each
-bus** is new (ankle roll) and may never have been configured.
+**3. CAN has never been confirmed working.** The last scan found nothing,
+`TEC=0 REC=0` — and `TEC=0` is the informative half: the board never attempted
+a transmission that failed, so it was not detecting a bus fault, there was
+simply nothing answering. That predates the ISO1042B transceivers being fitted,
+so **retest**. Expect **exactly 8 drives**, nodes 1–4 on each bus; anything
+answering on node 5 is a drive still configured from the ten-joint attempt.
 
-## Item 4 — the start sequence, and why it needs a gantry
+## Gains — read before typing any in
 
-`s_phase` free-runs from boot, so arming happens at an arbitrary point in the
-stride and jumps straight to `ref`. Both have to change:
+The ankle's `17.0 / 0.3 / 1.5` was measured on a **9:1** ankle and this robot's
+is **15:1**, so it is worse than untuned. Hip roll has never been tuned at all
+and starts where hip pitch did.
 
-1. hold `s_phase` at 0 until the drives are armed,
-2. on arm, ramp each joint from where it is to `ref(0)`, then hold,
-3. release the clock on a start condition.
+The open question is **which shaft each drive's numbers refer to**:
+position and velocity are turns of whatever shaft that drive's encoder sits on,
+which is not the same shaft on every joint, while torque is always **motor**
+torque. So `pos_gain` is a ratio of encoder units and the gearbox cancels, but
+`vel_gain` does not — it is `KD·2π/N` on a load-side encoder and `KD·2π/N²` on
+a motor-side one, a factor of 225 apart at the ankle.
 
-The policy never trained a transition from standing. From rest at the reference
-pose it survived from phase 0.95 to 0.30 and **fell within 1.5 s from 0.40,
-0.50, 0.60, 0.75 and 0.90**. `rl_policy_node` will not engage outside that
-window or with any joint more than 5° from `ref`.
-
-**`ref(0)` has the left foot in the air** — single support — so the robot
-cannot stand there unaided. The first run needs a gantry, with the robot
-lowered as the clock releases. Start pose in degrees:
-
-| | hip pitch | hip roll | knee | ankle pitch | ankle roll |
-|---|---:|---:|---:|---:|---:|
-| left | +6.26 | −6.19 | +19.00 | −26.18 | +7.13 |
-| right | −17.01 | +6.76 | +18.14 | −1.22 | −6.27 |
-
-## Item 6 — the joint envelope
-
-`SAFETY_POS_MIN_TURNS` / `MAX_TURNS` are `±10` turns, placeholders for all ten
-joints. `FIRMWARE_CHANGES.md` §6 has the per-joint reach of the gait plus the
-largest possible residual. Clamp to the mechanical stop where that is tighter.
-Ankle roll runs into the model's ±25° limit by design at full residual.
-
-## Gains — read this before typing any in
-
-The policy trained with KP/KD on the **output** shaft. The conversion to the
-ODrive's own units is written out above `g_drive_gains[]` in `robot_config.c`,
-and the short version is:
-
-```
-pos_gain = KP / KD          always — a ratio of encoder units, the gearbox cancels
-vel_gain = KD · 2π / N      encoder on the load
-vel_gain = KD · 2π / N²     encoder on the MOTOR  (both ankles)
-```
-
-| class | KP | KD | `pos_gain` | `vel_gain` |
-|---|---:|---:|---:|---:|
-| hip pitch, knee (47:1) | 150 | 12 | 12.5 | 1.6042 |
-| hip roll (26:1) | 60 | 4 | 15.0 | 0.9666 |
-| ankle pitch, ankle roll (15:1) | 30 | 1.2 | 25.0 | 0.0335 |
-
-`vel_integrator_gain` is **0** — training had no integrator, so the `50.0f` in
-the table is not a smaller version of it, it is a term that did not exist.
-
-**The one open question.** This assumes hip pitch, knee and hip roll report
-position at the load and the ankles at the motor, per `docs/ODRIVE_COMMANDS.md`.
-`robot_config.h` claims every drive reports output-shaft position with the ratio
-already applied, which contradicts it for the ankles, and **hip roll's encoder
-placement has never been measured at all**. The drives themselves are the
-authority. A `vel_gain` wrong by N² is a factor of 225.
-
-Torque is settled: `Torque_FF` is **always motor torque**, so what goes on the
-wire is `g_gait_tau / N`.
+`robot_config.h` claims every drive reports output-shaft position with the
+ratio already applied; `docs/ODRIVE_COMMANDS.md` says the ankle is motor-side.
+**The drives are the authority.** Settle it with a known mass on a known lever
+arm, comparing the drive's reported torque against `m·g·r`.
 
 ## Still unmeasured, and what each one costs
 
 | quantity | where | why it matters |
 |---|---|---|
-| joint signs and offsets | `g_leg_joints` | blocks arming; a wrong sign drives a leg into the floor |
+| joint signs and offsets | `g_leg_joints` | gates the estimator; a wrong sign drives a leg into the floor |
 | spring zeros and signs | `g_spring_enc` | corrupts `joint_pos` and the torque estimate by up to ±π |
-| spring rate and travel | `ROBOT_SPRING_*` | 3437.75 Nm/rad and ±1.7° are the *policy's* numbers, not this robot's |
+| spring rate and travel | `ROBOT_SPRING_*` | 3437.75 Nm/rad and ±1.7° are modelled, not weighed |
 | foot switch debounce | `contact.c`, 3/8 ticks | feeds the contact constraint, so it sets the velocity estimate too |
-| real torque/velocity limits | the URDF's 25 Nm / 20 rad/s | placeholders; a policy trained with more torque than exists fails instantly |
-| rotor inertia, joint friction | absent from the URDF | reflected rotor inertia scales by N², so 225× at the ankles |
+| real torque/velocity limits | the URDF's 25 Nm / 20 rad/s | placeholders |
+| rotor inertia, joint friction | absent from the URDF | reflected rotor inertia scales by N², so 225× at the ankle |
 | mass and CoM | never weighed | sets the pendulum frequency, which sets the gait timing |
-| command latency | never measured | Pi → USB → board → CAN → motion. Policies are very sensitive to action delay |
+| command latency | never measured | Pi → USB → board → CAN → motion |
 
 The **hip load encoder reads garbage** and the prime suspect is mechanical:
 `docs/PINOUT.md` has the magnet checklist (6 × 2.5 mm diametric, centred within
@@ -158,30 +110,21 @@ warps the field and the chip reports no error at all).
 
 ## Things that will waste your time
 
-AGENTS.md has the five big ones (USBREGEN cleared, OTG DMA off, no synchronous
-printf in the loop, XSPI2 not re-initialised, DMA buffers non-cacheable). These
-are newer:
+AGENTS.md has the five big ones. These are newer:
 
-- **`tools/model/mukesh.urdf` is vendored**, and `gen_kinematics.py` reads that
+- **`tools/model/zeus.urdf` is vendored**, and `gen_kinematics.py` reads that
   copy, not the workspace's. Refresh all four steps together or CI fails —
-  `tools/model/README.md` has them. **Run
-  `tools/model/check_drift.sh` after pulling the workspace**: it is the one
-  model check CI cannot do, because the workspace is a private repo owned by
-  another personal account and a fine-grained token cannot be scoped to one.
-- **Commands go out at 500 Hz**, not 1 kHz (`ODRV_CMD_DIVIDER` in
-  `act_odrive.h`). Tests counting frames on the wire use the `cmd_tick()`
-  helper; tests measuring elapsed milliseconds use raw `ticks()`.
-- **`ref_angle` in the packet is the pure gait**, deliberately not the
-  pre-deflected value the drives get. `rl_policy_node` validates it to 1°.
-- **The gait table must not be smoothed.** The knee steps 0.475° across the
-  stride wrap. The policy trained on that exact table.
-- **`test_leg_can.c` holds the user's uncommitted bench edits. Stage only your
-  own changes.** Its `s_cmd_scale[]` still reads `9.0f` and needs `15.0f` — the
-  ankles are 15:1 — but that is the user's file to change.
+  `tools/model/README.md` has them. **Run `tools/model/check_drift.sh`** after
+  pulling the workspace; it compares all four hashes and is the one model check
+  CI may not be able to do.
 - **`tools/sim/` is a KINEMATIC walk, not physics.** Nothing in it balances or
-  falls over; it tests whether the estimator can track a known motion. The
-  "falls at 1.5 s" figures come from the *policy's* MuJoCo sim in the
-  workspace, which is a different program.
+  falls over; it tests whether the estimator can track a known motion.
+- **`test_leg_can.c` holds the user's uncommitted bench edits. Stage only your
+  own changes.** Its `s_cmd_scale[]` still reads `9.0f` and needs `15.0f`, but
+  that is the user's file to change.
+- **The spring guard is 0.0297 rad (±1.7°), not 0.35.** Anything feeding a
+  larger deflection — a test fixture, the walk simulation — is simulating a
+  spring this robot does not have, and the board will correctly reject it.
 
 ## Commands
 
@@ -189,13 +132,13 @@ are newer:
 for d in /opt/st/stm32cubeide_*/plugins/com.st.stm32cube.ide.mcu.externaltools.{gnu-tools-for-stm32,ninja,cmake,cubeprogrammer}.*/tools/bin; do PATH="$d:$PATH"; done; export PATH
 
 bash tools/hosttest/run.sh            # 14 suites, pure host C, no hardware
-python3 tools/check_proto.py          # C struct vs the workspace's Python
+python3 tools/check_proto.py          # C struct against the Python copy
 cmake --build Appli/build
 
-# the walk sim and the kinematics reference need Pinocchio (~/kinvenv here)
 env -u PYTHONPATH ~/kinvenv/bin/python tools/gen_kinematics.py --check
-PY=~/kinvenv/bin/python EVAL_PY=python3 URDF=tools/model/mukesh.urdf \
+PY=~/kinvenv/bin/python EVAL_PY=python3 URDF=tools/model/zeus.urdf \
   env -u PYTHONPATH tools/sim/run.sh --check
+tools/model/check_drift.sh
 
 ST_LOADER=$(ls /opt/st/stm32cubeide_*/plugins/*cubeprogrammer*/tools/bin/ExternalLoader/MX25UW25645G_NUCLEO-H7S3L8.stldr)
 STM32_Programmer_CLI -c port=SWD mode=UR -el "$ST_LOADER" -d Appli/build/nexus_first_Appli.hex -v -rst
@@ -207,17 +150,16 @@ the host can tell you nothing.
 
 ## What I would do next, in order
 
-1. **Retest CAN** with all ten drives powered. Nothing below matters until they
-   answer. Configure node 5 on both buses.
-2. **Switch to `NEXUS_MODE_ROBOT`** and reflash.
-3. **Settle the torque/encoder-shaft question** at the drives — hang a known
-   mass on a known arm, compare reported torque with `m·g·r`.
+1. **Confirm CAN and the IMU without arming anything** — the drives answering
+   and the IMU framing, with every axis still idle. That is the next job and it
+   needs no calibration and no motion.
+2. **Wire the four spring encoders**, then check each one reads and sweeps
+   smoothly by hand before trusting any of them.
+3. **Settle the torque/encoder-shaft question** at the drives.
 4. **Measure signs and offsets**, then spring zeros, then set
-   `ROBOT_CONFIG_CALIBRATED` to 1. About half a day, and it unblocks arming.
-5. **Item 6** — the per-joint envelope. Cheap, and it is what stops a wrong
-   sign becoming a broken leg.
-6. **Item 4** — the start sequence. Needs the gantry.
-7. **Gains**, on the assembled robot with weight on the legs, in the order
+   `ROBOT_CONFIG_CALIBRATED` to 1.
+5. **Per-joint `SAFETY_POS_MIN/MAX_TURNS`** — still `±10` turns, and it is what
+   stops a wrong sign becoming a broken leg.
+6. **Gains**, on the assembled robot with weight on the legs, in the order
    `zeus tune` ranks: `vel_gain` until `stuck` is 0, then `pos_gain` until
-   `lag_ms` < 15, then leave the integrator at 0.
-8. **Then** a first walk attempt, on the gantry, with the policy sending zeros.
+   `lag_ms` < 15.

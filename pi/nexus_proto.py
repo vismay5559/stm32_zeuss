@@ -1,9 +1,3 @@
-# -----------------------------------------------------------------------------
-# v10 (ten joints, ankle roll) IS AHEAD OF stm32_zeuss, which is still v9 at 14953f5.
-# firmware_handoff/ carries the matching link_proto.h change, verified with that
-# repo's tools/check_proto.py. Once the firmware has taken it, stm32_zeuss/pi/
-# nexus_proto.py is canonical again: copy it over this one, do not edit here.
-# -----------------------------------------------------------------------------
 """
 Python side of the STM32 <-> Raspberry Pi link.
 
@@ -46,18 +40,18 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 10
+PROTO_VERSION = 9
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
 MSG_GAINS = 0x03        # Pi -> board, rare: drive gains
 
-NUM_JOINTS = 10
+NUM_JOINTS = 8
 NUM_ENCODERS = 4
 NUM_CONTACTS = 2
 
 # Spring encoder order in spring_angle[] and the `enc_valid` bitmask, as
-# NEXUS_ENC_* in link_proto.h: two AS5047P daisy chains, one per leg.
+# NEXUS_ENC_* in link_proto.h: four AS5047P on one SPI bus, a chip select each.
 ENC_L_HIP_PITCH = 0
 ENC_L_KNEE_PITCH = 1
 ENC_R_HIP_PITCH = 2
@@ -86,7 +80,7 @@ CONTACT_NAMES = ("left", "right")
 
 # THE JOINT MAP. Index -> name, identical to NEXUS_J_* in link_proto.h:
 #
-#     index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
+#     index = bus * 4 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
 #
 # Every per-joint array in both packets uses it - joint_pos, joint_vel,
 # ref_angle, act_* and the command residual. The packet carries no names, so
@@ -97,18 +91,16 @@ JOINT_NAMES = (
     "left_hip_roll",      # 1  bus 0 node 2
     "left_knee_pitch",    # 2  bus 0 node 3
     "left_ankle_pitch",   # 3  bus 0 node 4
-    "left_ankle_roll",    # 4  bus 0 node 5
-    "right_hip_pitch",    # 5  bus 1 node 1
-    "right_hip_roll",     # 6  bus 1 node 2
-    "right_knee_pitch",   # 7  bus 1 node 3
-    "right_ankle_pitch",  # 8  bus 1 node 4
-    "right_ankle_roll",   # 9  bus 1 node 5
+    "right_hip_pitch",    # 4  bus 1 node 1
+    "right_hip_roll",     # 5  bus 1 node 2
+    "right_knee_pitch",   # 6  bus 1 node 3
+    "right_ankle_pitch",  # 7  bus 1 node 4
 )
 
-# TWO LEGS, FIVE JOINTS EACH, NO WAIST. Ankle roll takes CAN node 5 on each bus,
-# the slot the waist actuators used to have. The model has no waist joints at
-# all: both hips bolt straight to the torso, so nothing sits between the IMU and
-# the legs.
+# TWO LEGS, NO WAIST - a temporary build. The robot's other two actuators are
+# waist roll (bus 0 node 5) and waist pitch (bus 1 node 5); this firmware does
+# not command or expect them. The model has no waist joints at all: both hips
+# bolt straight to the torso, so nothing sits between the IMU and the legs.
 JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
 
 # Joints the robot HAS but this build does not drive, carried in /joint_states
@@ -122,7 +114,7 @@ JOINT_INDEX = {name: i for i, name in enumerate(JOINT_NAMES)}
 BOLTED_JOINT_NAMES = ()
 
 # --------------------------------------------------------------------------
-# The policy block: 50 contiguous float32 starting at byte 12, holding exactly
+# The policy block: 44 contiguous float32 starting at byte 12, holding exactly
 # what the RL observation needs. Slice it out with numpy and skip parsing:
 #
 #     obs = np.frombuffer(raw, dtype="<f4", count=POLICY_COUNT,
@@ -134,7 +126,7 @@ BOLTED_JOINT_NAMES = ()
 # --------------------------------------------------------------------------
 
 POLICY_OFFSET = 12
-POLICY_COUNT = 50
+POLICY_COUNT = 44
 
 # (name, count) in order, for indexing the block by field.
 POLICY_FIELDS = [
@@ -142,10 +134,10 @@ POLICY_FIELDS = [
     ("quat", 4),            # w,x,y,z; observation uses x,y = indices 1,2
     ("gyro", 3),            # rad/s, body frame
     ("vel_hdg", 3),         # m/s, heading frame: lateral, forward, vertical
-    ("joint_pos", NUM_JOINTS),      # rad, output side
-    ("joint_vel", NUM_JOINTS),      # rad/s, output side
+    ("joint_pos", 8),      # rad, output side
+    ("joint_vel", 8),      # rad/s, output side
     ("spring_angle", 4),    # rad, SPRING DEFLECTION, SPRING_NAMES order
-    ("ref_angle", NUM_JOINTS),      # rad, output side: the stored gait at `phase`
+    ("ref_angle", 8),      # rad, output side: the stored gait at `phase`
     ("contact", 2),         # 0.0/1.0, debounced foot switches: left, right
     ("foot_z", 2),          # m, world; [0] right, [1] left
     ("phase", 1),           # 0..1 gait clock
@@ -220,15 +212,15 @@ STATE_FORMAT = (
     "B"      # version
     "I"      # seq
     "I"      # timestamp_us
-    # ---------------- policy block, 50 float32 ----------------
+    # ---------------- policy block, 46 float32 ----------------
     "f"      # pelvis_z
     "4f"     # quat            w,x,y,z fused
     "3f"     # gyro            rad/s body
     "3f"     # vel_hdg         m/s heading: lat, fwd, up
-    "10f"     # joint_pos       rad output side
-    "10f"     # joint_vel       rad/s output side
+    "8f"     # joint_pos       rad output side
+    "8f"     # joint_vel       rad/s output side
     "4f"     # spring_angle    rad deflection
-    "10f"     # ref_angle       rad, stored gait at phase
+    "8f"     # ref_angle       rad, stored gait at phase
     "2f"     # contact         0.0 / 1.0
     "2f"     # foot_z          m world: right, left
     "f"      # phase           0..1
@@ -238,9 +230,9 @@ STATE_FORMAT = (
     "3f"     # imu_gyro        rad/s
     "I"      # imu_seq
     # ---------------- actuator diagnostics ----------------
-    "10f"     # act_torque      Nm
-    "10I"     # act_error
-    "10f"     # act_target      rad, what the drive was told, NaN when idle
+    "8f"     # act_torque      Nm
+    "8I"     # act_error
+    "8f"     # act_target      rad, what the drive was told, NaN when idle
     # ---------------- estimator internals ----------------
     "3f"     # fused_pos       m world
     "3f"     # fused_vel       m/s world, before heading rotation
@@ -256,8 +248,8 @@ STATE_FORMAT = (
     "B"      # stream_flags    STREAM_*
     "B"      # reserved0
     "2H"     # contact_ticks
-    "10B"     # act_state
-    "10B"     # act_flags
+    "8B"     # act_state
+    "8B"     # act_flags
     "B"      # enc_valid
     "B"      # contacts
     "B"      # fused_valid
@@ -276,7 +268,7 @@ COMMAND_FORMAT = (
     "B"      # msg_id
     "B"      # version
     "I"      # seq
-    "10f"     # residual        turns, added to ref_angle
+    "8f"     # residual        turns, added to ref_angle
     "H"      # flags
     "H"      # crc
 )
@@ -473,7 +465,7 @@ class NexusState:
     @staticmethod
     def policy_block(raw: bytes):
         """
-        The 50 observation floats, straight out of the buffer.
+        The 46 observation floats, straight out of the buffer.
 
         Prefer this to parse() in the control loop: it copies nothing and skips
         building a dataclass, which at 1 kHz is the difference between a few
@@ -617,9 +609,9 @@ GAINS_FORMAT = (
     "B"      # msg_id
     "B"      # version
     "I"      # seq             echoed back in the state packet as gains_seq
-    "10f"     # pos_gain        (turn/s) per turn
-    "10f"     # vel_gain        Nm per (turn/s)
-    "10f"     # vel_int_gain    Nm per turn
+    "8f"     # pos_gain        (turn/s) per turn
+    "8f"     # vel_gain        Nm per (turn/s)
+    "8f"     # vel_int_gain    Nm per turn
     "H"      # crc
 )
 GAINS_SIZE = struct.calcsize(GAINS_FORMAT)

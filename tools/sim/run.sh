@@ -2,7 +2,7 @@
 #
 # The estimator against a simulated walk with exact ground truth.
 #
-#   gen_walk.py   zeus.urdf -> a walk, and what the sensors would have said
+#   gen_walk.py   mukesh.urdf -> a walk, and what the sensors would have said
 #   replay        the REAL fusion.c / inekf.c / zeus_kinematics.c on that data
 #   evaluate.py   estimate vs truth: tilt, body velocity, height, foot height
 #
@@ -14,7 +14,7 @@
 # Environment:
 #   PY        python with Pinocchio, for gen_walk.py   (default python3)
 #   EVAL_PY   python with numpy (+ matplotlib for --plot) (default $PY)
-#   URDF      the model                    (default ../zeus_26/.../zeus.urdf)
+#   URDF      the model                    (default tools/model/zeus.urdf)
 #   OUT       where everything goes        (default tools/sim/out)
 #   CC        C compiler                   (default cc)
 #
@@ -31,7 +31,7 @@ PY="${PY:-python3}"
 EVAL_PY="${EVAL_PY:-$PY}"
 OUT="${OUT:-$HERE/out}"
 CC="${CC:-cc}"
-URDF="${URDF:-$(dirname "$ROOT")/zeus_26/zeus_description/urdf/zeus.urdf}"
+URDF="${URDF:-$ROOT/tools/model/zeus.urdf}"
 
 eval_args=()
 gen_args=()

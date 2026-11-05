@@ -50,11 +50,9 @@ History, since it may be relevant:
   87.5% and the earlier sampling was too early for a daisy chain.
 * **2.5 Mbit at 87.5% / SSP 87.5%** (above) is the current configuration — the
   fastest rate this peripheral can sample at 87.5%, and chosen because classic
-  2.0 cannot carry the full robot: **ten** drives, **five** to a bus, at 1 kHz
-  commands and 1 kHz encoder telemetry is 11000 frames/s per bus, which is 132%
-  of a classic 1 Mbit bus and 73% at FD 2.5 Mbit. Commands now go out at 500 Hz
-  (`ODRV_CMD_DIVIDER`), which is the rate the policy trained at and brings the
-  bus to 8500 frames/s and 56%.
+  2.0 cannot carry the full robot: eight drives, four to a bus, at 1 kHz
+  commands and 1 kHz encoder telemetry is 8800 frames/s per bus, which is 106%
+  of a classic 1 Mbit bus and 58% at FD 2.5 Mbit.
 
 ## Peripheral init (CubeMX-generated)
 

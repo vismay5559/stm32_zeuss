@@ -29,7 +29,7 @@ subsystem up at a time.
 | External flash | Macronix MX25UW25645G, 256 Mbit octal, on XSPI2 |
 | IMU | BNO085, SHTP over **UART2** (PD5/PD6) @ 3 Mbaud, 400 Hz |
 | Encoders | 4 × AS5047P on SPI1 @ 6.25 MHz, 1 kHz: one shared bus, **one chip select per sensor** |
-| Actuators | **10 × ODrive S1 — 5 per bus** on 2 × FDCAN (two legs, no waist; node 5 is ankle roll — see the joint map) |
+| Actuators | 8 × ODrive S1 — 4 per bus on 2 × FDCAN (two legs, no waist — see the joint map) |
 | Contacts | 2 × mechanical foot switches (one per foot, sole centre) |
 | Host link | USB High Speed (480 Mbit), CDC |
 
@@ -341,9 +341,9 @@ its Jacobian. Rather than measuring lengths by hand, the geometry comes from
 the CAD:
 
 ```
-Fusion 360 export ─► zeus_26_mukesh_deploy/mukesh_description/scripts/clean_urdf.py ─► mukesh.urdf
-mukesh.urdf ─► tools/gen_kinematics.py ─► Appli/App/zeus_kinematics_model.h      (tables, committed)
-                                       └► tools/hosttest/zeus_kinematics_ref.h   (Pinocchio's answers)
+Fusion 360 export ─► zeus_26/zeus_description/scripts/clean_urdf.py ─► zeus.urdf
+zeus.urdf ─► tools/gen_kinematics.py ─► Appli/App/zeus_kinematics_model.h      (tables, committed)
+                                     └► tools/hosttest/zeus_kinematics_ref.h   (Pinocchio's answers)
 ```
 
 `zeus_kinematics.c` walks those tables on the board: forward kinematics and
@@ -355,8 +355,8 @@ checked against a simulated walk (see *State estimation*).
 After the model changes (new export, IMU moved, contact points moved):
 
 ```bash
-python3 -m venv ~/kinvenv && ~/kinvenv/bin/pip install -r tools/requirements-kinematics.txt   # once
-env -u PYTHONPATH ~/kinvenv/bin/python tools/gen_kinematics.py      # reads ../zeus_26_mukesh_deploy/.../mukesh.urdf
+python3 -m venv ~/kin_venv && ~/kin_venv/bin/pip install -r tools/requirements-kinematics.txt   # once
+env -u PYTHONPATH ~/kin_venv/bin/python tools/gen_kinematics.py      # reads ../zeus_26/.../zeus.urdf
 tools/hosttest/run.sh                                                # C against Pinocchio
 ```
 
@@ -365,16 +365,10 @@ Pinocchio's. `--check` exits 1 if the committed files are stale;
 `--urdf path` reads another model. The firmware logs which model it has as
 `zeus_kin_model_sha`, the first 16 hex digits of the URDF's sha256.
 
-Per leg, `q` is **seven** numbers for **five** driven joints: hip pitch, hip
-roll, knee pitch, ankle pitch, ankle roll (all motor side), then the hip and
-knee **spring deflections**. The two extra entries are not extra actuators -
-hip pitch and knee pitch are series-elastic, so the drive measures one side of
-the spring and an AS5047P measures how far the spring has wound up, and the
-foot's position depends on both. There are no waist joints: both hips bolt
-straight to the torso.
-
-Everything is named (`ZEUS_KIN_Q_*`), so a re-export that nests the joints
-differently changes the tables, not the API.
+Per leg, `q` is hip pitch, hip roll, knee pitch, ankle pitch (motor side),
+hip and knee spring deflection, then waist pitch and roll (bolted at zero) - by name
+(`ZEUS_KIN_Q_*`), so a re-export that nests the joints differently changes the
+tables, not the API.
 
 ## Continuous integration
 
@@ -900,21 +894,15 @@ So ~29 us of every FD frame is fixed cost. Going 2 -> 2.5 Mbit saves 9 us of
 75; going on to 4 Mbit would save another 13. The data rate is not the biggest
 lever available.
 
-Per node at **500 Hz** commands, 1 kHz encoder estimates, 100 Hz heartbeat and
-100 Hz torque — **1700 frames/s**:
+Per node at 1 kHz commands, 1 kHz encoder estimates, 100 Hz heartbeat and
+100 Hz torque — **2200 frames/s**:
 
-| Config | us/frame | 1 node | **5 nodes/bus** |
+| Config | us/frame | 1 node | **4 nodes/bus** |
 |---|---|---|---|
-| Classic 2.0, 1 Mbit | 121 | 21% | **103% — does not fit** |
-| FD + BRS, 2 Mbit | 75 | 13% | 64% |
-| **FD + BRS, 2.5 Mbit** | **65** | **11%** | **56%** |
-| FD + BRS, 4 Mbit | 52 | 9% | 44% |
-
-At 1 kHz commands it was 2200 frames/s a node and **73%** on a five-drive bus.
-`ODRV_CMD_DIVIDER` in `act_odrive.h` halved the command rate to the 500 Hz the
-policy trained at, which is a bigger saving than any data rate buys — and the
-table shows why: even an infinitely fast data phase leaves the ~29 us of
-arbitration, which is 33% of the bus at 11000 frames/s.
+| Classic 2.0, 1 Mbit | 121 | 27% | **106% — does not fit** |
+| FD + BRS, 2 Mbit | 75 | 16% | 66% |
+| **FD + BRS, 2.5 Mbit** | **65** | **14%** | **58%** |
+| FD + BRS, 4 Mbit | 52 | 11% | 46% |
 
 **Classic cannot carry four drives at these rates**, which is what made genuine
 FD mode a prerequisite rather than an optimisation. 2.5 Mbit at 58% leaves
@@ -964,12 +952,10 @@ phases.** `80 MHz / 32 tq = 2.5 Mbit`.
 
 Three things drove that number.
 
-**Classic CAN does not fit this robot.** Ten drives, five to a bus, at 1 kHz
-`Set_Input_Pos` and 1 kHz encoder telemetry is **11000 frames/s per bus**. A
-classic 8-byte frame is 120 us on the wire — **132% of the bus**. Even at the
-500 Hz command rate the board now uses, 8500 frames/s is 102% and still does
-not fit. The earlier single-leg tests fitted only because three joints is a
-third of that load.
+**Classic CAN does not fit this robot.** Eight drives, four to a bus, at 1 kHz
+`Set_Input_Pos` and 1 kHz encoder telemetry is **8800 frames/s per bus**. A
+classic 8-byte frame is 120 us on the wire — **106% of the bus**. The earlier
+single-leg tests fitted only because three joints is 75% of that load.
 
 **5 Mbit failed** and the post-mortem is worth keeping. `TEC=248` climbing to
 bus-off with **`REC=0`** — every fault on frames *we* sent, none on frames we
@@ -1415,7 +1401,7 @@ target the test last sent; everything the test does not have — estimator, IMU,
 springs, feet — reads as absent (identity quaternions, `foot_z` NaN, fusion
 INVALID), and `stream_flags` carries `NEXUS_STREAM_LEG_TEST`.
 
-The other half of this link is the [zeus_26_mukesh_deploy](https://github.com/Maverick280306/zeus_26_mukesh_deploy)
+The other half of this link is the [zeus_26](https://github.com/vismay5559/zeus_26)
 workspace; the commands below run in a clone of it.
 
 ### Level 1 — the cable enumerates
@@ -1469,8 +1455,7 @@ python3 -m venv --system-site-packages ~/rerun_venv && ~/rerun_venv/bin/pip inst
 hostname -I                     # the laptop's IP
 ```
 
-**Pi**, once — the same `rerun_venv` commands, and a clone of
-`zeus_26_mukesh_deploy`. Then:
+**Pi**, once — the same `rerun_venv` commands, and a clone of zeus_26. Then:
 
 ```bash
 cd zeus_26
@@ -1502,10 +1487,9 @@ One **426-byte packet every millisecond** (426 KB/s, under 1% of USB HS).
 `tools/check_proto.py` compares every field offset, both struct sizes and the
 joint map, so a mismatch is caught rather than debugged.
 
-The Pi side of this link is the [zeus_26_mukesh_deploy](https://github.com/Maverick280306/zeus_26_mukesh_deploy)
-ROS 2 workspace. Its `zeus_link` package holds the CANONICAL
-`nexus_proto.py` since the policy landed, and `pi/nexus_proto.py` here is
-copied from it; `pi/nexus_link.py` is still ours. Both are checked
+The Pi side of this link is the [zeus_26](https://github.com/vismay5559/zeus_26)
+ROS 2 workspace. Its `zeus_link` package carries copies of `pi/nexus_proto.py`
+and `pi/nexus_link.py`; this repository holds the canonical ones, checked
 against the C header.
 
 ### The joint map
@@ -1514,7 +1498,7 @@ Every per-joint array in both packets — `joint_pos`, `joint_vel`, `ref_angle`,
 `act_*`, and the command's `residual` — uses one index:
 
 ```
-index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
+index = bus * 4 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
 ```
 
 | index | bus | node | joint |
@@ -1523,12 +1507,10 @@ index = bus * 5 + (node - 1)          bus 0 = FDCAN1, bus 1 = FDCAN2
 | 1 | 0 | 2 | left_hip_roll |
 | 2 | 0 | 3 | left_knee_pitch |
 | 3 | 0 | 4 | left_ankle_pitch |
-| 4 | 0 | 5 | left_ankle_roll |
-| 5 | 1 | 1 | right_hip_pitch |
-| 6 | 1 | 2 | right_hip_roll |
-| 7 | 1 | 3 | right_knee_pitch |
-| 8 | 1 | 4 | right_ankle_pitch |
-| 9 | 1 | 5 | right_ankle_roll |
+| 4 | 1 | 1 | right_hip_pitch |
+| 5 | 1 | 2 | right_hip_roll |
+| 6 | 1 | 3 | right_knee_pitch |
+| 7 | 1 | 4 | right_ankle_pitch |
 
 The packet carries no names, so this table is the only thing labelling them.
 It is defined once in C (`NEXUS_J_*` in `link_proto.h`) and once in Python
@@ -1584,8 +1566,8 @@ script - never in a control loop):
   `robot_config.c`. When a value is settled, put it there and reflash.
 
 The Pi side is `zeus gains show / push / set` and `zeus tune` in
-[zeus_26_mukesh_deploy](https://github.com/Maverick280306/zeus_26_mukesh_deploy); the metrics that say
-which gain to change live in `zeus_link.tuning`.
+[zeus_26](https://github.com/vismay5559/zeus_26); the metrics that say which
+gain to change live in `zeus_link.tuning`.
 
 ### The policy block
 
@@ -1722,8 +1704,8 @@ newest packet is the only one that is not already out of date. Pass
 
 `link.stats` reports `loss_rate`, `seq_gaps` and `junk_bytes`; all three should
 be zero on a healthy link. Run `python pi/nexus_link.py /dev/ttyACM0` on the Pi
-before wiring anything into the ROS workspace — a problem is far easier to
-find there than inside a control loop.
+before wiring anything into zeus_26 — a problem is far easier to find there than
+inside a control loop.
 
 `tools/test_pi_link.py` proves the Python side sustains 1 kHz without hardware:
 it feeds `NexusLink` a synthetic 1 kHz stream through a fake port and checks
@@ -1742,14 +1724,12 @@ core at 1 kHz and would not have kept up on a Pi at all. `crc16` now calls
 - **The policy block is contiguous and its offset is checked.**
   `tools/check_proto.py` fails if the block moves or gains a gap, because the
   zero-copy slice above would then read the wrong bytes silently.
-- **Protocol version is 10.** v1 sent raw encoder counts; v2 added the health
+- **Protocol version is 8.** v1 sent raw encoder counts; v2 added the health
   byte and alignment; v3 added the policy block and split the contacts; v4 added
   `fk_valid` and `safety_state`; v5 added the diagnostics block; v6 made the
   command a residual rather than a target; v7 dropped the two waist joints; v8
   added `act_target` and the gains message; v9 cut each foot from two switches
-  to one; **v10 added the two ankle roll joints**, taking the count to ten and
-  the policy block to 50 floats.
-  422 → 424 → 444 → 400 → 434 → 426 → 478 bytes.
+  to one. 422 → 424 → 444 → 400 → 434 → 426 bytes.
   Mismatched versions reject each other rather than silently misparsing.
 
 ## Watching it live — Rerun
@@ -1851,8 +1831,7 @@ falling over.
 ## State estimation
 
 A contact-aided right-invariant EKF, ported from the Python in
-`vismay5559/zeus_26` (`zeus_sensor_fusion`, the retired workspace) and
-following Hartley et al. 2019.
+`vismay5559/zeus_26` (`zeus_sensor_fusion`) and following Hartley et al. 2019.
 It fuses the IMU with leg forward kinematics while feet are on the ground to
 estimate body orientation, velocity, height and IMU biases.
 
@@ -1996,7 +1975,7 @@ the stance leg, hip-roll sway, 400 Hz IMU with noise and constant
 biases, drives reporting at 500 Hz.
 
 ```bash
-python3 -m venv ~/kinvenv && ~/kinvenv/bin/pip install -r tools/requirements-kinematics.txt   # once
+python3 -m venv ~/kin_venv && ~/kin_venv/bin/pip install -r tools/requirements-kinematics.txt   # once
 PY=~/kin_venv/bin/python EVAL_PY=python3 env -u PYTHONPATH tools/sim/run.sh --plot   # writes tools/sim/out/estimate.png
 tools/sim/run.sh --check                                                               # what CI runs
 tools/sim/run.sh -- --steps 30 --seed 7 --accel-bias 0 0 0                            # after -- : gen_walk.py options

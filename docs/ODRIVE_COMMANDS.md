@@ -118,25 +118,25 @@ is not the same shaft on every joint of this leg.
 | hip pitch | 1 | 47:1 | **load** | `deg / 360` | 0.00278 turns |
 | hip roll | 2 | 26:1 | load (assumed) | `deg / 360` | 0.00278 turns |
 | knee pitch | 3 | 47:1 | **load** | `deg / 360` | 0.00278 turns |
-| ankle pitch | 4 | 15:1 | **MOTOR** | `deg / 360 × 15` | **0.04167 turns** |
-| ankle roll | 5 | 15:1 | **MOTOR** | `deg / 360 × 15` | **0.04167 turns** |
+| ankle pitch | 4 | **15:1** | **MOTOR** | `deg / 360 × 15` | **0.04167 turns** |
 
-**The ankles are 15× everything else.** Their encoders are on the motor,
-before the 15:1, so a command of 0.0278 turns moves the output by 1°, not 15°.
+**The ankle is 15× everything else.** Its encoder is on the motor, before the
+15:1, so a command of 0.0278 turns moves the output by 1°, not 15°.
 
-**This table said 9:1 until 2026-10-31**, from the first bench leg, and the
-real gearbox is 15:1. Anything derived from the old number is 15/9 = 1.67x out:
-an ankle commanded through `× 9` travels 0.6 of what it was asked for. The
-single-leg test's `s_cmd_scale[]` in `test_leg_can.c` is the live copy of this
-and must read 15.0f. Hip roll is 26:1; its encoder placement has never been
-checked and "load" below is an assumption, not a measurement.
+**This table said 9:1 until 2026-10-31**, from the first bench leg. The real
+gearbox is **15:1** and hip roll is **26:1**. Anything derived from the old 9 is
+15/9 = 1.67x out: an ankle commanded through `× 9` travels 0.6 of what it was
+asked for, which looks exactly like a gain that needs turning up. The other live
+copy of this number is `s_cmd_scale[]` in `test_leg_can.c`, which still reads
+`9.0f`. Hip roll's encoder placement has never been checked and "load" above is
+an assumption.
 
-Note that `robot_config.h` states every drive reports output-shaft position
-with the ratio already applied, which contradicts the MOTOR entries here. The
-drives themselves are the authority; one of the two documents is wrong.
+Note that `robot_config.h` states every drive reports output-shaft position with
+the ratio already applied, which contradicts the MOTOR entry here. The drives
+themselves are the authority; one of the two is wrong.
 
 This applies to **`Vel_FF` as well as position.** Feedforward velocity is in
-turns/s of the same shaft, so the ankles' feedforward is also ×15. Scaling the
+turns/s of the same shaft, so the ankle's feedforward is also ×15. Scaling the
 position and forgetting the feedforward gives a drive fighting itself.
 
 ### Per-joint command ranges for this gait

@@ -4,18 +4,13 @@ This is the **firmware** half of Zeus, a bipedal robot. It runs on an
 STM32H7S3L8H6 (NUCLEO-H7S3L8, board MB1737) and talks to a Raspberry Pi 5 over
 one USB cable.
 
-**The full orientation document lives in the Pi workspace:
-[`zeus_26_mukesh_deploy/AGENTS.md`](https://github.com/Maverick280306/zeus_26_mukesh_deploy/blob/main/AGENTS.md).**
+**The full orientation document lives in the other repo:
+[`zeus_26/AGENTS.md`](https://github.com/vismay5559/zeus_26/blob/main/AGENTS.md).**
 Read that first — it covers the hardware, the protocol, both repo maps, the
 working conventions and the current state of the robot. This file is only the
 firmware-specific quick start, so the two do not drift.
 
-**`zeus_26` is retired.** The Pi workspace is now
-`zeus_26_mukesh_deploy`, which carries the RL policy, is on **protocol v10**
-(ten joints) and owns the URDF this firmware's kinematics are generated from.
-Any reference to `zeus_26` below or in `docs/` that survived is a bug.
-
-**[`HANDOFF.md`](HANDOFF.md) is where things stand right now** - what is done, what is not, what blocks the first walk, and what to do next. This file is the conventions and the traps; that one is the state.
+**[`HANDOFF.md`](HANDOFF.md) is where things stand right now** - what is done, what is not, and what to do next. This file is the conventions and the traps; that one is the state.
 
 Push directly to `main`. Do not create branches.
 
@@ -74,11 +69,9 @@ when the host can tell you nothing.
 ## Generated files — do not hand-edit
 
 `Appli/App/zeus_kinematics_model.h` and `tools/hosttest/zeus_kinematics_ref.h`
-come from `tools/gen_kinematics.py`, which reads
-`zeus_26_mukesh_deploy/mukesh_description/urdf/mukesh.urdf` — the model the
-policy was TRAINED against. CI checks the URDF sha256 embedded in the model
-header against that file, so the firmware cannot silently be walking a
-different robot from the one the network learnt.
+come from `tools/gen_kinematics.py`, which reads `zeus_26`'s URDF. CI checks the
+URDF sha256 embedded in the model header against that URDF, so the firmware
+cannot silently be walking an older robot.
 
 Pinocchio's current wheels fail to import (eigenpy built against a mismatched
 numpy ABI). `gen_kinematics.py --model-only` regenerates the firmware tables
@@ -101,9 +94,7 @@ are the **single foot switch on each foot**; `L_HEEL`/`R_HEEL` are unconnected.
 - Tests state their verdict first: cases are hand-built with the expected answer
   written down before the maths runs.
 - Protocol changes bump `NEXUS_PROTO_VERSION` and must land in `link_proto.h`,
-  `pi/nexus_proto.py`, the copy in `zeus_26_mukesh_deploy/zeus_link/`, and
-  `NexusState.msg` together. `check_proto.py` enforces it. Since the policy
-  landed the **workspace copy is canonical** and `pi/nexus_proto.py` is copied
-  from it, not the other way round.
+  `pi/nexus_proto.py` (**canonical**), the copy in `zeus_26`, and
+  `NexusState.msg` together. `check_proto.py` enforces it.
 - **The user keeps uncommitted bench edits in `Appli/App/test_leg_can.c`.**
   Stage only your own changes.

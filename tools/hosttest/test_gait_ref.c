@@ -136,45 +136,21 @@ static void test_the_stride_does_not_jump_anywhere_else(void)
           (double)biggest, where, (double)mean);
 }
 
-/*
- * The largest step either join may take, in turns of the output shaft.
- *
- * 0.0025 turns is 0.9 degrees. Measured on the table actually in the build the
- * worst is 0.00223 at hip roll (row 99 -> 100) and 0.00132 at the knee
- * (row 199 -> 0, the stride wrap), so this has a little room and no more.
- */
-#define JOIN_STEP_MAX_TURNS   0.0025f
-
-static void test_the_joins_step_by_less_than_the_policy_can_notice(void)
+static void test_the_known_table_discontinuities_are_gone(void)
 {
-    printf("the two stitch points step by under a degree\n");
+    printf("the two stitch points are smooth now, not steps\n");
 
     /*
-     * WHAT THIS TEST IS FOR CHANGED WITH THE TABLE, so read this before
-     * loosening it.
+     * This test used to PIN the defect - it asserted both joins still stepped
+     * by ~0.0055 turns, so the number could not drift unnoticed, and it said
+     * the right response to it failing was to delete it rather than loosen it.
      *
-     * It used to assert that both joins were SMOOTH, because the old table was
-     * two half-strides concatenated by our own gen_gait.py, that concatenation
-     * left ~0.0055 turn steps at rows 99 and 199, and the generator repaired
-     * them. None of that is true now: this table comes from the policy's
-     * trajectory optimiser, it is not a concatenation, and nothing repairs it.
-     *
-     * It is also NOT perfectly periodic. The knee steps 0.00132 turns - 0.475
-     * degrees - across the stride wrap, about 2.3x what its own peak velocity
-     * covers in one row. That is a real discontinuity in the library row.
-     *
-     * It is deliberately NOT smoothed, and must not be. The policy was trained
-     * on this exact table, rl_policy_node carries its own copy and refuses to
-     * enable if ref_angle differs from it by more than 1 degree, and 0.475 is
-     * inside that. A board that "fixed" the seam would be walking a different
-     * gait from the one the network learnt, and the mismatch check is what
-     * would stop the robot - after someone had spent a day on it.
-     *
-     * So the property worth holding is the one that matters mechanically and
-     * catches the mistake that matters: every join step stays under a degree,
-     * which is small enough that no drive can be destabilised by it and far
-     * smaller than the residual authority either side, while a table lifted
-     * from a DIFFERENT gait or speed row would step much further and fail here.
+     * gen_gait.py now repairs both, so it is inverted instead of deleted. The
+     * joins are still the interesting rows: sample 99 -> 100 is where the two
+     * half-strides were concatenated, and 199 -> 0 is the wrap. If either ever
+     * steps again, something in the generator stopped repairing it, and that
+     * matters most on the knee - its whole travel is 0.010 turns, so the old
+     * 0.0055 step was 44% of the gait and made the joint impossible to tune.
      */
     struct { int row; const char *name; } joins[2] = {
         { KNOWN_STEP_ROW_A, "mid-stride (row 99 -> 100)" },
@@ -183,18 +159,29 @@ static void test_the_joins_step_by_less_than_the_policy_can_notice(void)
 
     for (int i = 0; i < 2; i++)
     {
-        int r    = joins[i].row;
-        int next = (r + 1) % GAIT_SAMPLES;
+        int   r    = joins[i].row;
+        int   next = (r + 1) % GAIT_SAMPLES;
 
         for (int k = 0; k < GAIT_JOINTS; k++)
         {
+            float span = 0.0f, lo = g_gait_turns[0][k], hi = g_gait_turns[0][k];
+
+            for (int n = 1; n < GAIT_SAMPLES; n++)
+            {
+                if (g_gait_turns[n][k] < lo) { lo = g_gait_turns[n][k]; }
+                if (g_gait_turns[n][k] > hi) { hi = g_gait_turns[n][k]; }
+            }
+            span = hi - lo;
+
             float d = fabsf(g_gait_turns[next][k] - g_gait_turns[r][k]);
 
-            CHECK(d < JOIN_STEP_MAX_TURNS,
-                  "%s: joint %d steps %f turns (%.2f deg), over the %f allowed "
-                  "- is this the gait the policy trained on?",
-                  joins[i].name, k, (double)d, (double)(d * 360.0f),
-                  (double)JOIN_STEP_MAX_TURNS);
+            /* Relative to the joint's own travel, because an absolute limit
+               cannot judge a knee that moves 0.010 turns and an ankle that
+               moves 0.040 by the same number. */
+            CHECK(span < 1e-6f || d < span * 0.05f,
+                  "%s: joint %d steps %f turns, %.0f%% of its %f span",
+                  joins[i].name, k, (double)d,
+                  (double)(100.0f * d / span), (double)span);
         }
     }
 }
@@ -276,83 +263,33 @@ static void test_the_seam_interpolates_too(void)
     (void)tested;
 }
 
-static void test_velocity_and_torque_come_from_the_table(void)
+static void test_speed_is_a_centred_difference_of_the_table(void)
 {
-    printf("speed and torque are read from the table, not derived from it\n");
+    printf("the reported speed is the centred slope, not a one-sided one\n");
 
     /*
-     * THIS TEST USED TO CHECK THAT THE SPEED WAS A CENTRED DIFFERENCE OF THE
-     * POSITIONS, and that was right while gait_ref.c computed it that way.
-     * It does not any more: g_gait_vel and g_gait_tau are generated alongside
-     * g_gait_turns by the trajectory optimiser, so the velocity is the real
-     * derivative of the continuous trajectory and the position table is a 200
-     * row SAMPLE of it. Differencing the samples is now the approximation, and
-     * it is a poor one wherever the trajectory turns quickly: the median
-     * disagreement is under 1% of each joint's peak speed, but the worst row
-     * reaches 69% on the knee. Demanding they match rejected a correct table.
-     *
-     * So this checks the two things that are actually true, and between them
-     * they are stronger than the old comparison was:
-     *
-     *   1. AT a sample row, every output is EXACTLY that row of its table.
-     *      Pins the table read, the row indexing and the interpolation at the
-     *      knots - a swapped column, a wrong stride or an off-by-one row all
-     *      fail here, exactly, with no tolerance to hide in.
-     *   2. ACROSS the stride the speed still tracks the position's slope in
-     *      the typical case. Catches a column scaled wrongly or a velocity
-     *      table from a different gait, which (1) alone would not if the
-     *      tables were consistently wrong together.
+     * Pins the shape of the calculation, not just its rough size. A one-sided
+     * difference is still a plausible slope, so a loose comparison against the
+     * position would accept it - but it lags the motion by half a row, which
+     * on the hip is multiplied by 47 before it reaches a drive.
      */
-    for (int i = 0; i < GAIT_SAMPLES; i += 23)
+    for (int i = 5; i < GAIT_SAMPLES; i += 17)
     {
         float phase = (float)i / (float)GAIT_SAMPLES;
-        float pos[GAIT_JOINTS], vel[GAIT_JOINTS], tau[GAIT_JOINTS];
+        float pos[GAIT_JOINTS], vel[GAIT_JOINTS];
+        gait_sample_vel(phase, pos, vel);
 
-        gait_sample_all(phase, pos, vel, tau);
+        int prev = (i - 1 + GAIT_SAMPLES) % GAIT_SAMPLES;
+        int next = (i + 1) % GAIT_SAMPLES;
 
         for (int k = 0; k < GAIT_JOINTS; k++)
         {
-            CHECK(close_to(pos[k], g_gait_turns[i][k], 1e-6f),
-                  "row %d joint %d: position %f, table has %f",
-                  i, k, (double)pos[k], (double)g_gait_turns[i][k]);
-            CHECK(close_to(vel[k], g_gait_vel[i][k], 1e-6f),
-                  "row %d joint %d: speed %f, table has %f",
-                  i, k, (double)vel[k], (double)g_gait_vel[i][k]);
-            CHECK(close_to(tau[k], g_gait_tau[i][k], 1e-6f),
-                  "row %d joint %d: torque %f, table has %f",
-                  i, k, (double)tau[k], (double)g_gait_tau[i][k]);
-        }
-    }
-
-    /*
-     * Typical agreement with the centred slope, per joint: at least three
-     * quarters of the rows within 10% of that joint's peak speed. Loose enough
-     * to let the sharp rows through, tight enough that a column scaled by two
-     * - or by 2pi, the likely mistake - fails outright.
-     */
-    for (int k = 0; k < GAIT_JOINTS; k++)
-    {
-        float peak = 0.0f;
-        for (int i = 0; i < GAIT_SAMPLES; i++)
-        {
-            if (fabsf(g_gait_vel[i][k]) > peak) { peak = fabsf(g_gait_vel[i][k]); }
-        }
-
-        int near = 0;
-        for (int i = 0; i < GAIT_SAMPLES; i++)
-        {
-            int prev = (i - 1 + GAIT_SAMPLES) % GAIT_SAMPLES;
-            int next = (i + 1) % GAIT_SAMPLES;
             float centred = (g_gait_turns[next][k] - g_gait_turns[prev][k]) /
                             (2.0f * GAIT_DT_S);
-
-            if (fabsf(g_gait_vel[i][k] - centred) < 0.10f * peak) { near++; }
+            CHECK(close_to(vel[k], centred, 1e-3f),
+                  "row %d joint %d: reported %f turns/s, centred slope is %f",
+                  i, k, (double)vel[k], (double)centred);
         }
-
-        CHECK(near * 4 >= GAIT_SAMPLES * 3,
-              "joint %d: only %d of %d rows have a speed near the position's "
-              "slope - the velocity table may not belong to this gait",
-              k, near, GAIT_SAMPLES);
     }
 }
 
@@ -449,10 +386,10 @@ int main(void)
     test_phase_wraps_so_the_walk_repeats();
     test_exact_samples_come_back_verbatim();
     test_the_stride_does_not_jump_anywhere_else();
-    test_the_joins_step_by_less_than_the_policy_can_notice();
+    test_the_known_table_discontinuities_are_gone();
     test_it_interpolates_rather_than_snapping_to_a_row();
     test_the_seam_interpolates_too();
-    test_velocity_and_torque_come_from_the_table();
+    test_speed_is_a_centred_difference_of_the_table();
     test_velocity_matches_the_slope_of_the_position();
     test_velocity_is_periodic_too();
     test_null_outputs_are_allowed();

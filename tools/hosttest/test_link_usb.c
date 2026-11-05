@@ -397,16 +397,9 @@ static void test_a_gains_message_arrives_intact(void)
 
     CHECK(link_usb_take_gains(&got) == 1u, "a whole gains message was not accepted");
     CHECK(got.seq == 77u, "gains seq came back as %u", (unsigned)got.seq);
-    /* Derived from build_gains' own ramp rather than written out, because the
-       literal was 1.7f and silently meant "the eighth joint" - it failed the
-       day a ninth and tenth were added, which is a joint count changing, not a
-       link bug. */
-    const float want_vel_last = 1.0f + 0.1f * (float)(NEXUS_NUM_JOINTS - 1);
-    CHECK(got.pos_gain[0] == 20.0f && got.vel_gain[NEXUS_NUM_JOINTS - 1] == want_vel_last,
-          "gains values did not survive: pos_gain[0] %f, vel_gain[last] %f "
-          "(wanted %f)",
-          (double)got.pos_gain[0], (double)got.vel_gain[NEXUS_NUM_JOINTS - 1],
-          (double)want_vel_last);
+    CHECK(got.pos_gain[0] == 20.0f && got.vel_gain[NEXUS_NUM_JOINTS - 1] == 1.7f,
+          "gains values did not survive: pos_gain[0] %f, vel_gain[last] %f",
+          (double)got.pos_gain[0], (double)got.vel_gain[NEXUS_NUM_JOINTS - 1]);
     CHECK(link_usb_take_gains(&got) == 0u, "the same gains were handed over twice");
 }
 

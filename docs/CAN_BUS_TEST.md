@@ -19,16 +19,12 @@ Host: PuTTY logging *All session output*, **Always append**, to `putty.log`.
 | hip pitch | 1 | 47:1 | **load** side (output shaft) | 1:1 — send output turns |
 | hip roll | 2 | 26:1 | load side (assumed) | **not working, excluded** |
 | knee pitch | 3 | 47:1 | **load** side (output shaft) | 1:1 — send output turns |
-| ankle pitch | 4 | 15:1 | **MOTOR** side | **x15** — send 15 × output turns |
+| ankle pitch | 4 | **15:1** | **MOTOR** side | **x15** — send 15 × output turns |
 
 > **Ratios corrected 2026-10-31.** This table said the ankle was 9:1 and hip
-> roll 47:1. The ankles are **15:1** and hip roll is **26:1**. Anything scaled
-> by the old 9 travels 9/15 = 0.6 of what it was asked for, which looks exactly
-> like a tuning problem. The live copy of this number is `s_cmd_scale[]` in
-> `test_leg_can.c`.
->
-> The full robot has **five** nodes per bus, not the three this bench test
-> drives: node 5 is **ankle roll**, also 15:1 and also motor-side.
+> roll 47:1. The ankle is **15:1** and hip roll is **26:1**. Anything scaled by
+> the old 9 travels 9/15 = 0.6 of what it was asked for. The live copy of this
+> number is `s_cmd_scale[]` in `test_leg_can.c`.
 
 > **UNRESOLVED.** The brief said "hip pitch, knee pitch, ankle pitch on CAN ids
 > 1, 3, 4 respectively" and then "(2 is for knee pitch)". Those contradict. This
@@ -146,7 +142,7 @@ Then repeat 3.1–3.6 **while flexing the harness by hand** through the leg's fu
 range of motion. An intermittent conductor at a joint passes a static soak and
 fails in service; this is the version of the test that finds it.
 
-Expected load, three nodes, CAN-FD 1 Mbit arbitration / **2.5 Mbit** data:
+Expected load, three nodes, CAN-FD 1 Mbit arbitration / 2 Mbit data:
 
 | direction | frames/s |
 |---|---|
@@ -156,14 +152,9 @@ Expected load, three nodes, CAN-FD 1 Mbit arbitration / **2.5 Mbit** data:
 | drives → STM32, heartbeat 100 Hz × 3 | 300 |
 | **total** | **6 600** |
 
-Roughly 43% at 65 µs a frame. The bench test still commands at 1 kHz; the
-**robot build sends `Set_Input_Pos` at 500 Hz** (`ODRV_CMD_DIVIDER`), which is
-the rate the policy trained at, so the full ten-drive robot is 8500 frames/s
-and 56% rather than the 73% it would be at 1 kHz.
-
-If 3.5 fails anyway, drop `encoder_msg_rate_ms` to 2 before touching the
-command rate — telemetry is for logging, the command stream is what the control
-loop needs.
+Roughly 33% at the firmware's 50 µs/frame estimate. If 3.5 fails anyway, drop
+`encoder_msg_rate_ms` to 2 before touching the command rate — telemetry is for
+logging, the 1 kHz command stream is what the control loop needs.
 
 ## Test 4 — identity, direction and gear ratio (**first motion**)
 

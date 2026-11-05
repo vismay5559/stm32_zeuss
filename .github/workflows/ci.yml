@@ -101,15 +101,15 @@ jobs:
       - name: Install Pinocchio
         run: pip install -r tools/requirements-kinematics.txt
 
-      # The model is vendored at tools/model/mukesh.urdf, so this needs nothing
+      # The model is vendored at tools/model/zeus.urdf, so this needs nothing
       # external. It catches the mistake that actually happens: tables edited
       # by hand, or committed from a different model than the one in the tree.
       - name: Kinematics tables match the model in the tree
         run: |
-          urdf=tools/model/mukesh.urdf
+          urdf=tools/model/zeus.urdf
           want=$(sha256sum "$urdf" | cut -d' ' -f1)
           have=$(grep -m1 -o 'sha256  [0-9a-f]*' Appli/App/zeus_kinematics_model.h | cut -d' ' -f3)
-          pin=$(cat tools/model/mukesh_urdf.sha256)
+          pin=$(cat tools/model/zeus_urdf.sha256)
           if [ "$want" != "$have" ]; then
             echo "zeus_kinematics_model.h was generated from a different URDF"
             echo "  tables: $have"
@@ -118,7 +118,7 @@ jobs:
             exit 1
           fi
           if [ "$want" != "$pin" ]; then
-            echo "tools/model/mukesh_urdf.sha256 does not match the URDF beside it"
+            echo "tools/model/zeus_urdf.sha256 does not match the URDF beside it"
             echo "  pin:   $pin"
             echo "  model: $want"
             exit 1
@@ -127,7 +127,7 @@ jobs:
 
       - name: Simulated walk through fusion.c
         env:
-          URDF: tools/model/mukesh.urdf
+          URDF: tools/model/zeus.urdf
           OUT: sim_out
         run: tools/sim/run.sh --check
 
@@ -139,20 +139,20 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          repository: Maverick280306/zeus_26_mukesh_deploy
+          repository: vismay5559/zeus_26
           path: workspace
           token: ${{ secrets.WORKSPACE_TOKEN }}
 
       - name: The vendored model is still the workspace's model
         if: steps.workspace.outcome == 'success'
         run: |
-          want=$(sha256sum workspace/mukesh_description/urdf/mukesh.urdf | cut -d' ' -f1)
-          have=$(cat tools/model/mukesh_urdf.sha256)
+          want=$(sha256sum workspace/zeus_description/urdf/zeus.urdf | cut -d' ' -f1)
+          have=$(cat tools/model/zeus_urdf.sha256)
           if [ "$want" != "$have" ]; then
             echo "::error title=Model drift::the workspace URDF has moved on and the firmware has not"
             echo "  vendored:  $have"
             echo "  workspace: $want"
-            echo "refresh: cp .../mukesh.urdf tools/model/ && python tools/gen_kinematics.py"
+            echo "refresh: cp .../zeus.urdf tools/model/ && python tools/gen_kinematics.py"
             exit 1
           fi
           echo "the vendored model is current ($want)"
@@ -160,15 +160,14 @@ jobs:
       - name: Model drift NOT checked
         if: steps.workspace.outcome != 'success'
         run: |
-          echo "::warning title=Model drift not checked::zeus_26_mukesh_deploy was not"
-          echo "cloned, so CI did NOT check whether tools/model/mukesh.urdf is still the"
+          echo "::warning title=Model drift not checked::the Pi workspace was not"
+          echo "cloned, so CI did NOT check whether tools/model/zeus.urdf is still the"
           echo "workspace's current model. Every other kinematics check DID run."
           echo
-          echo "This is EXPECTED unless a WORKSPACE_TOKEN secret has been set, and it is"
-          echo "not a simple thing to set: the workspace is a private repo owned by"
-          echo "another personal account, and GitHub fine-grained tokens cannot be scoped"
-          echo "to one of those at all. The options are a read-only deploy key, a classic"
-          echo "PAT, or not bothering."
+          echo "This is EXPECTED unless a WORKSPACE_TOKEN secret has been set. If the"
+          echo "workspace is a private repo owned by another personal account, a GitHub"
+          echo "fine-grained token cannot be scoped to it at all - the options are then a"
+          echo "read-only deploy key, a classic PAT, or not bothering."
           echo
           echo "Not bothering is reasonable, because the check does not need CI: run"
           echo "tools/model/check_drift.sh on any machine with both clones. See"

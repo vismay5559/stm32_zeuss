@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| `mukesh.urdf` | the robot's model, **vendored** from `zeus_26_mukesh_deploy/mukesh_description/urdf/` |
-| `mukesh_urdf.sha256` | its sha256, which `Appli/App/zeus_kinematics_model.h` also carries |
+| `zeus.urdf` | the robot's model, **vendored** from `zeus_26/zeus_description/urdf/` |
+| `zeus_urdf.sha256` | its sha256, which `Appli/App/zeus_kinematics_model.h` also carries |
 
 `tools/gen_kinematics.py` reads the copy here, not the workspace's, so a
 regeneration on a laptop and one in CI read the same bytes and neither needs the
@@ -34,8 +34,8 @@ All four steps, together — a model refreshed without regenerating fails check 
 and a regeneration without re-pinning fails check 2.
 
 ```bash
-cp ../zeus_26_mukesh_deploy/mukesh_description/urdf/mukesh.urdf tools/model/
-sha256sum tools/model/mukesh.urdf | cut -d' ' -f1 > tools/model/mukesh_urdf.sha256
+cp ../zeus_26/zeus_description/urdf/zeus.urdf tools/model/
+sha256sum tools/model/zeus.urdf | cut -d' ' -f1 > tools/model/zeus_urdf.sha256
 env -u PYTHONPATH ~/kinvenv/bin/python tools/gen_kinematics.py
 tools/hosttest/run.sh
 ```
