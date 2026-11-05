@@ -1,4 +1,5 @@
 build
+build-*/
 mx.scratch
 
 # IDE / tool state (machine-specific, not useful to others)
