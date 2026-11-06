@@ -133,6 +133,34 @@ extern const uint8_t g_leg_springs[2][2];
  */
 #define ROBOT_SPRING_K_NM_PER_RAD   3437.75f
 
+/*
+ * Gear ratio per joint, in NEXUS_J_* order.
+ *
+ * Needed because the ODrive's Torque_FF is always MOTOR torque while the gait
+ * table's torques are at the output, so what goes on the wire is
+ * g_gait_tau / g_joint_gear. Getting this wrong by a factor of 47 is not a
+ * tuning error.
+ *
+ * These are the same numbers the policy trained against: zeus_model.py has
+ * N_SEA, N_ROLL, N_ANK = 47, 26, 15.
+ *
+ * NOT applied to position or velocity. This header states above that every
+ * drive reports output-shaft position with the ratio already applied, which is
+ * how the drives are expected to be configured, so positions pass through 1:1.
+ * docs/ODRIVE_COMMANDS.md disagrees for the ankle - it says that encoder sits
+ * on the MOTOR side - and if that is what the drive actually does then its
+ * position and velocity need this ratio too. The drives are the authority;
+ * confirm before the first ankle move.
+ */
+extern const float g_joint_gear[NEXUS_NUM_JOINTS];
+
+/*
+ * 1 where a joint is series-elastic - a spring between the motor and the limb,
+ * and therefore a joint whose target needs pre-deflecting. Hip pitch and knee
+ * pitch on each leg; everything else is rigid and gets no correction.
+ */
+extern const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS];
+
 /* ===================================================================== */
 /*  Drive gains                                                           */
 /* ===================================================================== */

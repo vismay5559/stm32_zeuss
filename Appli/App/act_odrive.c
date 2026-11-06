@@ -39,6 +39,10 @@ extern FDCAN_HandleTypeDef hfdcan2;
 /* Commands arrive at 250 Hz and are interpolated across the 1 kHz ticks between them. */
 #define CMD_SEGMENT_TICKS         4u
 
+/* ODRV_CMD_DIVIDER and why it is 2 are in act_odrive.h. */
+_Static_assert((CMD_SEGMENT_TICKS % ODRV_CMD_DIVIDER) == 0u,
+               "the segment endpoint would never be transmitted");
+
 /*
  * CAN FD with BRS, 1 Mbit arbitration / 2.5 Mbit data.
  *
@@ -113,7 +117,16 @@ static float    s_seg_start[NEXUS_NUM_JOINTS];
 static float    s_seg_end[NEXUS_NUM_JOINTS];
 static float    s_out[NEXUS_NUM_JOINTS];
 static float    s_prev_out[NEXUS_NUM_JOINTS];
+
+/* Feedforward from the gait clock, refreshed every tick by
+   act_set_feedforward(). Motor Nm, already divided by the gear ratio.
+   s_have_ff stays 0 until something sets one, so a build that never calls it -
+   the single-leg bench test - keeps the old behaviour exactly. */
+static float    s_vel_ff[NEXUS_NUM_JOINTS];
+static float    s_tau_ff[NEXUS_NUM_JOINTS];
+static uint8_t  s_have_ff;
 static uint32_t s_seg_tick;
+static uint32_t s_cmd_tick;     /* ticks since Set_Input_Pos last went out */
 static uint8_t  s_have_target;
 
 /* The gains every drive is given when it arms. Starts as the table in
@@ -288,6 +301,7 @@ void act_init(void)
     memset(s_prev_out, 0, sizeof(s_prev_out));
 
     s_seg_tick    = CMD_SEGMENT_TICKS;
+    s_cmd_tick    = 0u;
     s_have_target = 0;
 
     /* Start every joint at maximum age. Nothing has been heard from any drive
@@ -408,6 +422,7 @@ void act_disarm(void)
      */
     s_have_target = 0;
     s_seg_tick    = CMD_SEGMENT_TICKS;
+    s_cmd_tick    = 0u;
     s_arming      = 0;
 
     if (!s_disarmed)
@@ -740,7 +755,30 @@ void act_set_targets(const float target_pos[NEXUS_NUM_JOINTS])
     s_have_target = 1;
 }
 
-static void send_input_pos(uint8_t bus, uint32_t node, float pos, float vel_ff)
+void act_set_feedforward(const float vel_turns_s[NEXUS_NUM_JOINTS],
+                         const float torque_out_nm[NEXUS_NUM_JOINTS])
+{
+    s_have_ff = 1u;
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        float v = (vel_turns_s != 0) ? vel_turns_s[j] : 0.0f;
+        float t = (torque_out_nm != 0) ? torque_out_nm[j] : 0.0f;
+
+        /* A NaN here would be packed into an int16 and sent, and an undefined
+           cast of NaN is whatever the hardware felt like - possibly full
+           torque. Drop to zero instead: no feedforward is a worse-tracking
+           robot, a wrong one is a dangerous robot. */
+        s_vel_ff[j] = isfinite(v) ? v : 0.0f;
+
+        /* Output Nm -> MOTOR Nm, which is what Torque_FF carries. */
+        s_tau_ff[j] = (isfinite(t) && (g_joint_gear[j] > 0.0f))
+                      ? (t / g_joint_gear[j]) : 0.0f;
+    }
+}
+
+static void send_input_pos(uint8_t bus, uint32_t node, float pos,
+                           float vel_ff, float tau_ff)
 {
     uint8_t  data[8];
     uint32_t bits;
@@ -772,8 +810,36 @@ static void send_input_pos(uint8_t bus, uint32_t node, float pos, float vel_ff)
     data[3] = (uint8_t)((bits >> 24) & 0xFFu);
     data[4] = (uint8_t)((uint16_t)vff & 0xFFu);
     data[5] = (uint8_t)(((uint16_t)vff >> 8) & 0xFFu);
-    data[6] = 0;
-    data[7] = 0;
+
+    /*
+     * Torque_FF, same int16-in-thousandths packing as the velocity and the
+     * same reason for clamping first: a C cast of an out-of-range float wraps
+     * sign, which would turn maximum forward torque into maximum reverse.
+     *
+     * These bytes were hardcoded to 0 until the policy's gait arrived with the
+     * torque the trajectory optimiser solved for. In MOTOR Nm the peaks are
+     * well under 1 Nm against this field's +/-32.767, so saturation is not the
+     * live concern - resolution is, and 1 mNm against a few tenths of a Nm is
+     * a fraction of a percent.
+     */
+    float   tff_milli = tau_ff * 1000.0f;
+    int16_t tff;
+
+    if (tff_milli > 32767.0f)
+    {
+        tff = 32767;
+    }
+    else if (tff_milli < -32768.0f)
+    {
+        tff = -32768;
+    }
+    else
+    {
+        tff = (int16_t)tff_milli;
+    }
+
+    data[6] = (uint8_t)((uint16_t)tff & 0xFFu);
+    data[7] = (uint8_t)(((uint16_t)tff >> 8) & 0xFFu);
 
     tx_enqueue(bus, (node << 5) | ODRV_CMD_SET_INPUT_POS, data);
 }
@@ -828,6 +894,24 @@ void act_tick_1khz(void)
         s_seg_tick++;
     }
 
+    /*
+     * s_out is only advanced on a tick that TRANSMITS, so it always holds the
+     * value the drives were actually last given. The packet's act_target comes
+     * from it (act_get_sent_targets), and that field means "what the drive was
+     * told" - computing a target every tick while sending every other one
+     * would publish a number no drive had received, which is the sort of
+     * quietly-wrong telemetry that sends someone tuning a gain that is fine.
+     *
+     * Sampling the same interpolation at 2 of the 4 segment ticks walks each
+     * drive along an identical path, just told at its midpoint and its end.
+     */
+    if (++s_cmd_tick < ODRV_CMD_DIVIDER)
+    {
+        act_tx_pump();
+        return;
+    }
+    s_cmd_tick = 0u;
+
     float alpha = (float)s_seg_tick / (float)CMD_SEGMENT_TICKS;
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
@@ -835,12 +919,26 @@ void act_tick_1khz(void)
         s_prev_out[j] = s_out[j];
         s_out[j]      = s_seg_start[j] + ((s_seg_end[j] - s_seg_start[j]) * alpha);
 
-        float vel_ff = (s_out[j] - s_prev_out[j]) * 1000.0f;
+        /*
+         * The GAIT's velocity, not the slope of our own interpolated target.
+         *
+         * Those are different things and training used the first. The slope of
+         * the target is how fast the command is changing, which includes the
+         * residual and the interpolator's staircase; the gait's velocity is
+         * how fast the motion itself is meant to be going.
+         *
+         * Falls back to the slope when nothing has set a feedforward, so the
+         * single-leg bench test behaves as it always did. Over the interval
+         * between transmissions, not 1 ms.
+         */
+        float vel_ff = s_have_ff ? s_vel_ff[j]
+                                 : ((s_out[j] - s_prev_out[j]) *
+                                    (1000.0f / (float)ODRV_CMD_DIVIDER));
 
         uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
         uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
 
-        send_input_pos(bus, node, s_out[j], vel_ff);
+        send_input_pos(bus, node, s_out[j], vel_ff, s_tau_ff[j]);
     }
 
     /* Start draining immediately; app_run() keeps pumping for the rest of the tick. */

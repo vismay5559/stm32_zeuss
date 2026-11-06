@@ -203,6 +203,19 @@ static void ticks(int n)
     }
 }
 
+/*
+ * One COMMAND tick - ODRV_CMD_DIVIDER board ticks, which is how often
+ * Set_Input_Pos actually reaches a drive. The board loop runs at 1 kHz but
+ * addresses the motors at 500 Hz, the rate the policy was trained at
+ * (act_odrive.h says why), so a test that ticks once and looks for a frame
+ * finds nothing on half the ticks.
+ *
+ * Use this wherever a test counts what went ON THE WIRE. Tests about elapsed
+ * milliseconds - staleness ages, arming retries - want raw ticks().
+ */
+static void cmd_tick(void)   { ticks((int)ODRV_CMD_DIVIDER); }
+static void cmd_ticks(int n) { ticks(n * (int)ODRV_CMD_DIVIDER); }
+
 /* =====================================================================
  * MUST RUN FIRST - see the note at the top of the file.
  * ===================================================================== */
@@ -265,21 +278,24 @@ static void test_the_first_move_starts_from_where_the_leg_is(void)
     drive_reports_position(0, 1.0f, 0.0f);
 
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     /*
-     * Joint 0 knows where it is, so the first millisecond of the move should
-     * be a quarter of the way from THERE (1.0) to the target (2.0). Starting
-     * from the target instead would tell the drive "be somewhere else, now",
-     * and it would go there as fast as it physically can.
+     * Joint 0 knows where it is, so the first command of the move should be
+     * HALF the way from THERE (1.0) to the target (2.0). Half, not a quarter:
+     * the segment is still four board ticks long, but the drive is only
+     * addressed on two of them, so the first frame it sees is the segment's
+     * midpoint. Starting from the target instead would tell the drive "be
+     * somewhere else, now", and it would go there as fast as it physically
+     * can.
      */
     const host_can_frame_t *f0 = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f0 != NULL, "joint 0 was sent no position command at all");
     if (f0)
     {
-        CHECK(NEAR(get_f32(f0->data), 1.25f, 1e-6f),
-              "joint 0's first command was %.4f turns, expected 1.25 - a "
-              "quarter of the way from where it is",
+        CHECK(NEAR(get_f32(f0->data), 1.5f, 1e-6f),
+              "joint 0's first command was %.4f turns, expected 1.5 - half "
+              "the way from where it is",
               (double)get_f32(f0->data));
     }
 
@@ -309,10 +325,10 @@ static void test_an_old_or_nonsense_reading_is_not_used_as_a_start(void)
     ticks((int)ACT_POS_STALE_TICKS);          /* reading is now 100 ticks old */
     host_can_forget_sent();
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
-    CHECK(f && NEAR(get_f32(f->data), 1.25f, 1e-6f),
+    CHECK(f && NEAR(get_f32(f->data), 1.5f, 1e-6f),
           "a reading exactly %u ticks old was refused; it should still count",
           ACT_POS_STALE_TICKS);
 
@@ -322,7 +338,7 @@ static void test_an_old_or_nonsense_reading_is_not_used_as_a_start(void)
     ticks((int)ACT_POS_STALE_TICKS + 1);
     host_can_forget_sent();
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f && NEAR(get_f32(f->data), 2.0f, 1e-6f),
@@ -338,7 +354,7 @@ static void test_an_old_or_nonsense_reading_is_not_used_as_a_start(void)
     drive_reports_position(0, NAN, 0.0f);
     host_can_forget_sent();
     set_all_targets(2.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f != NULL, "joint 0 was sent no position command at all");
@@ -364,19 +380,25 @@ static void test_a_move_is_spread_over_four_ticks_and_then_stops(void)
     set_all_targets(1.0f);
 
     /*
-     * Commands arrive from the Pi at 250 Hz and the motors are addressed at
-     * 1 kHz, so each command is spread across the four ticks that follow it.
-     * A quarter, a half, three quarters, then there.
+     * Commands arrive from the Pi at 250 Hz and the segment is still spread
+     * over the four board ticks that follow - but the motors are addressed at
+     * 500 Hz, so the drive is told about the SECOND and FOURTH of those: the
+     * midpoint, then the endpoint. Half, then there.
+     *
+     * It still lands exactly on 1.0, which is the property that matters: a
+     * divider that did not divide CMD_SEGMENT_TICKS evenly would skip the
+     * endpoint and leave every move slightly short, and act_odrive.c has a
+     * static assert against precisely that.
      */
-    const float expected[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+    const float expected[2] = { 0.5f, 1.0f };
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 2; i++)
     {
         host_can_forget_sent();
-        act_tick_1khz();
+        cmd_tick();
 
         const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
-        CHECK(f != NULL, "no command on tick %d", i + 1);
+        CHECK(f != NULL, "no command on command-tick %d", i + 1);
         if (f)
         {
             CHECK(NEAR(get_f32(f->data), expected[i], 1e-6f),
@@ -393,12 +415,13 @@ static void test_a_move_is_spread_over_four_ticks_and_then_stops(void)
     for (int i = 0; i < 20; i++)
     {
         host_can_forget_sent();
-        act_tick_1khz();
+        cmd_tick();
 
         const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
         CHECK(f && NEAR(get_f32(f->data), 1.0f, 1e-6f),
-              "%d ticks after arriving, the leg was commanded to %.4f instead "
-              "of holding at 1.0", i + 1, f ? (double)get_f32(f->data) : 0.0);
+              "%d command-ticks after arriving, the leg was commanded to %.4f "
+              "instead of holding at 1.0", i + 1,
+              f ? (double)get_f32(f->data) : 0.0);
         CHECK(f && get_i16(&f->data[4]) == 0,
               "a leg that has arrived was still being told it is moving");
     }
@@ -423,8 +446,8 @@ static void test_a_fast_move_reports_a_capped_speed_not_a_reversed_one(void)
     drive_reports_position(0, 0.0f, 0.0f);
     host_can_forget_sent();
 
-    set_all_targets(1.0f);          /* a quarter turn per tick = 250 turns/s */
-    act_tick_1khz();
+    set_all_targets(1.0f);          /* half a turn per command tick = 250 turns/s */
+    cmd_tick();
 
     const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f != NULL, "no command sent");
@@ -441,7 +464,7 @@ static void test_a_fast_move_reports_a_capped_speed_not_a_reversed_one(void)
     host_can_forget_sent();
 
     set_all_targets(-1.0f);
-    act_tick_1khz();
+    cmd_tick();
 
     f = sent_to(0, CMD_SET_INPUT_POS);
     CHECK(f != NULL, "no command sent");
@@ -627,7 +650,7 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     host_can_wire_blocked(0, 1);
 
     set_all_targets(1.0f);
-    ticks(5);                        /* 5 ticks x 4 joints = 20 commands */
+    cmd_ticks(5);                    /* 5 command ticks x 4 joints = 20 commands */
 
     CHECK(act_tx_dropped(0) == 2u,
           "the blocked wire lost %u commands; expected 20 sent minus the 18 "
@@ -659,7 +682,7 @@ static void test_a_refused_message_is_kept_not_thrown_away(void)
 
     /* The hardware refuses the very first message of this tick. */
     host_can_refuse_tx(0, 1u);
-    act_tick_1khz();
+    cmd_tick();
 
     /* It must still be there. Dropping it would leave one joint holding a
        position one command out of date, with nothing reporting anything. */
@@ -1062,6 +1085,164 @@ static void test_gains_are_refused_while_the_robot_is_driving(void)
     CHECK(act_set_gains(g) == 1u, "gains were still refused after disarming");
 }
 
+static void test_the_torque_feedforward_reaches_the_wire_in_motor_nm(void)
+{
+    printf("the gait's torque goes out as motor torque, not output torque\n");
+
+    /*
+     * Those two bytes were hardcoded to zero until the policy's gait arrived,
+     * and a drive with no torque feedforward has to make the whole gait torque
+     * out of position error. So the verdict here is: did anything arrive, and
+     * was it CONVERTED.
+     *
+     * Torque_FF is MOTOR Nm and the gait table is OUTPUT Nm, so the number on
+     * the wire must be the input divided by that joint's gear ratio. Joint 0
+     * is hip pitch at 47:1, so 47 Nm in must come out as 1.000 Nm, which is
+     * 1000 in the field's thousandths. Sending 47 Nm unconverted would be 47x
+     * the torque with a leg's weight behind it, and it would look exactly like
+     * a gain that needed turning down.
+     */
+    fresh_board();
+    drive_reports_position(0, 0.0f, 0.0f);
+
+    float vel[NEXUS_NUM_JOINTS] = { 0 };
+    float tau[NEXUS_NUM_JOINTS] = { 0 };
+    tau[0] = 47.0f;                     /* hip pitch, 47:1 -> 1.000 Nm motor */
+    tau[1] = -26.0f;                    /* hip roll,  26:1 -> -1.000 Nm      */
+    tau[3] = 15.0f;                     /* ankle,     15:1 -> 1.000 Nm       */
+    act_set_feedforward(vel, tau);
+
+    set_all_targets(0.0f);
+    host_can_forget_sent();
+    cmd_tick();
+
+    const host_can_frame_t *f0 = sent_to(0, CMD_SET_INPUT_POS);
+    CHECK(f0 && get_i16(&f0->data[6]) == 1000,
+          "hip pitch: 47 Nm at the output went out as %d thousandths of a "
+          "motor Nm, expected 1000 (47 / 47:1)",
+          f0 ? get_i16(&f0->data[6]) : 0);
+
+    const host_can_frame_t *f1 = sent_to(1, CMD_SET_INPUT_POS);
+    CHECK(f1 && get_i16(&f1->data[6]) == -1000,
+          "hip roll: -26 Nm went out as %d, expected -1000 (26:1)",
+          f1 ? get_i16(&f1->data[6]) : 0);
+
+    const host_can_frame_t *f3 = sent_to(3, CMD_SET_INPUT_POS);
+    CHECK(f3 && get_i16(&f3->data[6]) == 1000,
+          "ankle pitch: 15 Nm went out as %d, expected 1000 (15:1)",
+          f3 ? get_i16(&f3->data[6]) : 0);
+
+    /* A joint given no torque sends none - not a stale neighbour's. */
+    const host_can_frame_t *f2 = sent_to(2, CMD_SET_INPUT_POS);
+    CHECK(f2 && get_i16(&f2->data[6]) == 0,
+          "knee was given no feedforward but %d went out",
+          f2 ? get_i16(&f2->data[6]) : -1);
+}
+
+static void test_the_feedforward_refuses_nonsense_rather_than_packing_it(void)
+{
+    printf("a nonsense feedforward becomes zero, not whatever the cast gives\n");
+
+    /*
+     * A NaN cast to int16 in C is undefined - on this core it can come out as
+     * anything, including the field's maximum, which is full torque. Zero is
+     * the only safe reading of "I do not know": a drive with no feedforward
+     * tracks worse, a drive with a random one is dangerous.
+     */
+    fresh_board();
+    drive_reports_position(0, 0.0f, 0.0f);
+
+    float vel[NEXUS_NUM_JOINTS] = { 0 };
+    float tau[NEXUS_NUM_JOINTS] = { 0 };
+    tau[0] = NAN;
+    tau[1] = INFINITY;
+    act_set_feedforward(vel, tau);
+
+    set_all_targets(0.0f);
+    host_can_forget_sent();
+    cmd_tick();
+
+    for (int j = 0; j < 2; j++)
+    {
+        const host_can_frame_t *f = sent_to(j, CMD_SET_INPUT_POS);
+        CHECK(f != NULL, "joint %d was sent nothing", j);
+        if (f)
+        {
+            CHECK(get_i16(&f->data[6]) == 0,
+                  "joint %d: a non-finite torque was packed as %d",
+                  j, get_i16(&f->data[6]));
+        }
+    }
+}
+
+static void test_a_huge_torque_clamps_instead_of_wrapping_sign(void)
+{
+    printf("a torque too big for the field clamps, not wraps\n");
+
+    /*
+     * The same trap as the velocity hint, and the same reason it matters: an
+     * out-of-range float cast to int16 WRAPS, so the largest possible forward
+     * torque becomes the largest possible reverse one. On a leg carrying the
+     * robot that is the difference between pushing and pulling.
+     */
+    fresh_board();
+    drive_reports_position(0, 0.0f, 0.0f);
+
+    float vel[NEXUS_NUM_JOINTS] = { 0 };
+    float tau[NEXUS_NUM_JOINTS] = { 0 };
+    tau[0] =  100000.0f;                /* / 47 is still far over 32.767 Nm */
+    tau[1] = -100000.0f;
+    act_set_feedforward(vel, tau);
+
+    set_all_targets(0.0f);
+    host_can_forget_sent();
+    cmd_tick();
+
+    const host_can_frame_t *f0 = sent_to(0, CMD_SET_INPUT_POS);
+    CHECK(f0 && get_i16(&f0->data[6]) == 32767,
+          "a huge forward torque went out as %d; expected the maximum, 32767",
+          f0 ? get_i16(&f0->data[6]) : 0);
+
+    const host_can_frame_t *f1 = sent_to(1, CMD_SET_INPUT_POS);
+    CHECK(f1 && get_i16(&f1->data[6]) == -32768,
+          "a huge reverse torque went out as %d; expected the minimum, -32768",
+          f1 ? get_i16(&f1->data[6]) : 0);
+}
+
+static void test_the_velocity_hint_is_the_gait_not_the_target_slope(void)
+{
+    printf("the speed hint is the gait's own velocity once one is given\n");
+
+    /*
+     * Before the policy's gait there was no velocity to send, so the firmware
+     * sent the slope of its own interpolated target. Those are different
+     * quantities: the slope is how fast the COMMAND is changing, residual and
+     * interpolator staircase included, while the gait's velocity is how fast
+     * the motion is meant to be going. Training used the second.
+     *
+     * Checked by moving the target a long way - a slope of hundreds of turns/s
+     * - while handing over a small gait velocity. If the slope were still
+     * winning, the field would be clamped at its maximum.
+     */
+    fresh_board();
+    drive_reports_position(0, 0.0f, 0.0f);
+
+    float vel[NEXUS_NUM_JOINTS] = { 0 };
+    float tau[NEXUS_NUM_JOINTS] = { 0 };
+    vel[0] = 0.25f;                     /* 250 thousandths of a turn/s */
+    act_set_feedforward(vel, tau);
+
+    set_all_targets(1.0f);              /* slope would be ~250 turns/s */
+    host_can_forget_sent();
+    cmd_tick();
+
+    const host_can_frame_t *f = sent_to(0, CMD_SET_INPUT_POS);
+    CHECK(f && get_i16(&f->data[4]) == 250,
+          "the speed hint was %d; expected 250 - the gait's 0.25 turns/s, not "
+          "the target's own slope, which would have clamped at 32767",
+          f ? get_i16(&f->data[4]) : 0);
+}
+
 static void test_the_target_that_went_out_can_be_read_back(void)
 {
     printf("what each drive was told is reported back for tuning\n");
@@ -1075,7 +1256,7 @@ static void test_the_target_that_went_out_can_be_read_back(void)
     act_request_arm();
     all_drives_report_running();
     set_all_targets(1.0f);
-    ticks(1);
+    cmd_tick();
 
     CHECK(act_get_sent_targets(sent) == 1u, "a driving board claims it is not");
 
@@ -1116,6 +1297,10 @@ int main(void)
     test_the_pi_can_replace_the_gains_between_runs();
     test_gains_are_refused_while_the_robot_is_driving();
     test_the_target_that_went_out_can_be_read_back();
+    test_the_torque_feedforward_reaches_the_wire_in_motor_nm();
+    test_the_feedforward_refuses_nonsense_rather_than_packing_it();
+    test_a_huge_torque_clamps_instead_of_wrapping_sign();
+    test_the_velocity_hint_is_the_gait_not_the_target_slope();
 
     printf("-----------------------\n");
     if (s_fail)

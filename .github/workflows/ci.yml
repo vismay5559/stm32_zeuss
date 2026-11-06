@@ -125,6 +125,21 @@ jobs:
           fi
           echo "tables, model and pin all agree ($want)"
 
+      # The gait tables are generated from the vendored gait_library.npz, and
+      # the policy refuses to enable if ref_angle differs from its own copy of
+      # that stride by more than a degree. A hand-edited table, or one from a
+      # different speed row, is therefore a robot that will not arm.
+      - name: Gait tables match the vendored library
+        run: |
+          want=$(cat tools/model/gait_library.sha256)
+          have=$(sha256sum tools/model/gait_library.npz | cut -d' ' -f1)
+          if [ "$want" != "$have" ]; then
+            echo "tools/model/gait_library.sha256 does not match the npz beside it"
+            exit 1
+          fi
+          python3 tools/gen_gait_from_library.py --speed 0.30 \
+                  --run z1_softland_tol05 --check
+
       - name: Simulated walk through fusion.c
         env:
           URDF: tools/model/zeus.urdf

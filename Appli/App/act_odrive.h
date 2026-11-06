@@ -1,6 +1,32 @@
 #ifndef ACT_ODRIVE_H
 #define ACT_ODRIVE_H
 
+/*
+ * Set_Input_Pos goes out every OTHER tick - 500 Hz, not 1 kHz.
+ *
+ * 500 Hz is the rate the POLICY WAS TRAINED AT: zeus_env.py runs its drive law
+ * at DT_PHYS 0.002 and says so. A board sending at 1 kHz is not more accurate,
+ * it is sending a rate nothing in training ever saw, four times faster than
+ * the 250 Hz command stream that feeds it, and each drive closes its own
+ * position loop at 8 kHz off whichever target arrived last either way.
+ *
+ * It is also half the bus. With eight drives, four to a bus, Set_Input_Pos was
+ * 4000 of the 8800 frames a second; at 500 Hz the bus runs at 43% instead of
+ * 58%. Raising the data rate is the weaker lever - about 30 us of every frame
+ * is the 1 Mbit arbitration phase, which no data rate shortens.
+ *
+ * ONLY this message is divided. Encoder estimates stay at 1 kHz because the
+ * estimator needs a fresh joint angle every tick, and the heartbeat and torque
+ * telemetry stay at 100 Hz.
+ *
+ * CMD_SEGMENT_TICKS must stay a multiple of this, so the last tick of a
+ * segment is always a tick that transmits - otherwise the drive never receives
+ * the segment's endpoint and every command lands slightly short. act_odrive.c
+ * asserts it.
+ */
+#define ODRV_CMD_DIVIDER          2u
+
+
 #include <stdint.h>
 #include "link_proto.h"
 #include "robot_config.h"
@@ -61,6 +87,32 @@ void act_on_rx(uint8_t bus_index);
  * instructions first, and this function trusts what it is given completely.
  */
 void act_set_targets(const float target_pos[NEXUS_NUM_JOINTS]);
+
+/*
+ * The gait's own velocity and torque at the current phase, one per joint, in
+ * OUTPUT-shaft units (turns/s and Nm). Call it every tick, before
+ * act_tick_1khz().
+ *
+ * These are FEEDFORWARD: they tell each drive what the motion needs before it
+ * has any position error to work from. Without them a drive has to manufacture
+ * the whole gait torque out of error alone, so the limb lags its reference and
+ * the lag compounds across the stride.
+ *
+ * Why it is separate from act_set_targets(): a target arrives with a command,
+ * at 250 Hz, and is then interpolated. The feedforward comes from the gait
+ * clock, which moves every tick, so latching it with the command would feed
+ * the drives a value up to 4 ms stale and a staircase instead of a curve.
+ *
+ * TORQUE IS CONVERTED HERE, not by the caller: Torque_FF on the wire is MOTOR
+ * Nm and these are output Nm, so each is divided by its own gear ratio
+ * (g_joint_gear). Velocity passes through unscaled - see the note on
+ * g_joint_gear about the ankle.
+ *
+ * Calling it with NULLs, or never calling it, leaves both at zero, which is
+ * what the firmware did before and is still what the single-leg test does.
+ */
+void act_set_feedforward(const float vel_turns_s[NEXUS_NUM_JOINTS],
+                         const float torque_out_nm[NEXUS_NUM_JOINTS]);
 
 /*
  * What each drive was last actually told, in output-shaft turns - the
