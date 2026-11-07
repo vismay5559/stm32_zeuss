@@ -50,6 +50,35 @@ static uint32_t s_seq;
  */
 static float s_ref[NEXUS_NUM_JOINTS];
 
+/*
+ * A residual that is legal on EVERY joint.
+ *
+ * SAFETY_MAX_RESIDUAL_TURNS is one uniform bound (0.1 turn, 36 deg) and the
+ * per-joint envelope is much tighter than that in places - hip roll's whole
+ * range is 0.08 turns - so half the residual limit is not a legal step on
+ * every joint, which is what these tests want when they are testing something
+ * else. The two limits are deliberately different things: the residual bound
+ * catches a diverged policy cheaply, g_joint_limit catches what the joint can
+ * actually be asked to do.
+ */
+static float legal_step_turns(void)
+{
+    float smallest = g_joint_limit[0].max_turns;
+
+    for (int j = 1; j < NEXUS_NUM_JOINTS; j++)
+    {
+        if (g_joint_limit[j].max_turns < smallest)
+        {
+            smallest = g_joint_limit[j].max_turns;
+        }
+        if (-g_joint_limit[j].min_turns < smallest)
+        {
+            smallest = -g_joint_limit[j].min_turns;
+        }
+    }
+    return 0.3f * smallest;
+}
+
 static nexus_cmd_t make_cmd(float pos, uint16_t flags)
 {
     nexus_cmd_t c;
@@ -250,12 +279,15 @@ static void test_rejects_nan_and_out_of_range(void)
     c.residual[7] = (float)INFINITY;
     CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an infinite target");
 
+    /* The envelope is per joint now (g_joint_limit), so the over-range value
+       is taken from THAT joint's own limit rather than one pair of scalars.
+       Joint 0 is left hip pitch. */
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    s_ref[0] = SAFETY_POS_MAX_TURNS + 1.0f;
+    s_ref[0] = g_joint_limit[0].max_turns + 1.0f;
     CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an over-range target");
 
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
-    s_ref[0] = SAFETY_POS_MIN_TURNS - 1.0f;
+    s_ref[0] = g_joint_limit[0].min_turns - 1.0f;
     CHECK(safety_accept_command(&c, s_ref, t) == 0, "accepted an under-range target");
 
     CHECK(safety_rejected() == before + 4,
@@ -271,7 +303,7 @@ static void test_slew_limit(void)
 
     arm(0.0f);
 
-    nexus_cmd_t c = make_cmd(SAFETY_MAX_RESIDUAL_TURNS * 0.5f, NEXUS_CMD_ENABLE);
+    nexus_cmd_t c = make_cmd(legal_step_turns(), NEXUS_CMD_ENABLE);
     CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a legal step");
 
     c = make_cmd(SAFETY_MAX_STEP_TURNS * 0.5f + SAFETY_MAX_STEP_TURNS + 0.1f,
@@ -281,7 +313,7 @@ static void test_slew_limit(void)
     /* The refused command must not have moved the reference. A rejected
        frame that still updates s_last_pos would let a policy walk the robot
        anywhere one rejected step at a time. */
-    c = make_cmd(SAFETY_MAX_RESIDUAL_TURNS * 0.5f, NEXUS_CMD_ENABLE);
+    c = make_cmd(legal_step_turns(), NEXUS_CMD_ENABLE);
     CHECK(safety_accept_command(&c, s_ref, t) == 1,
           "a rejected command moved the slew reference");
 }
@@ -415,19 +447,30 @@ static void test_good_command_passes_through_intact(void)
     s_closed_loop = 1;
     safety_tick(0);
 
+    /*
+     * A distinct LEGAL residual per joint. It was 0.01 * j, which reached
+     * 0.07 turns on joint 7 - fine against the old +/-10 turn envelope and
+     * outside the real one, so the command was refused and the test was
+     * measuring the envelope rather than the pass-through it is named for.
+     * A fraction of each joint's own limit is legal by construction.
+     */
     nexus_cmd_t c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
+    float want[NEXUS_NUM_JOINTS];
+
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        c.residual[j] = 0.01f * (float)j;
+        want[j] = 0.1f * g_joint_limit[j].max_turns * (float)(j + 1)
+                  / (float)NEXUS_NUM_JOINTS;
+        c.residual[j] = want[j];
     }
 
     CHECK(safety_accept_command(&c, s_ref, t) == 1, "refused a good command");
 
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        CHECK(t[j] == 0.01f * (float)j,
+        CHECK(t[j] == want[j],
               "joint %d came through as %f, expected %f",
-              j, (double)t[j], (double)(0.01f * (float)j));
+              j, (double)t[j], (double)want[j]);
     }
 }
 
@@ -515,7 +558,7 @@ static void test_residual_bounds(void)
 
     printf("a legal residual on a reference near the limit is refused\n");
     arm(0.0f);
-    s_ref[4] = SAFETY_POS_MAX_TURNS - (SAFETY_MAX_RESIDUAL_TURNS * 0.5f);
+    s_ref[4] = g_joint_limit[4].max_turns - (SAFETY_MAX_RESIDUAL_TURNS * 0.5f);
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
     c.residual[4] = SAFETY_MAX_RESIDUAL_TURNS;
     CHECK(safety_accept_command(&c, s_ref, t) == 0,
@@ -523,11 +566,14 @@ static void test_residual_bounds(void)
 
     printf("the reference alone drives the joint when the residual is zero\n");
     arm(0.0f);
-    s_ref[1] = 0.25f;
+    /* Half of this joint's own limit - 0.25 turns was 90 degrees, legal only
+       against the old scalar envelope. */
+    const float ref1 = 0.5f * g_joint_limit[1].max_turns;
+    s_ref[1] = ref1;
     c = make_cmd(0.0f, NEXUS_CMD_ENABLE);
     CHECK(safety_accept_command(&c, s_ref, t) == 1,
           "refused a zero residual on a valid reference");
-    CHECK(t[1] == 0.25f, "reference did not reach the drives: got %f",
+    CHECK(t[1] == ref1, "reference did not reach the drives: got %f",
           (double)t[1]);
 
     printf("a broken reference is refused even with a zero residual\n");

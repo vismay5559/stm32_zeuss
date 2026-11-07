@@ -11,6 +11,7 @@
  */
 
 #include "robot_config.h"
+#include "gait_ref.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -184,6 +185,105 @@ static void test_the_gearing_and_spring_tables_agree_with_each_other(void)
           (double)ROBOT_SPRING_MAX_DEFLECTION_RAD);
 }
 
+static void test_the_envelope_admits_everything_the_policy_may_ask(void)
+{
+    printf("the command envelope is wide enough for the gait plus a full residual\n");
+
+    /*
+     * THE FAILURE THIS CATCHES IS A HEALTHY ROBOT BEING STOPPED.
+     *
+     * safety.c refuses a target outside g_joint_limit, and counts repeated
+     * refusals as a fault in themselves. So an envelope narrower than the
+     * policy's own authority does not make the robot safer - it makes a
+     * correctly working policy trip the board, once per stride, at the moment
+     * the gait is furthest from zero.
+     *
+     * The envelope was derived from the gait table compiled into this build
+     * plus act_scale. Those are two separate files, and a new gait row with a
+     * larger reach would silently narrow the margin. This recomputes the reach
+     * from g_gait_turns and checks the table still covers it.
+     *
+     * act_scale per joint class, from the policy bundle (rad):
+     *     hip pitch, knee 0.25   hip roll 0.12   ankle 0.15
+     */
+    static const float act_scale_rad[ROBOT_LEG_MOTORS] = {
+        [ROBOT_JOINT_HIP_PITCH] = 0.25f,
+        [ROBOT_JOINT_HIP_ROLL]  = 0.12f,
+        [ROBOT_JOINT_KNEE]      = 0.25f,
+        [ROBOT_JOINT_ANKLE]     = 0.15f,
+    };
+    /* gait column per leg slot, same mapping app.c's build_reference uses */
+    static const uint8_t col[ROBOT_LEG_MOTORS] = {
+        [ROBOT_JOINT_HIP_PITCH] = GAIT_COL_HIP_PITCH,
+        [ROBOT_JOINT_HIP_ROLL]  = GAIT_COL_HIP_ROLL,
+        [ROBOT_JOINT_KNEE]      = GAIT_COL_KNEE,
+        [ROBOT_JOINT_ANKLE]     = GAIT_COL_ANKLE,
+    };
+
+    const float tp = 6.28318530718f;
+
+    for (int leg = 0; leg < 2; leg++)
+    {
+        for (int slot = 0; slot < ROBOT_LEG_MOTORS; slot++)
+        {
+            int j = g_leg_joints[leg][slot].act_index;
+            int k = col[slot];
+
+            float lo = g_gait_turns[0][k], hi = g_gait_turns[0][k];
+            for (int i = 1; i < GAIT_SAMPLES; i++)
+            {
+                if (g_gait_turns[i][k] < lo) { lo = g_gait_turns[i][k]; }
+                if (g_gait_turns[i][k] > hi) { hi = g_gait_turns[i][k]; }
+            }
+
+            /*
+             * The gait is NOT symmetric about zero, and the left leg plays the
+             * roll columns NEGATED - which swaps that joint's two ends over.
+             * Collapsing this to a magnitude over-states the reach on the
+             * narrow side and would demand an envelope wider than the policy
+             * can use. Mirror it the way build_reference() does instead.
+             */
+            if ((leg == 0) && (slot == ROBOT_JOINT_HIP_ROLL))
+            {
+                float t = lo;
+                lo = -hi;
+                hi = -t;
+            }
+
+            float res = act_scale_rad[slot] / tp;
+            float need_hi = hi + res;
+            float need_lo = lo - res;
+
+            /* Pre-deflection only ever lowers a target, so it widens the low
+               side alone - and only on a series-elastic joint. */
+            if (g_joint_is_sea[j])
+            {
+                need_lo -= ROBOT_SPRING_MAX_DEFLECTION_RAD / tp;
+            }
+
+            CHECK(g_joint_limit[j].max_turns >= need_hi,
+                  "joint %d: envelope tops out at %+.4f turns but the gait "
+                  "plus a full residual reaches %+.4f - a working policy "
+                  "would be refused at the peak of every stride",
+                  j, (double)g_joint_limit[j].max_turns, (double)need_hi);
+            CHECK(g_joint_limit[j].min_turns <= need_lo,
+                  "joint %d: envelope bottoms out at %+.4f turns but the gait "
+                  "plus a full residual and the spring pre-deflection reaches "
+                  "%+.4f", j, (double)g_joint_limit[j].min_turns,
+                  (double)need_lo);
+
+            /* And it is not the old +/-10 turn barn door either. A limit that
+               cannot be reached is not a limit. */
+            CHECK(g_joint_limit[j].max_turns < 1.0f &&
+                  g_joint_limit[j].min_turns > -1.0f,
+                  "joint %d's envelope is %+.4f .. %+.4f turns, which no gait "
+                  "on this robot could approach - that is the loose placeholder "
+                  "back again", j, (double)g_joint_limit[j].min_turns,
+                  (double)g_joint_limit[j].max_turns);
+        }
+    }
+}
+
 static void test_calibration_flag_matches_the_data(void)
 {
     printf("the calibrated flag is not set while the values are placeholders\n");
@@ -231,6 +331,7 @@ int main(void)
     test_half_turn_is_pi();
     test_out_of_range_index();
     test_calibration_flag_matches_the_data();
+    test_the_envelope_admits_everything_the_policy_may_ask();
     test_the_gearing_and_spring_tables_agree_with_each_other();
 
     printf("-------------------------\n%s (%d failure%s)\n",

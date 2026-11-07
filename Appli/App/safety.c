@@ -170,7 +170,9 @@ static uint8_t targets_are_sane(const nexus_cmd_t *cmd,
             return 0;
         }
 
-        if ((p < SAFETY_POS_MIN_TURNS) || (p > SAFETY_POS_MAX_TURNS))
+        /* Per joint, not one pair of scalars for all of them - see
+           g_joint_limit in robot_config.h. */
+        if ((p < g_joint_limit[j].min_turns) || (p > g_joint_limit[j].max_turns))
         {
             return 0;
         }

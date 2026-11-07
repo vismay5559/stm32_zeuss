@@ -50,18 +50,19 @@ typedef enum
 #define SAFETY_FATAL_FAULTS  (HEALTH_LINK | HEALTH_TIMING)
 
 /*
- * Command envelope.
+ * Command envelope: see g_joint_limit in robot_config.h.
  *
- * PLACEHOLDERS - these are deliberately loose bounds chosen to catch garbage
- * (a NaN, a corrupted-but-plausible frame, a policy that has diverged), NOT
- * to describe this robot's real joint travel. Set them from the machine's
- * actual limits, in ODrive turns on the output side, before anything walks.
- * A limit that is wrong in the tight direction stops a healthy robot; one
- * that is wrong in the loose direction only fails to stop a sick one, which
- * is why they start here.
+ * It used to be this pair of scalars, at +/-10 turns, and this comment called
+ * them "deliberately loose bounds chosen to catch garbage, NOT to describe
+ * this robot's real joint travel", to be set "before anything walks". They are
+ * now a per-joint table derived from the gait plus the largest residual the
+ * policy can emit - about seventy times tighter, and tied to the compiled gait
+ * table by a host test so the two cannot drift apart.
+ *
+ * The reasoning in the old comment still holds and is why the table carries 2
+ * degrees of margin: a limit wrong in the TIGHT direction stops a healthy
+ * robot, and safety.c counts repeated refusals as a fault in themselves.
  */
-#define SAFETY_POS_MIN_TURNS   (-10.0f)
-#define SAFETY_POS_MAX_TURNS   ( 10.0f)
 
 /*
  * Largest jump accepted between two consecutive commands. The Pi commands at

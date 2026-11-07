@@ -162,6 +162,53 @@ extern const float g_joint_gear[NEXUS_NUM_JOINTS];
 extern const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS];
 
 /* ===================================================================== */
+/*  Command envelope, per joint                                           */
+/* ===================================================================== */
+
+/*
+ * The furthest each joint may be commanded, in ODrive turns on the OUTPUT
+ * side. safety.c refuses a target outside this.
+ *
+ * It replaced SAFETY_POS_MIN/MAX_TURNS, a pair of scalars at +/-10 turns whose
+ * own comment called them "deliberately loose bounds chosen to catch garbage,
+ * NOT to describe this robot's real joint travel". At 10 turns they were
+ * roughly SEVENTY TIMES wider than anything the policy can ask for, so a
+ * diverged policy had a very long way to go before the board objected.
+ *
+ * DERIVED, not guessed, from what the policy can legally command:
+ *
+ *   the gait's own reach over the stride (g_gait_turns)
+ *   + act_scale, the largest residual the network can emit (0.25 rad on hip
+ *     pitch and knee, 0.12 on hip roll, 0.15 on the ankle)
+ *   + the spring pre-deflection on the SEA joints, which only ever lowers a
+ *     target, so it widens the low side alone
+ *   + 2 degrees of margin, so float rounding can never reject a legal command
+ *
+ * It has to be at least that wide. safety.c treats repeated refusals as a
+ * fault in themselves, so an envelope tighter than the policy's own authority
+ * would stop a healthy robot - which is the failure its predecessor's comment
+ * warned about from the other direction.
+ *
+ * tools/hosttest/test_robot_config.c checks this table against the compiled
+ * gait table, so changing the gait without widening this fails the build's
+ * tests rather than the robot.
+ *
+ * STILL TO MEASURE: the mechanical stops. Where a stop is TIGHTER than the row
+ * below, the stop wins and the row should come in to meet it. Note that the
+ * knee's high side is +53.1 deg while zeus.urdf models every joint at +/-45 -
+ * itself a placeholder ("+/-45 deg on every joint for now"). If the knee
+ * really does stop at 45, the policy at full residual can drive it into the
+ * stop, and that is worth knowing before the first walk.
+ */
+typedef struct
+{
+    float min_turns;
+    float max_turns;
+} joint_limit_t;
+
+extern const joint_limit_t g_joint_limit[NEXUS_NUM_JOINTS];
+
+/* ===================================================================== */
 /*  Drive gains                                                           */
 /* ===================================================================== */
 

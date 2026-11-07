@@ -116,6 +116,23 @@ const uint8_t g_joint_is_sea[NEXUS_NUM_JOINTS] = {
 };
 
 /*
+ * Per-joint command envelope. See robot_config.h for how these were derived
+ * and what still has to be measured.
+ *
+ * Policy z1_softland_tol05, gait row v = 0.30 m/s, stride 1.857507 s.
+ */
+const joint_limit_t g_joint_limit[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch   */ { -0.1107f, +0.1077f },   /* -39.8 .. +38.8 deg */
+    /* L hip_roll    */ { -0.0457f, +0.0334f },   /* -16.4 .. +12.0 deg */
+    /* L knee_pitch  */ { -0.1009f, +0.1475f },   /* -36.3 .. +53.1 deg */
+    /* L ankle_pitch */ { -0.1094f, +0.0424f },   /* -39.4 .. +15.3 deg */
+    /* R hip_pitch   */ { -0.1107f, +0.1077f },   /* -39.8 .. +38.8 deg */
+    /* R hip_roll    */ { -0.0334f, +0.0457f },   /* -12.0 .. +16.4 deg */
+    /* R knee_pitch  */ { -0.1009f, +0.1475f },   /* -36.3 .. +53.1 deg */
+    /* R ankle_pitch */ { -0.1094f, +0.0424f },   /* -39.4 .. +15.3 deg */
+};
+
+/*
  * Zero at count 0 means "no zero has been measured" - the deflection is then
  * just the raw angle wrapped into +/-pi, which is at least signed and
  * continuous rather than a 0..2pi ramp with a cliff in it.

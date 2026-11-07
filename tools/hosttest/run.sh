@@ -122,7 +122,8 @@ run_suite test_contact \
 
 run_suite test_safety \
     "$HERE/test_safety.c" \
-    "$APP/safety.c"
+    "$APP/safety.c" \
+    "$APP/robot_config.c"
 
 run_suite test_leg_stream \
     "$HERE/test_leg_stream.c" \
@@ -138,7 +139,8 @@ run_suite test_fusion \
 
 run_suite test_robot_config \
     "$HERE/test_robot_config.c" \
-    "$APP/robot_config.c"
+    "$APP/robot_config.c" \
+    "$APP/gait_ref.c"
 
 run_suite test_watchdog \
     "$HERE/test_watchdog.c" \
