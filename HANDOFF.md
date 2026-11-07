@@ -1,4 +1,4 @@
-# Handoff — `stm32_zeuss`, as of 2026-11-06
+# Handoff — `stm32_zeuss`, as of 2026-11-07
 
 Written for an agent or engineer picking this up cold. **Read
 [`AGENTS.md`](AGENTS.md) first** for the build commands, the five things that
@@ -17,12 +17,14 @@ ankle roll.** Protocol **v9**, 426-byte state packet at 1 kHz, 44-byte command
 at ~250 Hz.
 
 > **This repo was briefly taken to 10 joints** (ankle roll on node 5, protocol
-> v10) for the RL policy in `zeus_26_mukesh_deploy`, and **reverted on
-> 2026-11-06** because the robot went back to the eight-actuator design. If you
-> need any of that work it is in git history — `03285b8` through `6feb3b9`, and
-> `200d598` in particular has the torque feedforward, the spring pre-deflection
-> and the 500 Hz command rate. **Do not take facts from those commits without
-> checking them against the current tree.**
+> v10) for the policy in the now-retired `zeus_26_mukesh_deploy`, and reverted
+> on 2026-11-06 when the robot went back to the eight-actuator design. If you
+> need anything from that detour it is in history at `03285b8`–`6feb3b9`.
+> **Do not take facts from those commits without checking the current tree.**
+>
+> The live Pi workspace is
+> **[`zeus_8dof_deploy`](https://github.com/Maverick280306/zeus_8dof_deploy)**,
+> running policy **`z1_softland_tol05`**.
 
 What survived the revert, because it is true at any joint count: the **gear
 ratios** (47:1 hip pitch and knee, 26:1 hip roll, **15:1 ankle**), the
@@ -37,10 +39,13 @@ drift check, and this file.
 | Protocol v9 | **done**: `check_proto.py` agrees C against Python, 8 joints |
 | Kinematics | **done**: 6-number joint vector per leg, matched to Pinocchio 2.7.0 |
 | Estimator | **done in simulation**: velocity rms 0.018 m/s, tilt rms 0.246°, height drift 0.014 m over 4.38 m |
-| CAN | **wired, never confirmed** — see below |
-| IMU | **wired, never confirmed** |
-| Spring encoders | **not wired yet** |
-| **Calibration** | **NOT DONE**, and it gates the estimator |
+| Gait + feedforward | **done**: the policy's own table, torque and velocity feedforward, spring pre-deflection, commands at 500 Hz |
+| Command envelope | **done**: per joint, derived from the gait plus the largest residual the policy can emit |
+| IMU | **CONFIRMED WORKING** 2026-11-07: SHTP handshake complete, bidirectional control exchange, 0 errors over 246 kB, \|q\| = 1.000. Orientation still unverified |
+| CAN | **wired, never confirmed.** The last scan showed `tx=0 rx=0`, so the board was not even transmitting |
+| Spring encoders | **not wired yet** — and `health` must be 0 for the policy to engage, so this blocks it |
+| **Calibration** | **NOT DONE**, and it gates the estimator and the policy |
+| **Start sequence** | **NOT DONE** — the last firmware gap, see below |
 | **Gains** | bench leg's values, and the ankle's predate the 15:1 gearbox |
 
 ## Three things to confirm before anything moves
@@ -71,6 +76,47 @@ a transmission that failed, so it was not detecting a bus fault, there was
 simply nothing answering. That predates the ISO1042B transceivers being fitted,
 so **retest**. Expect **exactly 8 drives**, nodes 1–4 on each bus; anything
 answering on node 5 is a drive still configured from the ten-joint attempt.
+
+## The start sequence — the last firmware gap
+
+`s_phase` free-runs from boot, so arming happens at an arbitrary point in the
+stride and the drives are sent to `ref` over one 4 ms interpolator segment. The
+policy's own test names the risk: *"Arming would send it straight to the
+reference, at whatever speed the gains allow. It is the leg-through-the-stand
+failure."*
+
+Note what does and does not protect you here. `rl_policy_node` refuses to
+**engage** until every joint is within 5° of `ref` and the phase is inside
+(0.95, 0.30) — but that gates the *policy*, not the *board*. The board still
+arms on `enable: true` and goes to `ref` regardless. The guard cannot save a
+leg that the arm already threw.
+
+What it needs:
+
+1. hold `s_phase` at 0 until the drives are armed,
+2. on arm, ramp each joint from where it is to `ref(0)` **slowly**, then hold,
+3. release the clock on a start condition.
+
+`ref(0)` has one foot off the ground, so the robot cannot stand at the start
+pose unaided: **the first run needs a gantry**, with the robot lowered as the
+clock releases.
+
+## What the policy refuses to engage without
+
+From `Guards.engage_blockers` in the workspace's `obs_adapter.py` — the
+authoritative list, and worth reading before wondering why nothing happens:
+
+| blocker | our state |
+|---|---|
+| `stream_flags & STREAM_GAIT_LIVE` | set unconditionally ✓ |
+| `fused_valid == FUSION_OK` | **blocked**: needs `ROBOT_CONFIG_CALIBRATED` |
+| `fk_valid` both feet | produced ✓ |
+| `health == 0` | **blocked** while the spring encoders are unwired |
+| `ref_angle` within 1° of its own gait copy | **1.8e-5°**, both legs ✓ |
+| stride clock within 2% | `GAIT_CYCLE_S 1.857507315` ✓ |
+| torso inside the tilt limit | runtime |
+| phase inside (0.95, 0.30) | free-running clock passes through it each stride |
+| every joint within 5° of `ref` | needs the start sequence above |
 
 ## Gains — read before typing any in
 
