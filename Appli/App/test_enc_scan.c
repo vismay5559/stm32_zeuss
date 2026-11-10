@@ -240,11 +240,46 @@ static void probe_bus_nets(void)
     printf("\r\n");
 }
 
+/*
+ * Spell out ERRFL, because a hex word in a log is a thing nobody decodes at
+ * the bench and these three bits each send you somewhere different: a framing
+ * error is clock or CS timing, an invalid command is a mangled address or
+ * direction bit, a parity error is noise on MOSI or a bad command word.
+ */
+static const char *errfl_bits(uint16_t errfl)
+{
+    unsigned v = errfl & 0x0007u;
+
+    if ((errfl & 0x4000u) != 0u) { return " (EF still set!)"; }
+    switch (v)
+    {
+    case 0u: return " ok";
+    case 1u: return " FRAMING";
+    case 2u: return " INVALID_CMD";
+    case 4u: return " PARITY";
+    default: return " MULTIPLE";
+    }
+}
+
 static void poll_raw_spi(void)
 {
     uint16_t command = 0xFFFFu; /* AS5047P ANGLECOM read, even parity */
     uint16_t diag_command = 0xFFFCu; /* DIAAGC read, even parity */
-    uint16_t nop_command = 0x0000u;
+    /*
+     * 0xC000, not 0x0000. Both look like "do nothing" and only one of them is.
+     * Bit 14 of a command frame is the direction bit and 1 means READ, so
+     * 0xC000 is "read NOP" - a harmless frame whose only job is to clock the
+     * previous command's reply out. 0x0000 is a WRITE command to the same
+     * address, and a write command makes the sensor treat the NEXT frame as
+     * its data, which desynchronises every reply after it by one and is a good
+     * way to latch EF.
+     *
+     * This diagnostic sent 0x0000 for a long time, which is very likely why
+     * the left leg's readings all came back with EF set. enc_as5047p.c, the
+     * production driver, never had this bug.
+     */
+    uint16_t nop_command = 0xC000u;
+    uint16_t errfl_command = 0x4001u; /* read ERRFL (0x0001), parity 0 */
 
     /* With every sensor deselected, only PB4's pull-up should drive MISO.
        This distinguishes a bus driven during clocks from a CS selection bug. */
@@ -284,6 +319,35 @@ static void poll_raw_spi(void)
             if (HAL_GPIO_ReadPin(s_cs[c].port, s_cs[c].pin) == GPIO_PIN_RESET)
                 cs_low_mask |= 1u << c;
         HAL_Delay(1); /* Exceeds the AS5047P CS-to-clock setup time. */
+
+        /*
+         * Read ERRFL first, because EF LATCHES.
+         *
+         * One malformed frame sets the error flag in every subsequent reply
+         * until ERRFL is read, and reading it is what clears it. So a single
+         * bad frame at startup makes every angle for the rest of the run look
+         * flagged, and the flag says nothing about the sensor or the magnet -
+         * which is exactly the trap the left leg's readings fell into.
+         *
+         * The value is worth having for its own sake. ERRFL bit 0 is a
+         * framing error, bit 1 an invalid command, bit 2 a parity error -
+         * three different faults that EF alone cannot tell apart, and that
+         * point at three different causes on the bench.
+         */
+        uint16_t errfl = 0xA55Au, discard = 0xA55Au;
+        (void)HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)&errfl_command,
+                                      (uint8_t *)&discard, 1u, 10u);
+        HAL_GPIO_WritePin(s_cs[i].port, s_cs[i].pin, GPIO_PIN_SET);
+        HAL_Delay(1);
+        HAL_GPIO_WritePin(s_cs[i].port, s_cs[i].pin, GPIO_PIN_RESET);
+        HAL_Delay(1);
+        (void)HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)&nop_command,
+                                      (uint8_t *)&errfl, 1u, 10u);
+        HAL_GPIO_WritePin(s_cs[i].port, s_cs[i].pin, GPIO_PIN_SET);
+        HAL_Delay(1);
+        HAL_GPIO_WritePin(s_cs[i].port, s_cs[i].pin, GPIO_PIN_RESET);
+        HAL_Delay(1);
+
         first_status = HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)&command,
                                                (uint8_t *)&first, 1u, 10u);
         HAL_GPIO_WritePin(s_cs[i].port, s_cs[i].pin, GPIO_PIN_SET);
@@ -304,11 +368,12 @@ static void poll_raw_spi(void)
         HAL_GPIO_WritePin(s_cs[i].port, s_cs[i].pin, GPIO_PIN_SET);
         GPIO_PinState cs_high = HAL_GPIO_ReadPin(s_cs[i].port, s_cs[i].pin);
 
-        printf("  %-10s CS=%u/%u low_mask=%X PB4_idle=%u poll=%u/%u/%u angle=%04X/%04X "
-               "DIAAGC=%04X spierr=0x%lX\r\n",
+        printf("  %-10s CS=%u/%u low_mask=%X PB4_idle=%u poll=%u/%u/%u "
+               "ERRFL=%04X%s angle=%04X/%04X DIAAGC=%04X spierr=0x%lX\r\n",
                s_names[i], (unsigned)cs_low, (unsigned)cs_high,
                cs_low_mask, (unsigned)idle, (unsigned)first_status,
                (unsigned)second_status, (unsigned)diag_status,
+               (unsigned)errfl, errfl_bits(errfl),
                (unsigned)first, (unsigned)second, (unsigned)diag,
                (unsigned long)HAL_SPI_GetError(&hspi1));
     }
