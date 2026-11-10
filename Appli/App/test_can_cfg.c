@@ -81,6 +81,23 @@ extern FDCAN_HandleTypeDef hfdcan2;
  *                                  count showed none
  */
 #define CANCFG_WRITE  1
+
+/*
+ * 1 = also call save_configuration, so the rates survive a power cycle.
+ *
+ * This REBOOTS every drive it touches. Each one drops off the bus for a
+ * second or two and comes back, so it is not something to run while someone
+ * is tracing a drive that is already missing - hence a switch of its own
+ * rather than part of the write above.
+ *
+ * The reboot is also the only honest proof of persistence. A read-back
+ * straight after the save would just be reading RAM, which already held the
+ * value before the save; a read-back AFTER the drive has restarted can only
+ * have come from flash. So the save stage waits for the heartbeat to return
+ * and reads the three rates again on the other side of the restart.
+ */
+#define CANCFG_SAVE   1
+
 #define EP_NODE_ID         282u
 #define EP_HEARTBEAT_MS    284u
 #define EP_ENCODER_MS      285u
@@ -287,6 +304,93 @@ static uint8_t set_rate(FDCAN_HandleTypeDef *h, uint8_t node, uint16_t ep,
     return (after == want) ? 1u : 0u;
 }
 
+#if CANCFG_WRITE && CANCFG_SAVE
+/*
+ * Save one drive's configuration and prove it stuck.
+ *
+ * save_configuration is a FUNCTION endpoint, not a parameter: the call is an
+ * SDO write to its id and the payload is ignored. There is nothing to read
+ * back from it, and the drive reboots rather than replying, so the only
+ * sequence that means anything is: watch the heartbeat stop, watch it come
+ * back, then re-read the parameters. Anything that reads 1/10/10 after the
+ * drive has restarted was loaded from flash, because RAM did not survive.
+ *
+ * A drive refuses to save unless its axis is idle. Nothing here has ever
+ * armed one, so that holds - but it is the reason a failure here would show
+ * up as "rates did not persist" rather than as an error: the refusal is
+ * silent on this protocol.
+ */
+static uint8_t save_node(FDCAN_HandleTypeDef *h, uint8_t bus, uint8_t node)
+{
+    uint8_t  d[8] = {0};
+    uint32_t id = 0xFFFFFFFFu, enc = 0u, hb = 0u, tq = 0u;
+
+    if (!sdo_read_u32(h, node, EP_NODE_ID, &id) || id != node)
+    {
+        printf("    bus %u node %u: node_id reads %lu - NOT SAVED\r\n",
+               (unsigned)bus, (unsigned)node, (unsigned long)id);
+        return 0u;
+    }
+
+    d[0] = SDO_OP_WRITE;
+    d[1] = (uint8_t)(EP_SAVE_CONFIG & 0xFFu);
+    d[2] = (uint8_t)(EP_SAVE_CONFIG >> 8);
+
+    s_hb_seen[bus] &= ~(1u << node);
+    tx_classic(h, node, CANCFG_RX_SDO, d, 8u);
+    printf("    bus %u node %u: saving", (unsigned)bus, (unsigned)node);
+
+    /* Give it a moment to actually go down, so that seeing the heartbeat is
+       evidence of a restart and not of a save that never happened. */
+    pump_for(200u);
+    s_hb_seen[bus] &= ~(1u << node);
+
+    /*
+     * 30 s, because 10 s was not enough and that mattered. The first run of
+     * this reported "DID NOT COME BACK" for every drive it reached, which
+     * reads like seven bricked drives; a read-only scan afterwards found them
+     * all idle, error-free and sending at the new rates. They were simply
+     * still erasing and rebooting. An erase-and-reboot is one of the few
+     * things on this robot that genuinely takes tens of seconds, and a
+     * diagnostic that cries brick on a drive that is merely busy is worse
+     * than one that says nothing.
+     */
+    uint32_t waited = 0u;
+    while ((s_hb_seen[bus] & (1u << node)) == 0u && waited < 30000u)
+    {
+        pump_for(100u);
+        waited += 100u;
+    }
+    if ((s_hb_seen[bus] & (1u << node)) == 0u)
+    {
+        printf(" - no heartbeat yet after %lu ms. It is probably still\r\n"
+               "      rebooting; re-run CAN_SCAN in a minute before assuming\r\n"
+               "      anything is wrong with it.\r\n", (unsigned long)waited);
+        return 0u;
+    }
+    printf(" - back after %lu ms", (unsigned long)waited);
+
+    /* Let the CAN stack settle before asking it questions. */
+    pump_for(500u);
+
+    uint8_t ok = sdo_read_u32(h, node, EP_ENCODER_MS,   &enc)
+              && sdo_read_u32(h, node, EP_HEARTBEAT_MS, &hb)
+              && sdo_read_u32(h, node, EP_TORQUE_MS,    &tq);
+    if (!ok)
+    {
+        printf(", but it will not answer an SDO read\r\n");
+        return 0u;
+    }
+
+    uint8_t good = (enc == WANT_ENCODER_MS) && (hb == WANT_HEARTBEAT_MS)
+                && (tq == WANT_TORQUE_MS);
+    printf(", from flash: enc=%lu hb=%lu torque=%lu  %s\r\n",
+           (unsigned long)enc, (unsigned long)hb, (unsigned long)tq,
+           good ? "PERSISTED" : "*** NOT WHAT WE WROTE ***");
+    return good;
+}
+#endif
+
 static uint8_t check_version(FDCAN_HandleTypeDef *h, uint8_t node)
 {
     s_ver_got = 0u;
@@ -428,9 +532,25 @@ void cancfg_run(void)
         }
     }
 
+#if !CANCFG_SAVE
     printf("\r\nNOT SAVED. These revert when a drive is power-cycled.\r\n");
     printf("Saving reboots each drive, which drops it off the bus for a moment -\r\n");
     printf("not something to do behind someone's back while they are working on it.\r\n");
+#else
+    printf("\r\n=== save_configuration: writing the rates to flash ===\r\n");
+    printf("Each drive REBOOTS. Still no axis state commanded, still nothing armed.\r\n");
+
+    for (uint8_t bus = 0u; bus < 2u; bus++)
+    {
+        FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+
+        for (uint8_t node = 1u; node <= 4u; node++)
+        {
+            if ((s_hb_seen[bus] & (1u << node)) == 0u) { continue; }
+            (void)save_node(h, bus, node);
+        }
+    }
+#endif
 #endif
 
     for (;;) { HAL_Delay(1000); }
