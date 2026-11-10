@@ -23,6 +23,223 @@ static const struct
     { enc_cs_r_knee_GPIO_Port, enc_cs_r_knee_Pin },
 };
 
+/*
+ * Net integrity probe: is the SPI1 bus electrically what the schematic says?
+ *
+ * WHY THIS EXISTS. The first run of this scan read angle=0000 from all four
+ * encoders with spierr=0, and a meter on MISO showed 1.5-2.5 V wandering
+ * rather than either rail. That is not a short to ground - against PB4's
+ * internal pull-up it implies a sink of tens of kilohms - and it is not an SPI
+ * misconfiguration, because the peripheral clocks without error.
+ *
+ * What it IS consistent with is MISO bridged to another signal on the same
+ * header. CPOL is LOW, so SCK idles LOW: a MISO-to-SCK bridge holds MISO down
+ * at idle (so the firmware reads 0) and makes a DC meter average the clock
+ * while the scan runs (so the meter reads mid-rail). PB3 is CN7 pin 15 and PB4
+ * is CN7 pin 19 - two positions apart, with pin 17 between them.
+ *
+ * So rather than guess, drive one pin and read another. A bridge announces
+ * itself. Everything here is done with SPI1 PARKED and the pins as plain GPIO,
+ * so the peripheral cannot confuse the result, and it runs before any encoder
+ * is selected - all four chip selects are held high throughout, so nothing on
+ * the far end is driving the bus and a reading can only come from the wiring.
+ *
+ * Reading the table: with a sound bus, MISO follows its own pull resistor and
+ * nothing else. Any row where MISO tracks a pin being driven is a short
+ * between those two, and it is at the connector or in the harness, not in the
+ * silicon.
+ */
+#define MISO_PORT   GPIOB
+#define MISO_PIN    GPIO_PIN_4
+#define SCK_PORT    GPIOB
+#define SCK_PIN     GPIO_PIN_3
+#define MOSI_PORT   GPIOD
+#define MOSI_PIN    GPIO_PIN_7
+
+static void miso_as_input(uint32_t pull)
+{
+    GPIO_InitTypeDef g = {0};
+
+    g.Pin   = MISO_PIN;
+    g.Mode  = GPIO_MODE_INPUT;
+    g.Pull  = pull;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(MISO_PORT, &g);
+    HAL_Delay(2);                       /* let the pull settle the net */
+}
+
+static void pin_as_output(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState level)
+{
+    GPIO_InitTypeDef g = {0};
+
+    HAL_GPIO_WritePin(port, pin, level);
+    g.Pin   = pin;
+    g.Mode  = GPIO_MODE_OUTPUT_PP;
+    g.Pull  = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(port, &g);
+    HAL_GPIO_WritePin(port, pin, level);
+    HAL_Delay(2);
+}
+
+static unsigned miso(void)
+{
+    return (HAL_GPIO_ReadPin(MISO_PORT, MISO_PIN) == GPIO_PIN_SET) ? 1u : 0u;
+}
+
+struct bus_pin { const char *name; GPIO_TypeDef *port; uint16_t pin; const char *where; };
+
+/* Every signal on the SPI1 bus, so each can be driven or floated by name. */
+static struct bus_pin bus_pins(unsigned i)
+{
+    struct bus_pin t[2 + NEXUS_NUM_ENCODERS] = {
+        { "SCK",  SCK_PORT,  SCK_PIN,  "PB3, CN7 pin 15" },
+        { "MOSI", MOSI_PORT, MOSI_PIN, "PD7, CN9 pin 2"  },
+        { "CS left hip",   s_cs[0].port, s_cs[0].pin, "PF1"  },
+        { "CS left knee",  s_cs[1].port, s_cs[1].pin, "PD15" },
+        { "CS right hip",  s_cs[2].port, s_cs[2].pin, "PD14" },
+        { "CS right knee", s_cs[3].port, s_cs[3].pin, "PF5"  },
+    };
+    return t[i];
+}
+#define BUS_PIN_COUNT (2u + NEXUS_NUM_ENCODERS)
+
+static void pin_float(GPIO_TypeDef *port, uint16_t pin)
+{
+    GPIO_InitTypeDef g = {0};
+
+    g.Pin  = pin;
+    g.Mode = GPIO_MODE_INPUT;
+    g.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(port, &g);
+}
+
+/*
+ * EVERY bus signal high-impedance. This is the baseline each test starts from,
+ * and leaving it out is how the first two versions of this probe produced
+ * answers that were not about the pin they named: pins left driven by an
+ * earlier step were still driving during a later one, so "no bridge to MOSI"
+ * was measured with SCK held low and MISO pulled the wrong way.
+ */
+static void bus_all_float(void)
+{
+    /*
+     * SCK and MOSI float; MISO floats; but every CHIP SELECT is driven HIGH,
+     * which is the idle state that keeps the sensors DESELECTED.
+     *
+     * Floating them, as this did at first, leaves each sensor's CS input
+     * indeterminate - a floating CMOS input can read LOW, so the sensor
+     * decides it is selected and starts driving MISO. Every reading then
+     * describes a sensor talking rather than the wiring, which is how this
+     * probe came to report that MISO "follows MOSI high" and that four chip
+     * selects all did the same thing.
+     */
+    pin_float(SCK_PORT, SCK_PIN);
+    pin_float(MOSI_PORT, MOSI_PIN);
+    for (unsigned c = 0; c < NEXUS_NUM_ENCODERS; c++)
+    {
+        pin_as_output(s_cs[c].port, s_cs[c].pin, GPIO_PIN_SET);
+    }
+    pin_float(MISO_PORT, MISO_PIN);
+    HAL_Delay(2);
+}
+
+static void probe_bus_nets(void)
+{
+    printf("\r\nSPI1 net probe - SPI parked, every signal floated between tests\r\n");
+
+    HAL_SPI_DeInit(&hspi1);
+    bus_all_float();
+
+    /*
+     * 1. Is MISO free? Nothing else on the bus is driving, so it must follow
+     *    whichever pull is enabled. Anything else is an external load.
+     */
+    miso_as_input(GPIO_PULLUP);
+    unsigned up = miso();
+    miso_as_input(GPIO_PULLDOWN);
+    unsigned down = miso();
+    printf("  MISO alone        pull-up=%u pull-down=%u   -> %s\r\n",
+           up, down,
+           (up == 1u && down == 0u) ? "FREE"
+           : (up == 0u && down == 0u) ? "HELD LOW externally"
+           : (up == 1u && down == 1u) ? "HELD HIGH externally"
+                                      : "inconsistent - retry");
+
+    /*
+     * 2. Every other signal against MISO, BOTH directions, one at a time with
+     *    everything else floating.
+     *
+     *    Driving the other pin LOW while MISO is pulled UP catches a bridge
+     *    that drags MISO down - the case that matters for a chip select, which
+     *    idles high and asserts low. Driving it HIGH with MISO pulled DOWN
+     *    catches the other polarity. One direction alone is not a test: the
+     *    earlier version only did the second and reported "no bridge" on all
+     *    four chip selects while the right leg was reading 0000.
+     *
+     *    BOTH directions is also what separates a bridge from a sensor simply
+     *    answering. A bridge is a push-pull pin wired to MISO, so it wins
+     *    against either pull and MISO tracks it up AND down. A live sensor
+     *    drives MISO only while its own CS is asserted and tri-states when it
+     *    is released, so MISO returns to its pull in one of the two
+     *    directions. Only "tracks both ways" is a bridge.
+     */
+    for (unsigned i = 0; i < BUS_PIN_COUNT; i++)
+    {
+        struct bus_pin b = bus_pins(i);
+
+        bus_all_float();
+        miso_as_input(GPIO_PULLUP);
+        pin_as_output(b.port, b.pin, GPIO_PIN_RESET);
+        unsigned pull_up_drive_low = miso();
+
+        bus_all_float();
+        miso_as_input(GPIO_PULLDOWN);
+        pin_as_output(b.port, b.pin, GPIO_PIN_SET);
+        unsigned pull_dn_drive_high = miso();
+
+        const char *verdict =
+            (pull_up_drive_low == 0u && pull_dn_drive_high == 1u)
+                ? "*** BRIDGED to MISO ***"
+            : (pull_up_drive_low == 0u)
+                ? "MISO follows it LOW only"
+            : (pull_dn_drive_high == 1u)
+                ? "MISO follows it HIGH only"
+                : "independent";
+
+        printf("  %-14s %-16s lo->MISO=%u hi->MISO=%u   -> %s\r\n",
+               b.name, b.where, pull_up_drive_low, pull_dn_drive_high, verdict);
+    }
+
+    /*
+     * 3. The pin itself. A push-pull output beats leakage of tens of kilohms
+     *    outright, so if MISO will not reach the rail it is driven to, the load
+     *    is a real short or a damaged pad. Safe because everything else on the
+     *    bus is floating.
+     */
+    bus_all_float();
+    pin_as_output(MISO_PORT, MISO_PIN, GPIO_PIN_SET);
+    unsigned drv_hi = miso();
+    pin_as_output(MISO_PORT, MISO_PIN, GPIO_PIN_RESET);
+    unsigned drv_lo = miso();
+    printf("  MISO driven       %-16s high->%u low->%u   -> %s\r\n",
+           "PB4, CN7 pin 19", drv_hi, drv_lo,
+           (drv_hi == 1u && drv_lo == 0u) ? "pin and net sound"
+                                          : "*** hard short or damaged pad ***");
+
+    /* Hand the bus back: chip selects idle HIGH, MISO an input, SPI1 alive. */
+    for (unsigned c = 0; c < NEXUS_NUM_ENCODERS; c++)
+    {
+        pin_as_output(s_cs[c].port, s_cs[c].pin, GPIO_PIN_SET);
+    }
+    miso_as_input(GPIO_PULLUP);
+    if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    {
+        printf("  SPI1 re-init FAILED after the probe\r\n");
+    }
+    printf("\r\n");
+}
+
 static void poll_raw_spi(void)
 {
     uint16_t command = 0xFFFFu; /* AS5047P ANGLECOM read, even parity */
@@ -145,6 +362,7 @@ void encscan_init(void)
         for (;;) { HAL_Delay(1000); }
     }
 
+    probe_bus_nets();
     printf("SPI polling probe at 1 MHz (two raw words per CS):\r\n");
     poll_raw_spi();
 #if !ENC_SCAN_POLL_ONLY
