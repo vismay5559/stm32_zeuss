@@ -30,6 +30,7 @@
 #include "test_imu.h"
 #include "test_can_scan.h"
 #include "test_enc_scan.h"
+#include "test_can_cfg.h"
 #include "imu_bno085.h"
 #include "enc_as5047p.h"
 #include "act_odrive.h"
@@ -196,6 +197,9 @@ int main(void)
 #elif (NEXUS_MODE == NEXUS_MODE_ENC_SCAN)
   printf("APPLI: mode = ENC_SCAN (four spring encoders, no commands)\r\n");
   encscan_init();
+#elif (NEXUS_MODE == NEXUS_MODE_CAN_CFG)
+  printf("APPLI: mode = CAN_CFG (reads/sets ODrive CAN rates, never arms)\r\n");
+  cancfg_init();
 #else
   printf("APPLI: peripheral init done, entering app_init()\r\n");
   app_init();
@@ -231,6 +235,8 @@ int main(void)
   canscan_run();
 #elif (NEXUS_MODE == NEXUS_MODE_ENC_SCAN)
   encscan_run();
+#elif (NEXUS_MODE == NEXUS_MODE_CAN_CFG)
+  cancfg_run();
 #else
   app_run();
 #endif
@@ -641,6 +647,8 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 
 #if (NEXUS_MODE == NEXUS_MODE_CAN_SCAN)
   canscan_on_rx(hfdcan);
+#elif (NEXUS_MODE == NEXUS_MODE_CAN_CFG)
+  cancfg_on_rx(hfdcan);
 #elif (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
   if (hfdcan->Instance == FDCAN1)
   {
