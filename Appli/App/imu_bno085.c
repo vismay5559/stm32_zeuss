@@ -539,12 +539,12 @@ void imu_init(void)
     {
         GPIO_InitTypeDef g = {0};
 
-        g.Pin       = GPIO_PIN_9;
+        g.Pin       = GPIO_PIN_5;
         g.Mode      = GPIO_MODE_AF_PP;
         g.Pull      = GPIO_PULLUP;
         g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
         g.Alternate = GPIO_AF7_USART2;
-        HAL_GPIO_Init(GPIOA, &g);
+        HAL_GPIO_Init(GPIOD, &g);
     }
 
     /* Keep the status. If arming fails there is no receiver at all, and every

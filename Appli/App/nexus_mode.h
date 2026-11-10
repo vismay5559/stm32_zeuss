@@ -17,6 +17,8 @@
 #define NEXUS_MODE_LEG_CAN    1  /* CAN-FD only: one leg, ODrive position mode */
 #define NEXUS_MODE_IMU        2  /* IMU only: print quaternion/accel/gyro      */
 #define NEXUS_MODE_LEG_TORQUE 3  /* one leg, STM32-side PD -> Set_Input_Torque */
+#define NEXUS_MODE_CAN_SCAN   4  /* both CAN buses, receive only; no drive commands */
+#define NEXUS_MODE_ENC_SCAN   5  /* four spring encoders, SPI only */
 
 /*
  * THIS LINE is the mode. Edit it, rebuild, reflash.
@@ -49,8 +51,12 @@
 #define NEXUS_MODE_NAME  "IMU"
 #elif (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
 #define NEXUS_MODE_NAME  "LEG_TORQUE"
+#elif (NEXUS_MODE == NEXUS_MODE_CAN_SCAN)
+#define NEXUS_MODE_NAME  "CAN_SCAN"
+#elif (NEXUS_MODE == NEXUS_MODE_ENC_SCAN)
+#define NEXUS_MODE_NAME  "ENC_SCAN"
 #else
-#error "NEXUS_MODE must be one of NEXUS_MODE_ROBOT / _LEG_CAN / _IMU / _LEG_TORQUE"
+#error "NEXUS_MODE must be ROBOT / LEG_CAN / IMU / LEG_TORQUE / CAN_SCAN / ENC_SCAN"
 #endif
 
 #endif /* NEXUS_MODE_H */

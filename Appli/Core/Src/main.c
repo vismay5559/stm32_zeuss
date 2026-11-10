@@ -28,6 +28,8 @@
 #include "test_leg_can.h"
 #include "test_leg_torque.h"
 #include "test_imu.h"
+#include "test_can_scan.h"
+#include "test_enc_scan.h"
 #include "imu_bno085.h"
 #include "enc_as5047p.h"
 #include "act_odrive.h"
@@ -188,6 +190,12 @@ int main(void)
 #elif (NEXUS_MODE == NEXUS_MODE_IMU)
   printf("APPLI: mode = IMU (BNO085 test)\r\n");
   imutest_init();
+#elif (NEXUS_MODE == NEXUS_MODE_CAN_SCAN)
+  printf("APPLI: mode = CAN_SCAN (both buses, no commands)\r\n");
+  canscan_init();
+#elif (NEXUS_MODE == NEXUS_MODE_ENC_SCAN)
+  printf("APPLI: mode = ENC_SCAN (four spring encoders, no commands)\r\n");
+  encscan_init();
 #else
   printf("APPLI: peripheral init done, entering app_init()\r\n");
   app_init();
@@ -219,6 +227,10 @@ int main(void)
   legtest_run();
 #elif (NEXUS_MODE == NEXUS_MODE_IMU)
   imutest_run();
+#elif (NEXUS_MODE == NEXUS_MODE_CAN_SCAN)
+  canscan_run();
+#elif (NEXUS_MODE == NEXUS_MODE_ENC_SCAN)
+  encscan_run();
 #else
   app_run();
 #endif
@@ -627,7 +639,9 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     return;
   }
 
-#if (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
+#if (NEXUS_MODE == NEXUS_MODE_CAN_SCAN)
+  canscan_on_rx(hfdcan);
+#elif (NEXUS_MODE == NEXUS_MODE_LEG_TORQUE)
   if (hfdcan->Instance == FDCAN1)
   {
     legtorque_on_rx();

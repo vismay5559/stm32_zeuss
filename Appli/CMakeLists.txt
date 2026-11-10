@@ -46,7 +46,7 @@ set(NEXUS_MODE "${NEXUS_MODE}" CACHE STRING
 # header dead code: the command-line definition always won, so the file could
 # be edited to any value with no effect on the binary.
 set_property(CACHE NEXUS_MODE PROPERTY STRINGS
-    "" NEXUS_MODE_ROBOT NEXUS_MODE_LEG_CAN NEXUS_MODE_IMU NEXUS_MODE_LEG_TORQUE)
+    "" NEXUS_MODE_ROBOT NEXUS_MODE_LEG_CAN NEXUS_MODE_IMU NEXUS_MODE_LEG_TORQUE NEXUS_MODE_CAN_SCAN NEXUS_MODE_ENC_SCAN)
 
 if(NOT HEALTH_EXPECTED_MASK AND DEFINED ENV{HEALTH_EXPECTED_MASK})
     set(HEALTH_EXPECTED_MASK "$ENV{HEALTH_EXPECTED_MASK}")
@@ -149,6 +149,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/test_leg_can.c
     App/test_leg_torque.c
     App/test_imu.c
+    App/test_can_scan.c
+    App/test_enc_scan.c
     App/enc_as5047p.c
     App/imu_bno085.c
     App/act_odrive.c
