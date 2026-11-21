@@ -460,6 +460,15 @@ void app_init(void)
      * hour (docs/IMU_NOISE.md), so the filter has an easy job on its own.
      */
     imu_use_uncal_gyro(1u);
+    /*
+     * And no rotation vector. The estimator derives its own orientation; the
+     * sensor's is only a comparison channel (imu_quat in the packet), and
+     * producing it starves the accelerometer. Measured 2026-11-22 in ROBOT
+     * mode with it on: gyro 371/s, accelerometer 127/s - and the filter only
+     * predicts when BOTH are new, so it was running at ~127 Hz, not 400.
+     * imu_quat stays at identity with this off.
+     */
+    imu_skip_quaternion(1u);
     imu_init();
 
     /*
