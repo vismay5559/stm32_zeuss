@@ -8,11 +8,15 @@
  * node 4 ankle, left leg on bus 0 and right on bus 1. Node 5 on each bus would
  * be a waist joint; this build has none.
  *
- * Every sign is +1 and every offset 0, which is another way of writing "not
- * measured". Both matter: the sign says whether the drive's positive
- * direction agrees with the URDF's convention (pitch about +Y, roll about
- * +X), and the offset says where the drive's homing position sits relative to
- * the URDF's zero pose.
+ * Every sign here is +1, and that is NOT "not measured": the drives' own
+ * directions are corrected once, at the CAN boundary, by g_joint_dir below,
+ * so act->pos is already in the URDF's convention by the time it gets here.
+ * A -1 here would undo that correction for the estimator alone.
+ *
+ * Offsets are 0 because the drives are zeroed in the URDF's zero pose. Hip
+ * pitch, hip roll and knee are non-backdrivable (47:1, 26:1, 47:1) with the
+ * encoder on the output, so that zero survives a power cycle. The ankle is
+ * 15:1 and backdrivable, so its zero is NOT yet trustworthy - still open.
  */
 const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
     /* --- left leg, bus 0 --- */
@@ -88,6 +92,29 @@ const uint8_t g_leg_springs[2][2] = {
  * The ankle read 9:1 in this repo until 2026-10-31, from the first bench leg.
  * test_leg_can.c's s_cmd_scale[] is the other live copy of this number.
  */
+/*
+ * Drive direction against the URDF, measured 2026-11-21 by hand on the
+ * assembled robot. See robot_config.h for the convention.
+ *
+ *   left  hip pitch  count rises as the leg swings back       +1
+ *   left  hip roll   count rises as the foot moves outward    +1 (= robot left)
+ *   left  knee       count rises as the shin swings back      +1
+ *   right hip pitch  count rises as the leg swings FORWARD    -1
+ *   right hip roll   count rises as the foot moves inward     +1 (= robot left)
+ *   right knee       count rises as the shin swings back      +1
+ *   ankles           NOT MEASURED                             +1
+ */
+const float g_joint_dir[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch   */ +1.0f,
+    /* L hip_roll    */ +1.0f,
+    /* L knee_pitch  */ +1.0f,
+    /* L ankle_pitch */ +1.0f,   /* NOT MEASURED */
+    /* R hip_pitch   */ -1.0f,
+    /* R hip_roll    */ +1.0f,
+    /* R knee_pitch  */ +1.0f,
+    /* R ankle_pitch */ +1.0f,   /* NOT MEASURED */
+};
+
 const float g_joint_gear[NEXUS_NUM_JOINTS] = {
     /* L hip_pitch   */ 47.0f,
     /* L hip_roll    */ 26.0f,

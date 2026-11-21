@@ -31,6 +31,7 @@
 #include "act_odrive.h"
 #include "fdcan.h"
 #include "link_proto.h"
+#include "robot_config.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -766,10 +767,79 @@ static void test_replies_land_on_the_right_joint(void)
           t.axis_error[4]);
     CHECK(t.axis_state[4] == (uint8_t)ODRV_AXIS_STATE_IDLE,
           "joint 4's reported state came back as %u", t.axis_state[4]);
-    CHECK(NEAR(t.torque[4], 3.5f, 1e-6f),
-          "joint 4's effort came back as %.4f, expected 3.5 - the amount it "
+    /* Joint 4 is the right hip pitch, whose drive counts backwards against
+       the URDF, so what the drive calls +3.5 the robot calls -3.5. The
+       direction itself is tested on its own below; here it is only the
+       half-of-the-message question. */
+    CHECK(NEAR(t.torque[4], 3.5f * g_joint_dir[4], 1e-6f),
+          "joint 4's effort came back as %.4f, expected %.1f - the amount it "
           "is actually applying, not the amount asked for",
-          (double)t.torque[4]);
+          (double)t.torque[4], (double)(3.5f * g_joint_dir[4]));
+}
+
+static void test_a_reversed_drive_is_reversed_both_ways(void)
+{
+    printf("a drive that counts backwards is corrected going in and coming out\n");
+
+    /*
+     * The right hip pitch drive's count rises as the leg swings FORWARD, which
+     * is negative in the URDF. If only the reading were corrected, the
+     * estimator would be right and the gait would swing that leg the wrong way
+     * - a robot that kicks forward with one leg on its first step. If only the
+     * command were corrected, the gait would be right and the estimator would
+     * put the right foot behind the robot when it is in front. Both halves, so
+     * both are checked, and the feedforwards with them: a position flipped
+     * without its torque is a joint commanded one way and pushed the other.
+     */
+    CHECK(g_joint_dir[NEXUS_J_R_HIP_PITCH] == -1.0f,
+          "right hip pitch direction is %.1f, measured -1 on 2026-11-21",
+          (double)g_joint_dir[NEXUS_J_R_HIP_PITCH]);
+
+    const int j = NEXUS_J_R_HIP_PITCH;
+
+    fresh_board();
+    drive_reports_position(j, 0.10f, 0.5f);     /* the drive's own count */
+
+    act_telemetry_t t;
+    act_get(&t);
+    CHECK(NEAR(t.pos[j], -0.10f, 1e-6f),
+          "the drive said +0.10 turns and the robot read %.4f, expected -0.10",
+          (double)t.pos[j]);
+    CHECK(NEAR(t.vel[j], -0.5f, 1e-6f),
+          "the drive said +0.5 turns/s and the robot read %.4f, expected -0.5",
+          (double)t.vel[j]);
+
+    /* Ask for the leg to stay exactly where it is, with a feedforward. */
+    float vel[NEXUS_NUM_JOINTS] = { 0 };
+    float tau[NEXUS_NUM_JOINTS] = { 0 };
+    vel[j] = -0.5f;
+    tau[j] = -47.0f;                    /* 47:1 -> -1.000 Nm in URDF terms */
+    act_set_feedforward(vel, tau);
+
+    float target[NEXUS_NUM_JOINTS];
+    act_telemetry_t now;
+    act_get(&now);
+    for (int k = 0; k < NEXUS_NUM_JOINTS; k++) { target[k] = now.pos[k]; }
+    act_set_targets(target);
+
+    host_can_forget_sent();
+    cmd_tick();
+
+    const host_can_frame_t *f = sent_to(j, CMD_SET_INPUT_POS);
+    CHECK(f != 0, "no position command reached the right hip");
+    if (f)
+    {
+        CHECK(NEAR(get_f32(&f->data[0]), 0.10f, 1e-6f),
+              "holding the leg still sent %.4f turns, expected the drive's own "
+              "+0.10 - anything else moves the leg on arming",
+              (double)get_f32(&f->data[0]));
+        CHECK(get_i16(&f->data[4]) == 500,
+              "the velocity hint went out as %d thousandths, expected +500",
+              get_i16(&f->data[4]));
+        CHECK(get_i16(&f->data[6]) == 1000,
+              "the torque went out as %d thousandths, expected +1000",
+              get_i16(&f->data[6]));
+    }
 }
 
 static void test_a_frame_from_a_wire_that_does_not_exist_is_bounded(void)
@@ -1289,6 +1359,7 @@ int main(void)
     test_a_blocked_wire_loses_commands_and_says_so();
     test_a_refused_message_is_kept_not_thrown_away();
     test_replies_land_on_the_right_joint();
+    test_a_reversed_drive_is_reversed_both_ways();
     test_a_frame_from_a_wire_that_does_not_exist_is_bounded();
     test_a_reading_is_handed_over_once_and_then_ages();
     test_a_wire_that_shuts_itself_down_is_restarted();

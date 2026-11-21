@@ -365,14 +365,16 @@ void act_on_rx(uint8_t bus_index)
         switch (cmd)
         {
         case ODRV_CMD_GET_ENCODER:
-            s_telem.pos[j] = le_f32(&data[0]);
-            s_telem.vel[j] = le_f32(&data[4]);
+            /* Into the URDF's direction here and nowhere else - see
+               g_joint_dir in robot_config.h. */
+            s_telem.pos[j] = g_joint_dir[j] * le_f32(&data[0]);
+            s_telem.vel[j] = g_joint_dir[j] * le_f32(&data[4]);
             s_telem.flags[j] |= NEXUS_ACT_TELEM_FRESH;
             s_pos_age[j] = 0u;      /* this is the one that means "trustworthy" */
             break;
 
         case ODRV_CMD_GET_TORQUES:
-            s_telem.torque[j] = le_f32(&data[4]);
+            s_telem.torque[j] = g_joint_dir[j] * le_f32(&data[4]);
             s_telem.flags[j] |= NEXUS_ACT_TELEM_FRESH;
             break;
 
@@ -938,7 +940,13 @@ void act_tick_1khz(void)
         uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
         uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
 
-        send_input_pos(bus, node, s_out[j], vel_ff, s_tau_ff[j]);
+        /*
+         * Back into the drive's own direction, the mirror of act_on_rx(). All
+         * three fields flip: a position flipped without its feedforwards is a
+         * joint commanded one way and pushed the other.
+         */
+        const float dir = g_joint_dir[j];
+        send_input_pos(bus, node, dir * s_out[j], dir * vel_ff, dir * s_tau_ff[j]);
     }
 
     /* Start draining immediately; app_run() keeps pumping for the rest of the tick. */

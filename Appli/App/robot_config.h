@@ -155,6 +155,33 @@ extern const uint8_t g_leg_springs[2][2];
 extern const float g_joint_gear[NEXUS_NUM_JOINTS];
 
 /*
+ * Which way each DRIVE counts, against the URDF's convention, in NEXUS_J_*
+ * order. +1 when the drive's position increases as the joint moves in its
+ * URDF-positive direction, -1 when it decreases.
+ *
+ * The URDF convention, in the robot's frame (X forward, Y left, Z up):
+ *     hip pitch +  leg swings BACKWARD
+ *     knee      +  shin swings backward (the knee bends the normal way)
+ *     ankle     +  toes DOWN
+ *     hip roll  +  foot moves toward the robot's LEFT, on both legs - so
+ *                  outward on the left leg and inward on the right
+ *
+ * Applied in exactly ONE place, act_odrive.c, at the CAN boundary: to
+ * position, velocity and torque coming in, and to the position, velocity
+ * feedforward and torque feedforward going out. Everything above that - the
+ * gait, safety limits, the estimator, the state packet, the policy - works in
+ * the URDF's convention and never sees a drive's own direction.
+ *
+ * That is why g_leg_joints[].sign is +1 everywhere and must stay so: a second
+ * sign there would flip the estimator's joint twice.
+ *
+ * Measured 2026-11-21 by moving each joint by hand and reading the drive. The
+ * right hip pitch is the odd one out: its count rises as the leg swings
+ * FORWARD. The ankles are not measured yet and are +1 by default.
+ */
+extern const float g_joint_dir[NEXUS_NUM_JOINTS];
+
+/*
  * 1 where a joint is series-elastic - a spring between the motor and the limb,
  * and therefore a joint whose target needs pre-deflecting. Hip pitch and knee
  * pitch on each leg; everything else is rigid and gets no correction.
