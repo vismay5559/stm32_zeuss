@@ -214,6 +214,38 @@ instead.
 Switches are wired to **GND** with the STM32's internal pull-ups, so a closed
 switch reads 0.
 
+### Wiring each switch
+
+Two wires per switch: one to the foot's input pin, one to ground. A plain
+switch has no polarity, so either wire can go to either point.
+
+| Switch | Wire 1 | Wire 2 |
+|---|---|---|
+| **Left foot** | **PE2**, CN11 pin 46 | **GND**, e.g. CN11 pin 8, 19, 20 or 22 |
+| **Right foot** | **PE4**, CN11 pin 48 | **GND**, the same or another GND pin |
+
+- **Never connect a switch to 3V3 or 5V.** The pull-up is inside the STM32. A
+  pressed switch pulls the pin to ground, and that is what reads as contact.
+- **A three-terminal microswitch (COM / NO / NC):** use **COM and NO**, so the
+  circuit closes when the foot is loaded. NC inverts it: the robot would think
+  the foot is down whenever it is in the air.
+- Leave PE3 and PE5 (CN11 pins 47 and 50) unconnected.
+
+### Long wires down the leg
+
+The wires run the length of each leg, alongside the motor cables, and the
+internal pull-up is weak (about 40 kΩ). Contact timing is what the estimator
+trusts most, so a flicker here becomes a velocity error.
+
+- **Twist each switch's two wires together** all the way down the leg.
+- If contact flickers with the motors powered, put **100 nF across the switch**
+  (signal to GND), at the board end.
+- Optionally, add a **4.7 kΩ pull-up from each signal pin to 3V3** to make the
+  line much stiffer against pickup.
+
+**To check:** `zeus check` lists each foot switch. Press each one and watch it
+change.
+
 ---
 
 ## Everything else, so it is not accidentally reused
