@@ -85,6 +85,11 @@ static uint32_t          s_console_us_max;
 
 static nexus_state_t     s_state;
 
+/* Last spring deflection that passed every check, per encoder, and how many
+   reads were refused for lying outside the spring's travel. */
+static float    s_spring_last[NEXUS_NUM_ENCODERS];
+static uint32_t s_spring_out_of_range;
+
 uint32_t app_overruns(void)
 {
     return s_overruns;
@@ -542,10 +547,31 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
          * sits near the wrap point would otherwise jump a full turn between
          * two adjacent ticks - straight into the Pi's torque estimate.
          *
-         * The zeros live in robot_config.h and have not been measured yet.
+         * The zeros live in robot_config.h (measured 2026-11-22).
+         *
+         * And a deflection the spring cannot physically reach is a bad read,
+         * not a deflection. The bus delivers occasional replies with good
+         * parity and a wrong angle - 0, or the true value shifted a bit - in
+         * BURSTS, so the driver's repeat test alone lets some through. Outside
+         * twice the spring's travel around its zero (3.4 degrees; the
+         * glitches land tens of degrees away), the read is marked invalid
+         * this tick and the last good deflection is sent instead - so the
+         * policy, which reads spring_angle every step, never sees one.
          */
-        spring_rad[e] = robot_spring_deflection((uint8_t)e, enc_raw[e]);
-        s_state.spring_angle[e] = spring_rad[e];
+        float d = robot_spring_deflection((uint8_t)e, enc_raw[e]);
+        uint8_t bit = (uint8_t)(1u << e);
+
+        if (fabsf(d) > (2.0f * ROBOT_SPRING_MAX_DEFLECTION_RAD))
+        {
+            enc_valid &= (uint8_t)~bit;
+            s_spring_out_of_range++;
+        }
+        if (enc_valid & bit)
+        {
+            s_spring_last[e] = d;
+        }
+        spring_rad[e] = s_spring_last[e];
+        s_state.spring_angle[e] = s_spring_last[e];
     }
     s_state.enc_valid = enc_valid;
 

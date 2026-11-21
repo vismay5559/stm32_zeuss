@@ -174,15 +174,23 @@ const joint_limit_t g_joint_limit[NEXUS_NUM_JOINTS] = {
 };
 
 /*
- * Zero at count 0 means "no zero has been measured" - the deflection is then
- * just the raw angle wrapped into +/-pi, which is at least signed and
- * continuous rather than a 0..2pi ramp with a cliff in it.
+ * Spring zeros, measured 2026-11-22: robot in the URDF zero pose on its
+ * supports, legs unloaded, ROBOT mode. The median of ~10 000 reads per sensor,
+ * and the same value to the count in every run that day (ENC_SCAN at 1 MHz,
+ * SENSORS, and ROBOT before and after glitch rejection), so these are the
+ * springs' rest positions rather than one lucky sample.
+ *
+ * SIGNS are still +1, i.e. not measured: the springs cannot be pushed by hand
+ * with the robot assembled. They are to be read off the first walk - stance
+ * loads the knee and hip springs in a known direction (spring_angle in the
+ * flight recording against the stance phase), and any that read the wrong
+ * way get -1 here.
  */
 const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS] = {
-    { 0u, 1.0f },
-    { 0u, 1.0f },
-    { 0u, 1.0f },
-    { 0u, 1.0f },
+    /* L hip   (PF1)  */ { 13586u, 1.0f },
+    /* L knee  (PD15) */ {  9411u, 1.0f },
+    /* R hip   (PD14) */ {  7730u, 1.0f },
+    /* R knee  (PF5)  */ {  6033u, 1.0f },
 };
 
 #define ENC_COUNTS       16384u          /* AS5047P is 14-bit over a full turn */

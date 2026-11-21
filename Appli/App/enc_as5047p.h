@@ -110,4 +110,11 @@ uint32_t enc_stalls(void);
 /* How many communication errors happened and were recovered from. */
 uint32_t enc_errors(void);
 
+/*
+ * Readings held back because they jumped further than a spring can move in
+ * a millisecond (see ENC_MAX_STEP in enc_as5047p.c). Normally a few percent
+ * on this robot's bus; a sudden rise means the SPI harness got worse.
+ */
+uint32_t enc_jumps(void);
+
 #endif /* ENC_AS5047P_H */

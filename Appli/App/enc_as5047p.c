@@ -102,6 +102,78 @@ static uint16_t s_busy_ticks;
 static uint32_t s_stalls;
 static uint32_t s_errors;
 
+/*
+ * Glitch rejection.
+ *
+ * On the assembled robot, a few percent of replies arrive with good parity
+ * and no error flag yet carry a WRONG angle - 0, or the true value shifted
+ * one bit (exactly x2 or /2). Measured 2026-11-22 in ROBOT mode:
+ *
+ *     left knee   9411 true   ->  0 (180x), ~4880 (= /2)    252 bad in 9933
+ *     right hip   7730 true   ->  ~15460 (= x2), 0           48 bad in 9933
+ *
+ * Lowering SCK from 6.25 to 1.56 MHz did not change it, so the cause is not
+ * the clock rate; it needs a scope on SCK/CS. Whatever the cause, it must not
+ * reach the estimator or the policy, and the physics gives a clean test:
+ * these magnets sit on series springs with +/-1.7 degrees (~77 counts) of
+ * travel, so between two reads 1 ms apart no real angle moves anywhere near
+ * ENC_MAX_STEP. A reading that jumps further is held back - invalid this
+ * tick, the last accepted angle kept - unless it repeats ENC_CONFIRM reads
+ * running, which is what a real change (a magnet re-seated, power-up) does
+ * and a glitch does not.
+ *
+ * The first reading after init is taken as given. If that one was a glitch,
+ * the true value repeats and replaces it ENC_CONFIRM reads later.
+ */
+#define ENC_MAX_STEP   100u   /* counts, ~2.2 degrees */
+#define ENC_CONFIRM      3u
+
+static uint8_t  s_seeded[NEXUS_NUM_ENCODERS];
+static uint16_t s_cand[NEXUS_NUM_ENCODERS];
+static uint8_t  s_cand_n[NEXUS_NUM_ENCODERS];
+static uint32_t s_jumps;
+
+static uint16_t circ_dist(uint16_t a, uint16_t b)
+{
+    uint16_t d = (uint16_t)((a - b) & AS5047P_DATA_MASK);
+    uint16_t e = (uint16_t)((b - a) & AS5047P_DATA_MASK);
+    return (d < e) ? d : e;
+}
+
+/* 1 if this angle may be published for sensor e. */
+static uint8_t plausible(uint8_t e, uint16_t v)
+{
+    if (!s_seeded[e] || (circ_dist(v, s_angle[e]) <= ENC_MAX_STEP))
+    {
+        s_seeded[e] = 1u;
+        s_cand_n[e] = 0u;
+        return 1u;
+    }
+
+    if ((s_cand_n[e] != 0u) && (circ_dist(v, s_cand[e]) <= ENC_MAX_STEP))
+    {
+        s_cand_n[e]++;
+    }
+    else
+    {
+        s_cand_n[e] = 1u;
+    }
+    s_cand[e] = v;
+
+    if (s_cand_n[e] >= ENC_CONFIRM)
+    {
+        s_cand_n[e] = 0u;
+        return 1u;
+    }
+    s_jumps++;
+    return 0u;
+}
+
+uint32_t enc_jumps(void)
+{
+    return s_jumps;
+}
+
 static uint8_t even_parity(uint16_t v)
 {
     v ^= (uint16_t)(v >> 8);
@@ -133,6 +205,9 @@ void enc_init(void)
     s_busy_ticks = 0;
     s_stalls     = 0;
     s_errors     = 0;
+    s_jumps      = 0;
+    memset(s_seeded, 0, sizeof(s_seeded));
+    memset(s_cand_n, 0, sizeof(s_cand_n));
 
     cs_release_all();
 }
@@ -211,8 +286,13 @@ void enc_on_dma_complete(void)
 
         if (parity_ok && !flagged && (asked == AS5047P_CMD_READ_ANGLECOM))
         {
-            s_angle[e] = (uint16_t)(reply & AS5047P_DATA_MASK);
-            s_new_valid |= (uint8_t)(1u << e);
+            uint16_t v = (uint16_t)(reply & AS5047P_DATA_MASK);
+
+            if (plausible(e, v))
+            {
+                s_angle[e] = v;
+                s_new_valid |= (uint8_t)(1u << e);
+            }
         }
 
         /* A flagged reply means ERRFL is latched: read it next, which clears

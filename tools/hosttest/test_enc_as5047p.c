@@ -206,6 +206,62 @@ static void test_a_clean_read_visits_each_sensor_in_turn(void)
           angle[NEXUS_ENC_R_HIP_PITCH], angle[NEXUS_ENC_R_KNEE_PITCH]);
 }
 
+static void test_a_glitch_with_good_parity_is_held_back(void)
+{
+    printf("a reading a spring cannot reach in 1 ms is held back; a real change is not\n");
+
+    /*
+     * The patterns measured on the robot: the left knee reading 9411 came
+     * back as 0 and as 4880 (/2), the right hip 7730 as 15460 (x2) - all with
+     * good parity, all accepted before this check. Expected: each glitch is
+     * marked invalid for that tick and the last good angle kept; a value that
+     * repeats three reads running is accepted as real.
+     */
+    uint16_t angle[NEXUS_NUM_ENCODERS];
+    uint8_t  valid;
+
+    fresh_board();
+    one_good_read(13586u, 9411u, 7730u, 6033u);
+    one_good_read(13587u, 9412u, 7731u, 6034u);       /* normal noise: kept */
+    enc_get(angle, &valid);
+    CHECK(valid == ALL_VALID && angle[NEXUS_ENC_L_KNEE_PITCH] == 9412u,
+          "ordinary +1 count noise was refused (mask 0x%X)", valid);
+
+    one_good_read(13586u, 0u, 15460u, 6033u);         /* the two glitches */
+    enc_get(angle, &valid);
+    CHECK((valid & BIT(NEXUS_ENC_L_KNEE_PITCH)) == 0u &&
+              (valid & BIT(NEXUS_ENC_R_HIP_PITCH)) == 0u,
+          "a 0 and a x2 reading were published as valid (mask 0x%X)", valid);
+    CHECK(angle[NEXUS_ENC_L_KNEE_PITCH] == 9412u && angle[NEXUS_ENC_R_HIP_PITCH] == 7731u,
+          "a glitch overwrote the last good angle: L knee %u, R hip %u",
+          angle[NEXUS_ENC_L_KNEE_PITCH], angle[NEXUS_ENC_R_HIP_PITCH]);
+    CHECK((valid & BIT(NEXUS_ENC_L_HIP_PITCH)) && (valid & BIT(NEXUS_ENC_R_KNEE_PITCH)),
+          "a glitch on one sensor took a neighbour down with it (mask 0x%X)", valid);
+
+    one_good_read(13586u, 4880u, 7730u, 6033u);       /* /2 glitch, then back */
+    enc_get(angle, &valid);
+    CHECK(!(valid & BIT(NEXUS_ENC_L_KNEE_PITCH)), "a /2 reading was published");
+    CHECK(valid & BIT(NEXUS_ENC_R_HIP_PITCH),
+          "the right hip did not recover on its next good read (mask 0x%X)", valid);
+
+    /* A real step - the magnet re-seated - repeats, and must get through on
+       its third read, not be locked out forever. */
+    for (int k = 0; k < 2; k++)
+    {
+        one_good_read(13586u, 2000u, 7730u, 6033u);
+        enc_get(angle, &valid);
+        CHECK(!(valid & BIT(NEXUS_ENC_L_KNEE_PITCH)),
+              "a jump was accepted after only %d read(s)", k + 1);
+    }
+    one_good_read(13586u, 2001u, 7730u, 6033u);
+    enc_get(angle, &valid);
+    CHECK((valid & BIT(NEXUS_ENC_L_KNEE_PITCH)) && angle[NEXUS_ENC_L_KNEE_PITCH] == 2001u,
+          "a change repeated three times was still refused (mask 0x%X, angle %u)",
+          valid, angle[NEXUS_ENC_L_KNEE_PITCH]);
+    CHECK(enc_jumps() == 5u, "%lu readings held back, expected 5",
+          (unsigned long)enc_jumps());
+}
+
 static void test_a_corrupted_word_is_refused(void)
 {
     printf("a word damaged on the way back\n");
@@ -515,6 +571,7 @@ int main(void)
     printf("------------------------\n");
 
     test_a_clean_read_visits_each_sensor_in_turn();
+    test_a_glitch_with_good_parity_is_held_back();
     test_a_corrupted_word_is_refused();
     test_an_unwell_sensor_is_refused_then_cleared();
     test_a_read_that_never_comes_back_is_given_up_on();

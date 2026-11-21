@@ -72,6 +72,19 @@ SOLE_EDGE = {
 GRAVITY = 9.81
 ENC_COUNTS = 16384
 
+
+def spring_cal():
+    """(zero_counts, sign) per encoder, read from robot_config.c - the same
+    table the firmware converts with, so the simulated sensor reads exactly
+    what the real one would at the same deflection."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, "..", "..", "Appli", "App", "robot_config.c")).read()
+    body = re.search(r"g_spring_enc\[NEXUS_NUM_ENCODERS\]\s*=\s*\{(.*?)\};", src, re.S).group(1)
+    pairs = re.findall(r"\{\s*(\d+)u?\s*,\s*([-+]?[\d.]+)f?\s*\}", body)
+    if len(pairs) != 4:
+        raise SystemExit(f"robot_config.c: expected 4 spring calibrations, found {len(pairs)}")
+    return [(int(z), float(sg)) for z, sg in pairs]
+
 def num_joints():
     """NEXUS_NUM_JOINTS, read from link_proto.h so this cannot drift."""
     m = re.search(r"#define\s+NEXUS_NUM_JOINTS\s+(\d+)", open(LINK_PROTO).read())
@@ -295,6 +308,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     act_idx, enc_idx, bit = proto_indices()
+    cal = spring_cal()
     rng = np.random.default_rng(a.seed)
     robot = Robot(a.urdf)
 
@@ -430,10 +444,12 @@ def main(argv=None):
         else:
             pos_age += 1
 
-        # springs: raw AS5047P counts, zero 0 and sign +1 as in robot_config.c
+        # springs: raw AS5047P counts, encoded with robot_config.c's zero and
+        # sign - the inverse of robot_spring_deflection()
         enc = np.zeros(4)
         for name, idx in enc_idx.items():
-            enc[idx] = int(round(q[name] / (2 * math.pi) * ENC_COUNTS)) % ENC_COUNTS
+            z, sg = cal[idx]
+            enc[idx] = (int(round(sg * q[name] / (2 * math.pi) * ENC_COUNTS)) + z) % ENC_COUNTS
 
         rec[k] = ([t * 1e6, imu_new] + list(gyro) + list(accel) + list(pos_turns) + list(pos_age)
                   + list(enc) + [0x0F, contacts])
