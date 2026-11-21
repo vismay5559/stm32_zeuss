@@ -69,15 +69,47 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
  * typing a tuned table in. Hang a known mass on a known lever arm and compare
  * the drive's reported torque with m*g*r.
  */
+/*
+ * THE POLICY'S GAINS, 2026-11-22.
+ *
+ * z1_softland_tol05 was trained with every joint as a pure PD on the gearbox
+ * output, no integrator (zeus_env.py, manifest KP/KD):
+ *
+ *     hip pitch, knee   KP 150 Nm/rad   KD 12  Nm s/rad
+ *     hip roll          KP  60          KD  4
+ *     ankle             KP  30          KD  1.2
+ *
+ * The ODrive's cascade (pos_gain into vel_gain, torque in MOTOR Nm) is that
+ * PD exactly when, ignoring the integrator,
+ *
+ *     KP = M vel_gain pos_gain / 2pi      KD = M vel_gain / 2pi
+ *
+ * with M the gear ratio N for a load-side encoder and N^2 for a motor-side
+ * one (the left ankle, g_joint_enc_ratio). So pos_gain = KP/KD and
+ * vel_gain = KD 2pi / M, and vel_integrator_gain = 0 because training had
+ * none. The bench values these replace (30 / 10 / 50 on hips and knees,
+ * 17 / 0.3 / 1.5 on ankles) were 6-15x stiffer than anything the policy saw.
+ *
+ * Assumes each drive's torque is what it is told (torque constant right).
+ * Check by hanging a known mass on a known lever and comparing the drive's
+ * torque estimate with m g r.
+ *
+ * KNOWN RISK: with no integrator, friction leaves a steady error of
+ * friction / KP - about 2 deg per Nm on an ankle. The builder has seen the
+ * hip rolls and ankles stall without one on the bench. First run in the air;
+ * if tracking error on those joints sits above a couple of degrees, give
+ * THOSE joints a small integrator rather than stiffening everything.
+ */
 const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS] = {
-    /* L hip_pitch   */ { 30.0f, 10.0f, 50.0f },
-    /* L hip_roll    */ { 30.0f, 10.0f, 50.0f },
-    /* L knee_pitch  */ { 30.0f, 10.0f, 50.0f },
-    /* L ankle_pitch */ { 17.0f,  0.3f,  1.5f },
-    /* R hip_pitch   */ { 30.0f, 10.0f, 50.0f },
-    /* R hip_roll    */ { 30.0f, 10.0f, 50.0f },
-    /* R knee_pitch  */ { 30.0f, 10.0f, 50.0f },
-    /* R ankle_pitch */ { 17.0f,  0.3f,  1.5f },
+    /*                   pos_gain  vel_gain   vel_int     KP / KD out   */
+    /* L hip_pitch   */ { 12.5f,  1.60420f,   0.0f },  /* 150 / 12, N 47     */
+    /* L hip_roll    */ { 15.0f,  0.96664f,   0.0f },  /*  60 / 4,  N 26     */
+    /* L knee_pitch  */ { 12.5f,  1.60420f,   0.0f },  /* 150 / 12, N 47     */
+    /* L ankle_pitch */ { 25.0f,  0.033510f,  0.0f },  /*  30 / 1.2, N^2 225 */
+    /* R hip_pitch   */ { 12.5f,  1.60420f,   0.0f },  /* 150 / 12, N 47     */
+    /* R hip_roll    */ { 15.0f,  0.96664f,   0.0f },  /*  60 / 4,  N 26     */
+    /* R knee_pitch  */ { 12.5f,  1.60420f,   0.0f },  /* 150 / 12, N 47     */
+    /* R ankle_pitch */ { 25.0f,  0.50265f,   0.0f },  /*  30 / 1.2, N 15    */
 };
 
 const uint8_t g_leg_springs[2][2] = {
