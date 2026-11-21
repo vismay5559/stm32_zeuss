@@ -164,22 +164,25 @@ static void test_a_bad_encoder_reading_is_tolerated_briefly(void)
     reset_world();
     healthy_ticks(50);
 
-    /* A handful of bad reads - the sort a bump on the leg produces. */
-    for (int i = 0; i < 5; i++)
+    /* A burst of bad reads the length the left knee's sensor produces on
+       the robot (several tens of ms) must NOT idle the robot: 150 ms. */
+    for (int i = 0; i < 150; i++)
     {
         s_imu.seq++; s_can_rx[0]++; s_can_rx[1]++; s_cmds++;
         health_tick(&s_imu, 0x00u);
     }
     CHECK((health_faults() & HEALTH_ENC) == 0u,
-          "five bad encoder reads were treated as a fault - too eager");
+          "150 ms of bad spring reads idled the robot - a sensor hiccup, not a "
+          "reason to drop a leg mid-step");
 
-    for (int i = 0; i < 50; i++)
+    /* A sensor that stays gone must: 100 more ticks puts it past 200 ms. */
+    for (int i = 0; i < 100; i++)
     {
         s_imu.seq++; s_can_rx[0]++; s_can_rx[1]++; s_cmds++;
         health_tick(&s_imu, 0x00u);
     }
     CHECK((health_faults() & HEALTH_ENC) != 0u,
-          "the encoders were unreadable for 50 ticks and no fault was raised");
+          "the encoders were unreadable for 250 ticks and no fault was raised");
 }
 
 static void test_a_sensor_fault_follows_the_live_state(void)

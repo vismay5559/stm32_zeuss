@@ -17,9 +17,20 @@
 #define STALE_CAN_TICKS   200u   /* ODrive heartbeat defaults to 100 ms         */
 #define STALE_LINK_TICKS  200u   /* Pi commands expected at 250 Hz              */
 
-/* Encoders are read every tick, so a brief glitch should not raise a fault -
-   but a persistently bad parity/error flag should. */
-#define ENC_BAD_TICKS      20u
+/*
+ * Encoders are read every tick, so a brief glitch should not raise a fault -
+ * but a persistently bad parity/error flag should.
+ *
+ * 200 ms, not 20. These are the SPRING encoders: nothing commands a drive
+ * from them. A bad read is already dropped in enc_as5047p.c and app.c, and
+ * the estimator and the policy get the last good deflection. What a fault
+ * here does is idle every axis - and on the robot the left knee's sensor
+ * goes bad in bursts that outlast 20 ms (it was 87% valid on 2026-11-22), so
+ * at 20 ms the robot would go limp mid-step over a sensor hiccup, which is
+ * more dangerous than carrying a spring reading 0.2 s stale. A sensor that is
+ * genuinely gone still faults the robot, a fifth of a second later.
+ */
+#define ENC_BAD_TICKS     200u
 
 #define ENC_ALL_VALID     ((uint8_t)((1u << NEXUS_NUM_ENCODERS) - 1u))
 
