@@ -8,7 +8,8 @@
 #include <string.h>
 
 /*
- * Every sensor at once: both CAN buses, the four spring encoders, the IMU.
+ * Every sensor at once: both CAN buses, the four spring encoders, the IMU and
+ * the two foot switches.
  *
  * READ ONLY. Nothing is sent to a drive - no SDO, no state request, no
  * setpoint - so no axis can be armed from this mode. The FDCAN filters accept
@@ -425,7 +426,100 @@ static unsigned imu_report(void)
            (double)s.quat[0], (double)s.quat[1], (double)s.quat[2], (double)s.quat[3],
            (double)an, (double)s.gyro[0], (double)s.gyro[1], (double)s.gyro[2],
            verdict);
+
+    if (!good)
+    {
+        /* Straight from the UART and DMA registers: is the STM32 even
+           listening? Same fields as the IMU test mode prints. */
+        imu_diag_t d;
+        imu_diag(&d);
+        printf("       totals: %lu bytes %lu frames %lu err (last 0x%lX) rearms=%lu  arm=%lu "
+               "isr=0x%08lX rxstate=0x%lX ndtr=%lu evts=%lu advert=%u\r\n",
+               (unsigned long)bytes, (unsigned long)imu_frames(), (unsigned long)errs,
+               (unsigned long)d.uart_error, (unsigned long)imu_rx_rearms(),
+               (unsigned long)d.arm_status,
+               (unsigned long)d.uart_isr, (unsigned long)d.rx_state,
+               (unsigned long)d.dma_ndtr, (unsigned long)d.rx_events,
+               (unsigned)imu_saw_advertisement());
+        extern UART_HandleTypeDef huart2;
+        printf("       dma.state=%u dma.err=0x%lX rxtype=%lu rxevt=%lu cr1=0x%08lX cr3=0x%08lX\r\n",
+               (unsigned)(huart2.hdmarx ? huart2.hdmarx->State : 0xFF),
+               (unsigned long)(huart2.hdmarx ? huart2.hdmarx->ErrorCode : 0),
+               (unsigned long)huart2.ReceptionType, (unsigned long)huart2.RxEventType,
+               (unsigned long)huart2.Instance->CR1, (unsigned long)huart2.Instance->CR3);
+    }
     return good;
+}
+
+/* ===================================================================== */
+/*  Foot switches                                                         */
+/* ===================================================================== */
+
+/*
+ * One switch per foot, centre of the sole, wired pin-to-GND against the
+ * STM32's internal pull-up (docs/PINOUT.md). So the PIN reads 1 with the foot
+ * in the air and 0 when it is pressed - both are printed, because "1" alone
+ * is exactly the thing two people read opposite ways.
+ *
+ * Read raw, every loop pass, with no debounce: this test is about the wire.
+ * Edges per second is the number that matters - a long unscreened run down a
+ * leg beside the motor cables flickers, and a flicker is a foot the estimator
+ * thinks has landed.
+ */
+static const struct
+{
+    const char   *name;
+    const char   *pin;
+    GPIO_TypeDef *port;
+    uint16_t      bit;
+} s_foot[2] = {
+    { "left ",  "PE2, CN11-46", L_TOE_GPIO_Port, L_TOE_Pin },
+    { "right",  "PE4, CN11-48", R_TOE_GPIO_Port, R_TOE_Pin },
+};
+
+static uint8_t  s_foot_level[2];
+static uint32_t s_foot_edges[2];
+static uint32_t s_foot_low_ms[2];   /* ms the pin spent LOW (pressed) this second */
+static uint32_t s_foot_last_ms;
+
+static void foot_sample(uint32_t now)
+{
+    if (now == s_foot_last_ms)
+    {
+        return;
+    }
+    s_foot_last_ms = now;
+
+    for (unsigned i = 0u; i < 2u; i++)
+    {
+        uint8_t lvl = (HAL_GPIO_ReadPin(s_foot[i].port, s_foot[i].bit) == GPIO_PIN_SET) ? 1u : 0u;
+        if (lvl != s_foot_level[i])
+        {
+            s_foot_edges[i]++;
+            s_foot_level[i] = lvl;
+        }
+        if (lvl == 0u)
+        {
+            s_foot_low_ms[i]++;
+        }
+    }
+}
+
+static void foot_report(void)
+{
+    for (unsigned i = 0u; i < 2u; i++)
+    {
+        const char *verdict =
+            (s_foot_edges[i] > 4u) ? "<-- FLICKERING: noise on the wire (see PINOUT.md)" :
+            (s_foot_edges[i] > 0u) ? "changed this second" : "steady";
+
+        printf("  FOOT %s %s  pin=%u -> %-7s  pressed %4lu ms of 1000  edges=%lu  %s\r\n",
+               s_foot[i].name, s_foot[i].pin, (unsigned)s_foot_level[i],
+               s_foot_level[i] ? "OPEN" : "PRESSED",
+               (unsigned long)s_foot_low_ms[i], (unsigned long)s_foot_edges[i], verdict);
+        s_foot_edges[i]  = 0u;
+        s_foot_low_ms[i] = 0u;
+    }
 }
 
 /* ===================================================================== */
@@ -439,13 +533,18 @@ void sensors_init(void)
         s_enc[i].amin = 0x3FFFu;
     }
 
-    printf("\r\n=========== SENSOR CHECK: CAN + ENCODERS + IMU ===========\r\n");
+    printf("\r\n====== SENSOR CHECK: CAN + ENCODERS + IMU + FOOT SWITCHES ======\r\n");
     printf("Read only. No drive is commanded or armed.\r\n");
 
     can_start(&hfdcan1, 0u);
     can_start(&hfdcan2, 1u);
 
     s_enc_ok = (uint8_t)enc_init_1mhz();
+
+    for (unsigned i = 0u; i < 2u; i++)
+    {
+        s_foot_level[i] = (HAL_GPIO_ReadPin(s_foot[i].port, s_foot[i].bit) == GPIO_PIN_SET) ? 1u : 0u;
+    }
 
     imu_init();
     HAL_TIM_Base_Start(&htim2);
@@ -469,6 +568,7 @@ void sensors_run(void)
         imu_service();
 
         uint32_t now = HAL_GetTick();
+        foot_sample(now);
 
         if (s_enc_ok && (now - last_enc) >= 20u)   /* 50 Hz per sensor */
         {
@@ -504,6 +604,7 @@ void sensors_run(void)
             unsigned can = can_report();
             unsigned enc = enc_report();
             unsigned imu = imu_report();
+            foot_report();
             printf("SUMMARY  CAN %u/8  ENC %u/4  IMU %s\r\n\r\n",
                    can, enc, imu ? "OK" : "FAIL");
             BSP_LED_Toggle(LED_GREEN);

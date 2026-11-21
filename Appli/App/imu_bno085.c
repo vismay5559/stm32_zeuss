@@ -1,5 +1,6 @@
 #include "imu_bno085.h"
 #include "robot_config.h"
+#include "critical.h"
 #include "main.h"
 #include <string.h>
 #include <stdio.h>
@@ -818,8 +819,106 @@ void imu_on_rx_event(uint16_t size)
     s_rx_events++;
 }
 
+/*
+ * Receiver watchdog: if the UART has stopped receiving, start it again.
+ *
+ * WHY. The BNO085 keeps streaming at 3 Mbaud straight through an STM32 reset,
+ * so the first byte after imu_init() arms the receiver can land on a UART that
+ * is not ready for it: an overrun. HAL's error path then aborts the DMA and
+ * calls HAL_UART_ErrorCallback, which re-arms - but on the bench, about one
+ * boot in six, reception ended up OFF anyway: RxState READY, ORE still set in
+ * ISR, one byte received, and nothing more, ever. Measured:
+ *
+ *     fail   1 byte  1 err (ORE)  isr=0x006000C8  rxstate=0x20 (READY)
+ *     ok     ~14700 bytes/s       isr=0x006210C0  rxstate=0x22 (BUSY_RX)
+ *
+ * Every layer above it then reads a healthy sensor as a silent one, and the
+ * robot loop's recovery (imu_recover_step) cannot fix it: that resets the
+ * SENSOR, which was never the problem, into a receiver that is not listening.
+ *
+ * The registers of a stuck boot say why. The error callback re-armed while
+ * the DMA was still aborting the previous transfer, so the restart was refused
+ * (DMA ErrorCode 0x40, BUSY) and HAL gave up with RxState READY - leaving the
+ * DMA channel half-aborted in BUSY, ORE set, and the UART's error interrupt
+ * off, so nothing would ever look at it again:
+ *
+ *     dma.state=BUSY dma.err=0x40 cr1=0x801D cr3=0x0040 (DMAR on, EIE off)
+ *
+ * So the check lives here, where every mode calls it, and looks at the one
+ * thing that matters: is reception running. If it has been off for a few
+ * milliseconds - HAL passes through READY on its own while it handles an
+ * error, and that must not be mistaken for this - it FORCES the matter:
+ * HAL_UART_AbortReceive() stops the UART side and the DMA synchronously
+ * whatever state they are in, then the flags are cleared and reception is
+ * started again. Waiting for the DMA to go idle by itself, as the first
+ * version of this did, waits forever: it never does.
+ */
+#define IMU_RX_STUCK_MS   5u
+
+static uint32_t s_rx_stuck_since;     /* HAL_GetTick() when first seen off; 0 = receiving */
+static volatile uint32_t s_rx_rearms;
+
+uint32_t imu_rx_rearms(void)
+{
+    return s_rx_rearms;
+}
+
+static void rx_watchdog(void)
+{
+    if (huart2.RxState == HAL_UART_STATE_BUSY_RX)
+    {
+        s_rx_stuck_since = 0u;
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+    if (s_rx_stuck_since == 0u)
+    {
+        s_rx_stuck_since = (now != 0u) ? now : 1u;
+        return;
+    }
+    if ((now - s_rx_stuck_since) < IMU_RX_STUCK_MS)
+    {
+        return;
+    }
+
+    s_rx_stuck_since = 0u;
+
+    /* Blocking abort of the UART receive side and its DMA, from any state.
+       Not inside a critical section: the DMA abort polls with a HAL_GetTick
+       timeout, which needs SysTick running. Reception is dead anyway, so
+       nothing can race it. */
+    (void)HAL_UART_AbortReceive(&huart2);
+    if ((huart2.hdmarx != NULL) && (huart2.hdmarx->State != HAL_DMA_STATE_READY))
+    {
+        (void)HAL_DMA_Abort(huart2.hdmarx);
+        huart2.hdmarx->State = HAL_DMA_STATE_READY;
+    }
+
+    uint32_t pm = critical_enter();
+
+    /* ORE left set stops the UART receiving at all, whatever HAL thinks. */
+    __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_PEF | UART_CLEAR_FEF |
+                                   UART_CLEAR_NEF | UART_CLEAR_OREF);
+    huart2.ErrorCode = HAL_UART_ERROR_NONE;
+
+    /* Re-arming rewinds the DMA, so the read index and the parser follow it,
+       exactly as in HAL_UART_ErrorCallback. */
+    s_rd    = 0;
+    s_flen  = 0;
+    s_esc   = 0;
+    s_state = ST_WAIT_START;
+
+    s_arm_status = (uint32_t)HAL_UARTEx_ReceiveToIdle_DMA(&huart2, s_dma, IMU_RX_BUF);
+    s_rx_rearms++;
+
+    critical_exit(pm);
+}
+
 void imu_service(void)
 {
+    rx_watchdog();
+
     uint16_t wr = imu_write_index();
 
     while (s_rd != wr)

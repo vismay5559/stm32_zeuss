@@ -205,6 +205,13 @@ void imu_diag(imu_diag_t *out);
 uint32_t imu_errors(void);
 
 /*
+ * Times imu_service() found the UART no longer receiving and restarted it.
+ * Normally 0. One at boot is the known overrun-at-reset case; a number that
+ * keeps climbing is a receive line in trouble.
+ */
+uint32_t imu_rx_rearms(void);
+
+/*
  * The first bytes ever received, verbatim. Counters describe traffic; only the
  * bytes say what it actually is:
  *   7E 01 ...   SHTP framing, baud is right
