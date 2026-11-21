@@ -32,6 +32,7 @@
 #include "test_enc_scan.h"
 #include "test_can_cfg.h"
 #include "test_sensors.h"
+#include "test_imu_log.h"
 #include "imu_bno085.h"
 #include "enc_as5047p.h"
 #include "act_odrive.h"
@@ -204,6 +205,9 @@ int main(void)
 #elif (NEXUS_MODE == NEXUS_MODE_SENSORS)
   printf("APPLI: mode = SENSORS (CAN + encoders + IMU, read only)\r\n");
   sensors_init();
+#elif (NEXUS_MODE == NEXUS_MODE_IMU_LOG)
+  printf("APPLI: mode = IMU_LOG (binary IMU stream for Allan variance)\r\n");
+  imulog_init();
 #else
   printf("APPLI: peripheral init done, entering app_init()\r\n");
   app_init();
@@ -243,6 +247,8 @@ int main(void)
   cancfg_run();
 #elif (NEXUS_MODE == NEXUS_MODE_SENSORS)
   sensors_run();
+#elif (NEXUS_MODE == NEXUS_MODE_IMU_LOG)
+  imulog_run();
 #else
   app_run();
 #endif

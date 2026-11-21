@@ -94,6 +94,23 @@ uint32_t imu_recoveries(void);
 void imu_request_reports(void);
 
 /*
+ * Report selection. Call BEFORE imu_init(); they take effect at the next
+ * imu_request_reports().
+ *
+ * imu_use_uncal_gyro(1): gyro[] carries the UNCALIBRATED rate (SH-2 report
+ * 0x07), with no bias removed by the sensor, so the estimator's own bias
+ * state is the only thing estimating it. imu_bno_gyro_bias() then returns the
+ * sensor's own running estimate, for comparison only.
+ *
+ * imu_skip_quaternion(1): do not ask for the rotation vector at all. Nothing
+ * in the estimator uses it, and producing it is what starves the other
+ * reports (see IMU_ENABLE_QUAT in imu_bno085.c).
+ */
+void imu_use_uncal_gyro(uint8_t on);
+void imu_skip_quaternion(uint8_t on);
+void imu_bno_gyro_bias(float out[3]);
+
+/*
  * Ask for the product ID - the simplest command SH-2 has, two bytes with no
  * parameters. Used to tell a malformed Set Feature apart from a transport that
  * corrupts everything: if even this is rejected, the contents were never the

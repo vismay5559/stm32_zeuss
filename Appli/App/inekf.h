@@ -35,11 +35,12 @@
 
 typedef struct
 {
-    /* Process noise, standard deviations. */
-    inekf_real_t noise_gyro;          /* rad/s     */
-    inekf_real_t noise_accel;         /* m/s^2     */
-    inekf_real_t noise_gyro_bias;     /* rad/s^2   */
-    inekf_real_t noise_accel_bias;    /* m/s^3     */
+    /* Process noise, continuous-time densities (predict adds Qbar * dt), as
+       read off an Allan deviation plot - see docs/IMU_NOISE.md. */
+    inekf_real_t noise_gyro;          /* rad/s/sqrt(Hz)    white, N        */
+    inekf_real_t noise_accel;         /* m/s^2/sqrt(Hz)    white, N        */
+    inekf_real_t noise_gyro_bias;     /* rad/s^2/sqrt(Hz)  bias walk, K    */
+    inekf_real_t noise_accel_bias;    /* m/s^3/sqrt(Hz)    bias walk, K    */
     inekf_real_t noise_contact_vel;   /* m/s, foot-slip model */
 
     /* Initial covariance, standard deviations. */

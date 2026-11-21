@@ -102,17 +102,18 @@ const uint8_t g_leg_springs[2][2] = {
  *   right hip pitch  count rises as the leg swings FORWARD    -1
  *   right hip roll   count rises as the foot moves inward     +1 (= robot left)
  *   right knee       count rises as the shin swings back      +1
- *   ankles           NOT MEASURED                             +1
+ *   left  ankle      count rises as the toes go down          +1
+ *   right ankle      count rises as the toes go down          +1
  */
 const float g_joint_dir[NEXUS_NUM_JOINTS] = {
     /* L hip_pitch   */ +1.0f,
     /* L hip_roll    */ +1.0f,
     /* L knee_pitch  */ +1.0f,
-    /* L ankle_pitch */ +1.0f,   /* NOT MEASURED */
+    /* L ankle_pitch */ +1.0f,
     /* R hip_pitch   */ -1.0f,
     /* R hip_roll    */ +1.0f,
     /* R knee_pitch  */ +1.0f,
-    /* R ankle_pitch */ +1.0f,   /* NOT MEASURED */
+    /* R ankle_pitch */ +1.0f,
 };
 
 const float g_joint_gear[NEXUS_NUM_JOINTS] = {
@@ -203,3 +204,18 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts)
 
     return a * g_spring_enc[enc_index].sign;
 }
+
+/*
+ * IMU mounting, measured 2026-11-21: chip X left, chip Y back, chip Z up.
+ * See robot_config.h.
+ *
+ *   robot X = -chip Y      robot Y = chip X      robot Z = chip Z
+ */
+const float g_imu_mount_R[9] = {
+    0.0f, -1.0f, 0.0f,
+    1.0f,  0.0f, 0.0f,
+    0.0f,  0.0f, 1.0f,
+};
+
+/* R_chip_body: -90 degrees about Z. (cos 45, 0, 0, -sin 45). */
+const float g_imu_mount_q[4] = { 0.70710678f, 0.0f, 0.0f, -0.70710678f };

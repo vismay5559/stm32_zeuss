@@ -321,6 +321,51 @@ static void test_calibration_flag_matches_the_data(void)
           "zero is still at its placeholder value");
 }
 
+static void test_the_imu_mounting_is_one_rotation_written_twice(void)
+{
+    printf("IMU mounting: the matrix and the quaternion are the same rotation\n");
+
+    /*
+     * The chip is yawed 90 degrees: X to the robot's left, Y to the back, Z
+     * up. Written down first, as what each chip axis must become, so a wrong
+     * table fails here and not as a robot that thinks forward is sideways.
+     */
+    const float chip_axis[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+    const float want[3][3]      = { { 0, 1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } };
+    const float *R = g_imu_mount_R;
+
+    for (int a = 0; a < 3; a++)
+    {
+        for (int r = 0; r < 3; r++)
+        {
+            float got = R[3 * r] * chip_axis[a][0] + R[3 * r + 1] * chip_axis[a][1] +
+                        R[3 * r + 2] * chip_axis[a][2];
+            CHECK(fabsf(got - want[a][r]) < 1e-6f,
+                  "chip axis %d lands at robot component %d = %.3f, expected %.0f",
+                  a, r, (double)got, (double)want[a][r]);
+        }
+    }
+
+    /* The quaternion is R_chip_body = R^T. Its matrix must match entry for
+       entry; one sign typed wrong in either is a 180-degree disagreement. */
+    const float *q = g_imu_mount_q;
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    float Q[9] = {
+        1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y),
+        2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+        2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y),
+    };
+    for (int r = 0; r < 3; r++)
+    {
+        for (int c = 0; c < 3; c++)
+        {
+            CHECK(fabsf(Q[3 * r + c] - R[3 * c + r]) < 1e-5f,
+                  "mount quaternion entry (%d,%d) is %.4f, the matrix says %.4f",
+                  r, c, (double)Q[3 * r + c], (double)R[3 * c + r]);
+        }
+    }
+}
+
 int main(void)
 {
     printf("robot_config.c host tests\n-------------------------\n");
@@ -333,6 +378,7 @@ int main(void)
     test_calibration_flag_matches_the_data();
     test_the_envelope_admits_everything_the_policy_may_ask();
     test_the_gearing_and_spring_tables_agree_with_each_other();
+    test_the_imu_mounting_is_one_rotation_written_twice();
 
     printf("-------------------------\n%s (%d failure%s)\n",
            s_fail ? "FAILED" : "PASSED", s_fail, s_fail == 1 ? "" : "s");

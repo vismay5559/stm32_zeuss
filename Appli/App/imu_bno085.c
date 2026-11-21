@@ -1,4 +1,5 @@
 #include "imu_bno085.h"
+#include "robot_config.h"
 #include "main.h"
 #include <string.h>
 #include <stdio.h>
@@ -43,6 +44,20 @@ extern UART_HandleTypeDef huart2;
  * estimate ramps downward forever.
  */
 #define SH2_ACCELEROMETER    0x01u
+
+/*
+ * Gyroscope UNCALIBRATED (SH-2 6.5.14): the rate with NO bias removed, plus
+ * the sensor's own running bias estimate alongside it.
+ *
+ * The calibrated report (0x02) subtracts a bias the BNO085 keeps re-estimating
+ * on its own. That is a second filter estimating the same quantity as the
+ * InEKF's bias state, and the two fight: every time the sensor revises its
+ * bias, the calibrated rate steps, and the InEKF sees a step in rate that no
+ * motion caused. It also flattens an Allan plot, hiding exactly the bias
+ * drift the plot is meant to measure. Off by default; imu_use_uncal_gyro()
+ * selects it before imu_init().
+ */
+#define SH2_GYRO_UNCAL       0x07u
 
 #define IMU_REPORT_INTERVAL_US  2500u   /* 400 Hz - gyro and accelerometer */
 #define IMU_QUAT_INTERVAL_US   10000u   /* 100 Hz - rotation vector          */
@@ -160,7 +175,7 @@ static volatile uint8_t  s_last_control;
  */
 static volatile uint32_t s_n_rv;      /* rotation vector  */
 static volatile uint32_t s_n_accel;   /* linear accel     */
-static volatile uint32_t s_n_gyro;    /* calibrated gyro  */
+static volatile uint32_t s_n_gyro;    /* gyro, either report */
 
 static volatile uint8_t  s_saw_advert;   /* sensor finished booting */
 static volatile uint8_t  s_saw_reset;    /* executable channel reset notice */
@@ -189,6 +204,9 @@ static uint8_t  s_tx_seq[8];
 enum { ST_WAIT_START = 0, ST_WAIT_PROTO, ST_IN_FRAME };
 
 static imu_sample_t s_sample;
+static uint8_t      s_use_uncal_gyro;
+static uint8_t      s_skip_quat;
+static float        s_bno_gyro_bias[3];   /* sensor's own estimate, 0x07 only */
 
 /*
  * Microsecond delay from the cycle counter. TIM2 is not started until after
@@ -314,6 +332,31 @@ void imu_request_feature_status(uint8_t report_id)
     shtp_send(SHTP_CH_CONTROL, p, sizeof(p));
 }
 
+/*
+ * Into the robot's frame, at the one place every reading passes through. See
+ * g_imu_mount_R in robot_config.h: the chip is yawed 90 degrees on the robot,
+ * and without this the estimator would integrate a forward walk as sideways.
+ */
+static void to_body(const float c[3], float *out)
+{
+    const float *R = g_imu_mount_R;
+
+    out[0] = R[0] * c[0] + R[1] * c[1] + R[2] * c[2];
+    out[1] = R[3] * c[0] + R[4] * c[1] + R[5] * c[2];
+    out[2] = R[6] * c[0] + R[7] * c[1] + R[8] * c[2];
+}
+
+/* q_world_body = q_world_chip * q_chip_body, both (w,x,y,z). */
+static void quat_to_body(const float qc[4], float *out)
+{
+    const float *m = g_imu_mount_q;
+
+    out[0] = qc[0] * m[0] - qc[1] * m[1] - qc[2] * m[2] - qc[3] * m[3];
+    out[1] = qc[0] * m[1] + qc[1] * m[0] + qc[2] * m[3] - qc[3] * m[2];
+    out[2] = qc[0] * m[2] - qc[1] * m[3] + qc[2] * m[0] + qc[3] * m[1];
+    out[3] = qc[0] * m[3] + qc[1] * m[2] - qc[2] * m[1] + qc[3] * m[0];
+}
+
 static void parse_reports(const uint8_t *p, uint16_t n)
 {
     uint16_t i = 0;
@@ -329,10 +372,11 @@ static void parse_reports(const uint8_t *p, uint16_t n)
         }
         else if ((id == SH2_ROTATION_VECTOR) && ((i + 14u) <= n))
         {
-            s_sample.quat[1] = q_to_float(&p[i + 4], 14);
-            s_sample.quat[2] = q_to_float(&p[i + 6], 14);
-            s_sample.quat[3] = q_to_float(&p[i + 8], 14);
-            s_sample.quat[0] = q_to_float(&p[i + 10], 14);
+            const float qc[4] = { q_to_float(&p[i + 10], 14),
+                                  q_to_float(&p[i + 4], 14),
+                                  q_to_float(&p[i + 6], 14),
+                                  q_to_float(&p[i + 8], 14) };
+            quat_to_body(qc, s_sample.quat);
             i += 14u;
             s_n_rv++;
             s_sample.quat_seq++;
@@ -340,9 +384,10 @@ static void parse_reports(const uint8_t *p, uint16_t n)
         }
         else if ((id == SH2_ACCELEROMETER) && ((i + 10u) <= n))
         {
-            s_sample.accel[0] = q_to_float(&p[i + 4], 8);
-            s_sample.accel[1] = q_to_float(&p[i + 6], 8);
-            s_sample.accel[2] = q_to_float(&p[i + 8], 8);
+            const float ac[3] = { q_to_float(&p[i + 4], 8),
+                                  q_to_float(&p[i + 6], 8),
+                                  q_to_float(&p[i + 8], 8) };
+            to_body(ac, s_sample.accel);
             i += 10u;
             s_n_accel++;
             s_sample.accel_seq++;
@@ -350,10 +395,28 @@ static void parse_reports(const uint8_t *p, uint16_t n)
         }
         else if ((id == SH2_GYRO) && ((i + 10u) <= n))
         {
-            s_sample.gyro[0] = q_to_float(&p[i + 4], 9);
-            s_sample.gyro[1] = q_to_float(&p[i + 6], 9);
-            s_sample.gyro[2] = q_to_float(&p[i + 8], 9);
+            const float gc[3] = { q_to_float(&p[i + 4], 9),
+                                  q_to_float(&p[i + 6], 9),
+                                  q_to_float(&p[i + 8], 9) };
+            to_body(gc, s_sample.gyro);
             i += 10u;
+            s_n_gyro++;
+            s_sample.gyro_seq++;
+            updated = 1;
+        }
+        else if ((id == SH2_GYRO_UNCAL) && ((i + 16u) <= n))
+        {
+            /* Uncalibrated rate into gyro[], the one the estimator reads, so
+               nothing downstream needs to know which report is in use. */
+            const float gc[3] = { q_to_float(&p[i + 4], 9),
+                                  q_to_float(&p[i + 6], 9),
+                                  q_to_float(&p[i + 8], 9) };
+            const float bc[3] = { q_to_float(&p[i + 10], 9),
+                                  q_to_float(&p[i + 12], 9),
+                                  q_to_float(&p[i + 14], 9) };
+            to_body(gc, s_sample.gyro);
+            to_body(bc, s_bno_gyro_bias);
+            i += 16u;
             s_n_gyro++;
             s_sample.gyro_seq++;
             updated = 1;
@@ -684,12 +747,16 @@ void imu_request_reports(void)
      * (datasheet 6.9), and the accelerometer was the one it starved.
      */
 #if IMU_ENABLE_QUAT
-    imu_enable_report(SH2_ROTATION_VECTOR, IMU_QUAT_INTERVAL_US);
-    HAL_Delay(IMU_REQUEST_GAP_MS);
+    if (!s_skip_quat)
+    {
+        imu_enable_report(SH2_ROTATION_VECTOR, IMU_QUAT_INTERVAL_US);
+        HAL_Delay(IMU_REQUEST_GAP_MS);
+    }
 #endif
     imu_enable_report(SH2_ACCELEROMETER,   IMU_REPORT_INTERVAL_US);
     HAL_Delay(IMU_REQUEST_GAP_MS);
-    imu_enable_report(SH2_GYRO,            IMU_REPORT_INTERVAL_US);
+    imu_enable_report(s_use_uncal_gyro ? SH2_GYRO_UNCAL : SH2_GYRO,
+                      IMU_REPORT_INTERVAL_US);
     HAL_Delay(IMU_REQUEST_GAP_MS);
 
     /* Then ask what actually took. Set Feature is fire-and-forget; this is the
@@ -1041,4 +1108,14 @@ uint32_t imu_loopback_check(uint32_t *out_total)
     }
 
     return bad;
+}
+
+void imu_use_uncal_gyro(uint8_t on)  { s_use_uncal_gyro = (on != 0u); }
+void imu_skip_quaternion(uint8_t on) { s_skip_quat = (on != 0u); }
+
+void imu_bno_gyro_bias(float out[3])
+{
+    out[0] = s_bno_gyro_bias[0];
+    out[1] = s_bno_gyro_bias[1];
+    out[2] = s_bno_gyro_bias[2];
 }

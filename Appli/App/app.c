@@ -423,6 +423,15 @@ void app_init(void)
     enc_init();
     act_init();
     link_usb_init();
+    /*
+     * The UNCALIBRATED gyro. The calibrated report has the BNO085's own,
+     * continually revised bias taken out, which is a second estimator of the
+     * one quantity the InEKF's bias state exists to estimate: each time the
+     * sensor revises its bias the rate steps, and the filter sees a rotation
+     * nobody made. Measured still, the raw gyro's bias barely moves within an
+     * hour (docs/IMU_NOISE.md), so the filter has an easy job on its own.
+     */
+    imu_use_uncal_gyro(1u);
     imu_init();
 
     /*

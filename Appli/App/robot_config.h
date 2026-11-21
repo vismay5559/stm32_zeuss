@@ -177,7 +177,7 @@ extern const float g_joint_gear[NEXUS_NUM_JOINTS];
  *
  * Measured 2026-11-21 by moving each joint by hand and reading the drive. The
  * right hip pitch is the odd one out: its count rises as the leg swings
- * FORWARD. The ankles are not measured yet and are +1 by default.
+ * FORWARD. Both ankles count up as the toes go down, as the URDF does.
  */
 extern const float g_joint_dir[NEXUS_NUM_JOINTS];
 
@@ -340,5 +340,37 @@ static inline uint8_t robot_config_is_calibrated(void)
  * does not belong to it.
  */
 float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts);
+
+/* ===================================================================== */
+/*  IMU mounting                                                          */
+/* ===================================================================== */
+
+/*
+ * How the BNO085's own axes sit on the robot. The estimator, the state packet
+ * and the policy all work in the robot's frame - X forward, Y left, Z up - so
+ * the driver rotates every reading into it once, as it arrives, and nothing
+ * downstream ever sees the chip's axes.
+ *
+ * g_imu_mount_R is row-major R_body_chip: v_robot = R * v_chip.
+ * g_imu_mount_q is the SAME rotation's inverse as a quaternion (w,x,y,z),
+ * R_chip_body, for re-expressing the sensor's own orientation output:
+ * q_world_body = q_world_chip * q_chip_body. test_robot_config.c checks the
+ * two agree, because a matrix and a quaternion typed by hand are two chances
+ * to get one sign wrong.
+ *
+ * Measured 2026-11-21, by reading the axis markings on the mounted board:
+ *     chip X -> robot LEFT  (+Y)
+ *     chip Y -> robot BACK  (-X)
+ *     chip Z -> robot UP    (+Z)
+ * i.e. the chip is yawed +90 degrees about vertical, which is also how the CAD
+ * export models the board. The URDF keeps imu_link robot-aligned on purpose
+ * (zeus_model.yaml explains why): this table is where the 90 degrees lives.
+ *
+ * TO VERIFY on the robot: stand it level and still - accel must read about
+ * (0, 0, +9.8). Tilt it nose-down - gyro Y must go positive, and accel X
+ * positive. Roll it to its left side down - gyro X must go negative.
+ */
+extern const float g_imu_mount_R[9];
+extern const float g_imu_mount_q[4];
 
 #endif /* ROBOT_CONFIG_H */
