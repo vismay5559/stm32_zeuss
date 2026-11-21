@@ -43,8 +43,9 @@ const joint_src_t g_leg_joints[2][ROBOT_LEG_MOTORS] = {
  * GEAR RATIOS, confirmed on the assembled robot 2026-10-31:
  *
  *     hip pitch, knee pitch   47:1   encoder on the load (output)
- *     hip roll                26:1   encoder on the load - ASSUMED, not measured
- *     ankle pitch             15:1   encoder on the MOTOR
+ *     hip roll                26:1   encoder on the load (confirmed 2026-11-22)
+ *     ankle pitch             15:1   load side on the RIGHT, MOTOR (commutation) on the
+ *                                LEFT - see g_joint_enc_ratio (2026-11-22)
  *
  * The ankle read 9:1 here and in docs/ODRIVE_COMMANDS.md until that date, from
  * the first bench leg. It is 15:1. Anything scaled by the old 9 travels 9/15 =
@@ -114,6 +115,18 @@ const float g_joint_dir[NEXUS_NUM_JOINTS] = {
     /* R hip_roll    */ +1.0f,
     /* R knee_pitch  */ +1.0f,
     /* R ankle_pitch */ +1.0f,
+};
+
+/* Encoder turns per output turn - see robot_config.h. Left ankle only. */
+const float g_joint_enc_ratio[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch   */  1.0f,
+    /* L hip_roll    */  1.0f,
+    /* L knee_pitch  */  1.0f,
+    /* L ankle_pitch */ 15.0f,   /* commutation encoder, 15:1 */
+    /* R hip_pitch   */  1.0f,
+    /* R hip_roll    */  1.0f,
+    /* R knee_pitch  */  1.0f,
+    /* R ankle_pitch */  1.0f,
 };
 
 const float g_joint_gear[NEXUS_NUM_JOINTS] = {

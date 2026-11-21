@@ -365,10 +365,10 @@ void act_on_rx(uint8_t bus_index)
         switch (cmd)
         {
         case ODRV_CMD_GET_ENCODER:
-            /* Into the URDF's direction here and nowhere else - see
-               g_joint_dir in robot_config.h. */
-            s_telem.pos[j] = g_joint_dir[j] * le_f32(&data[0]);
-            s_telem.vel[j] = g_joint_dir[j] * le_f32(&data[4]);
+            /* Into the URDF's direction and OUTPUT turns here and nowhere
+               else - see g_joint_dir and g_joint_enc_ratio in robot_config.h. */
+            s_telem.pos[j] = g_joint_dir[j] * le_f32(&data[0]) / g_joint_enc_ratio[j];
+            s_telem.vel[j] = g_joint_dir[j] * le_f32(&data[4]) / g_joint_enc_ratio[j];
             s_telem.flags[j] |= NEXUS_ACT_TELEM_FRESH;
             s_pos_age[j] = 0u;      /* this is the one that means "trustworthy" */
             break;
@@ -946,7 +946,9 @@ void act_tick_1khz(void)
          * joint commanded one way and pushed the other.
          */
         const float dir = g_joint_dir[j];
-        send_input_pos(bus, node, dir * s_out[j], dir * vel_ff, dir * s_tau_ff[j]);
+        const float enc = g_joint_enc_ratio[j];   /* motor-side encoder: x N */
+        send_input_pos(bus, node, dir * enc * s_out[j], dir * enc * vel_ff,
+                       dir * s_tau_ff[j]);
     }
 
     /* Start draining immediately; app_run() keeps pumping for the rest of the tick. */

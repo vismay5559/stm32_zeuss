@@ -182,6 +182,30 @@ extern const float g_joint_gear[NEXUS_NUM_JOINTS];
 extern const float g_joint_dir[NEXUS_NUM_JOINTS];
 
 /*
+ * Drive encoder turns per OUTPUT turn, in NEXUS_J_* order: 1 where the
+ * drive's encoder is on the load side of the gearbox, the gear ratio where it
+ * is the motor's own commutation encoder.
+ *
+ * Every drive on this robot reads the load side EXCEPT the left ankle, which
+ * uses its commutation encoder through the 15:1 box (stated by the builder,
+ * 2026-11-22). Unscaled, that drive reports and is commanded in motor turns:
+ * a 10 degree gait command turns the ankle 0.7 degrees, and its angle in the
+ * estimator is 15x too large.
+ *
+ * Applied with g_joint_dir at the same CAN boundary in act_odrive.c: position
+ * and velocity divided by it coming in, position and velocity feedforward
+ * multiplied by it going out. NOT torque: the drive's torque is motor torque
+ * whichever shaft its encoder is on, and g_joint_gear already handles that.
+ *
+ * Two consequences outside the code. That drive's gains are in motor turns
+ * (vel_gain scales with 1/N^2 for the same output damping - see
+ * g_drive_gains). And its zero is NOT absolute: a commutation encoder knows
+ * one motor revolution, 1/15 of an ankle turn, so the left ankle must be at
+ * its zero when the drive powers up.
+ */
+extern const float g_joint_enc_ratio[NEXUS_NUM_JOINTS];
+
+/*
  * 1 where a joint is series-elastic - a spring between the motor and the limb,
  * and therefore a joint whose target needs pre-deflecting. Hip pitch and knee
  * pitch on each leg; everything else is rigid and gets no correction.

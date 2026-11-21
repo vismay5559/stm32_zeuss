@@ -1340,6 +1340,73 @@ static void test_the_target_that_went_out_can_be_read_back(void)
           "a disarmed board still claims to be driving");
 }
 
+static void test_the_left_ankle_motor_encoder_is_scaled_both_ways(void)
+{
+    printf("the left ankle reads its motor encoder: /15 in, x15 out, torque untouched\n");
+
+    /*
+     * The left ankle's drive uses its commutation encoder behind a 15:1 box,
+     * so it speaks motor turns. Unscaled, a 10 degree gait command turns that
+     * ankle 0.7 degrees and the estimator sees it 15x bent. Expected values
+     * are written first: the drive says 1.5 motor turns and 3 motor turns/s,
+     * the robot must read 0.1 turns and 0.2 turns/s of ankle.
+     */
+    const int j = NEXUS_J_L_ANKLE_PITCH;
+
+    CHECK(g_joint_enc_ratio[j] == 15.0f,
+          "left ankle encoder ratio is %.1f, stated 15:1 commutation encoder",
+          (double)g_joint_enc_ratio[j]);
+    CHECK(g_joint_enc_ratio[NEXUS_J_R_ANKLE_PITCH] == 1.0f,
+          "right ankle must stay load-side (1.0), is %.1f",
+          (double)g_joint_enc_ratio[NEXUS_J_R_ANKLE_PITCH]);
+
+    fresh_board();
+    drive_reports_position(j, 1.5f, 3.0f);
+
+    act_telemetry_t t;
+    act_get(&t);
+    CHECK(NEAR(t.pos[j], 0.1f, 1e-6f),
+          "drive said 1.5 motor turns, robot read %.4f, expected 0.1", (double)t.pos[j]);
+    CHECK(NEAR(t.vel[j], 0.2f, 1e-6f),
+          "drive said 3 motor turns/s, robot read %.4f, expected 0.2", (double)t.vel[j]);
+
+    /* Torque is motor torque from every drive; the encoder's shaft does not
+       change it. 0.5 motor Nm in must come out as 0.5. */
+    uint8_t tq[8];
+    put_f32(&tq[0], 0.0f);
+    put_f32(&tq[4], 0.5f);
+    host_can_deliver(bus_of(j), id_of(j, CMD_GET_TORQUES), tq);
+    act_on_rx(bus_of(j));
+    act_get(&t);
+    CHECK(NEAR(t.torque[j], 0.5f, 1e-6f),
+          "torque came back %.4f, expected the drive's own 0.5", (double)t.torque[j]);
+
+    /* Hold where it is, with a velocity hint: the wire must carry motor
+       units - 1.5 turns, and 0.2 x 15 = 3 turns/s = 3000 thousandths. */
+    float vel[NEXUS_NUM_JOINTS] = { 0 };
+    float tau[NEXUS_NUM_JOINTS] = { 0 };
+    vel[j] = 0.2f;
+    act_set_feedforward(vel, tau);
+
+    float target[NEXUS_NUM_JOINTS];
+    for (int k = 0; k < NEXUS_NUM_JOINTS; k++) { target[k] = t.pos[k]; }
+    act_set_targets(target);
+    host_can_forget_sent();
+    cmd_tick();
+
+    const host_can_frame_t *f = sent_to(j, CMD_SET_INPUT_POS);
+    CHECK(f != 0, "no position command reached the left ankle");
+    if (f)
+    {
+        CHECK(NEAR(get_f32(&f->data[0]), 1.5f, 1e-5f),
+              "holding still sent %.4f, expected the drive's own 1.5 motor turns "
+              "- anything else moves the ankle on arming", (double)get_f32(&f->data[0]));
+        CHECK(get_i16(&f->data[4]) == 3000,
+              "velocity hint went out as %d thousandths, expected 3000 (0.2 x 15)",
+              get_i16(&f->data[4]));
+    }
+}
+
 int main(void)
 {
     printf("act_odrive.c host tests\n");
@@ -1360,6 +1427,7 @@ int main(void)
     test_a_refused_message_is_kept_not_thrown_away();
     test_replies_land_on_the_right_joint();
     test_a_reversed_drive_is_reversed_both_ways();
+    test_the_left_ankle_motor_encoder_is_scaled_both_ways();
     test_a_frame_from_a_wire_that_does_not_exist_is_bounded();
     test_a_reading_is_handed_over_once_and_then_ages();
     test_a_wire_that_shuts_itself_down_is_restarted();
