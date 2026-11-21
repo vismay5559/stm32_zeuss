@@ -125,6 +125,10 @@ run_suite test_safety \
     "$APP/safety.c" \
     "$APP/robot_config.c"
 
+run_suite test_soft_start \
+    "$HERE/test_soft_start.c" \
+    "$APP/soft_start.c"
+
 run_suite test_leg_stream \
     "$HERE/test_leg_stream.c" \
     "$APP/leg_stream.c"

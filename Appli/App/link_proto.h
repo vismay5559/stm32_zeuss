@@ -31,7 +31,18 @@
 #include <stdint.h>
 
 #define NEXUS_SYNC              0xA5A5u
-#define NEXUS_PROTO_VERSION     9u      /* v9: one foot switch per foot, not two      */
+/*
+ * v11: soft start. Same bytes as v9 - every field, offset and size unchanged -
+ * but two command flags and four stream flags now MEAN something, and the
+ * meaning is a safety one: a v9 board ignores NEXUS_CMD_HOLD and arms straight
+ * into the gait, the 20-35 degree jump the hold exists to prevent. So the
+ * version moves and a mismatched pair refuses to talk. Not 10: v10 was the
+ * ten-joint protocol of another robot, and reusing the number would let a
+ * stray v10 Pi look like the right one.
+ *
+ * v9: one foot switch per foot, not two.
+ */
+#define NEXUS_PROTO_VERSION     11u
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
@@ -140,6 +151,26 @@
 /* cmd flags bits. */
 #define NEXUS_CMD_ENABLE        (1u << 0)
 
+/*
+ * HOLD (v11): arm into a hold, not into the gait. With ENABLE, the board
+ * freezes the gait clock at SOFT_START_PHASE, ramps every joint from where it
+ * stands to that phase's pose over SOFT_START_RAMP_S, and holds it there until
+ * a command arrives with HOLD clear - then the stride starts from that phase.
+ * See soft_start.h. Without HOLD an arm still ramps, into the running gait.
+ * Ignored once the gait is running: to stop, clear ENABLE.
+ */
+#define NEXUS_CMD_HOLD          (1u << 1)
+
+/*
+ * ZERO_ANKLES (v11): Set_Absolute_Position(0) on both ankle drives, once per
+ * rising edge of this bit, and ONLY while the board is not armed. The ankle
+ * drives come back from every reboot with no valid position (the left reads
+ * its motor encoder through 15:1; neither keeps a saved offset across a
+ * reboot), so their zero is set at the start of each session, with the feet
+ * flat. The board cannot see the feet; whoever sets this bit is asserting it.
+ */
+#define NEXUS_CMD_ZERO_ANKLES   (1u << 2)
+
 /* safety_state values - see safety.h. */
 #define NEXUS_SAFETY_BOOT       0u
 #define NEXUS_SAFETY_IDLE       1u
@@ -170,6 +201,27 @@
  * Commands sent back are ignored.
  */
 #define NEXUS_STREAM_LEG_TEST   (1u << 1)
+
+/*
+ * Soft start (v11), see soft_start.h. RAMP: the board is blending from the
+ * arming pose to the start pose or the running gait. HOLD: it is standing at
+ * the start pose with the gait clock frozen at SOFT_START_PHASE, waiting for a
+ * command with NEXUS_CMD_HOLD clear. While either is set, phase does not move
+ * and ref_angle is the reference AT that phase - what the drives will be told
+ * once released - while act_target is what they are being told now.
+ */
+#define NEXUS_STREAM_RAMP       (1u << 2)
+#define NEXUS_STREAM_HOLD       (1u << 3)
+
+/* ZERO_ANKLES has been carried out at least once since this board booted. */
+#define NEXUS_STREAM_ANKLES_ZEROED (1u << 4)
+
+/*
+ * An ENABLE command was refused this tick because a joint's measured position
+ * is missing (NaN, or stale) - there is no pose to ramp from. Not a fault and
+ * not a rejection: the board simply stays IDLE until every joint reports.
+ */
+#define NEXUS_STREAM_ARM_BLOCKED (1u << 5)
 
 typedef struct __attribute__((packed))
 {

@@ -14,6 +14,7 @@
 #include "watchdog.h"
 #include "nexus_mode.h"
 #include "fusion.h"
+#include "soft_start.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -275,6 +276,35 @@ static float s_ref_turns[NEXUS_NUM_JOINTS];
 static float s_drive_ref_turns[NEXUS_NUM_JOINTS];
 static float s_gait_vel_turns[NEXUS_NUM_JOINTS];
 static float s_gait_tau_nm[NEXUS_NUM_JOINTS];
+
+/*
+ * Soft start - see soft_start.h for why arming can no longer go straight to
+ * the gait.
+ *
+ * s_cmd_ref_turns is what an accepted command is built on: the ramp, the hold
+ * pose, or the gait, as soft_start_tick() decides. s_hold_pose_turns is the
+ * reference at SOFT_START_PHASE, without spring pre-deflection; it is a
+ * property of the compiled gait table, computed once.
+ *
+ * s_meas_turns is the pose the drives report, and s_pose_ok whether every
+ * joint has a finite, recent one. An arm has to ramp FROM somewhere: with a
+ * joint missing there is no honest starting point, so the arm waits.
+ */
+static float   s_cmd_ref_turns[NEXUS_NUM_JOINTS];
+static float   s_hold_pose_turns[NEXUS_NUM_JOINTS];
+static float   s_meas_turns[NEXUS_NUM_JOINTS];
+static uint8_t s_pose_ok;
+static uint8_t s_zero_prev;          /* ZERO_ANKLES on the previous command   */
+static uint8_t s_ankles_zeroed;      /* ZERO_ANKLES carried out since boot    */
+static uint16_t s_arm_blocked;       /* ticks left to report ARM_BLOCKED      */
+
+/* A joint whose last encoder frame is older than this has no pose to ramp
+   from. The drives send at 1 kHz; 50 ms is fifty missed frames. */
+#define POSE_STALE_TICKS     50u
+
+/* How long ARM_BLOCKED stays visible in the packet after a refused arm, so a
+   Pi sampling at 250 Hz or a person reading a plot cannot miss it. */
+#define ARM_BLOCKED_TICKS   200u
 static uint8_t s_gains_seq;   /* echo of the last gains message applied */
 
 static void build_reference(float phase,
@@ -446,6 +476,16 @@ void app_init(void)
     health_init(HEALTH_EXPECTED_MASK);
     safety_init();
     fusion_init();
+
+    soft_start_idle();
+    {
+        float v[NEXUS_NUM_JOINTS], t[NEXUS_NUM_JOINTS];
+        build_reference(SOFT_START_PHASE, s_hold_pose_turns, v, t);
+    }
+    s_pose_ok       = 0;
+    s_zero_prev     = 0;
+    s_ankles_zeroed = 0;
+    s_arm_blocked   = 0;
 
     contact_init();
     enc_init();
@@ -663,22 +703,73 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
      * sending leaves the last target held until the 200 ms link fault idles
      * the actuators.
      */
-    s_phase += (0.001f * APP_GAIT_SPEED) / GAIT_CYCLE_S;
-    if (s_phase >= 1.0f)
+    /* The pose the drives report, and whether it is complete enough to arm
+       from - see s_pose_ok. */
+    s_pose_ok = 1u;
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
-        s_phase -= 1.0f;
+        s_meas_turns[j] = act.pos[j];
+        if (!isfinite(act.pos[j]) || (act.pos_age[j] > POSE_STALE_TICKS))
+        {
+            s_pose_ok = 0u;
+        }
+    }
+
+    /* Not armed - for any reason - means the next arm ramps again. */
+    if (safety_state() != SAFETY_ARMED)
+    {
+        soft_start_idle();
+    }
+
+    /*
+     * The clock stands still at the start phase through a held ramp and the
+     * hold itself (soft_start.h), so ref_angle and phase in the packet show
+     * the pose being held and the point the stride will start from.
+     */
+    if (soft_start_clock_frozen())
+    {
+        s_phase = SOFT_START_PHASE;
+    }
+    else
+    {
+        s_phase += (0.001f * APP_GAIT_SPEED) / GAIT_CYCLE_S;
+        if (s_phase >= 1.0f)
+        {
+            s_phase -= 1.0f;
+        }
     }
 
     build_reference(s_phase, s_ref_turns, s_gait_vel_turns, s_gait_tau_nm);
     apply_spring_predeflection(s_ref_turns, s_gait_tau_nm, s_drive_ref_turns);
 
     /*
-     * Hand the drives the gait's own velocity and torque for this tick. Every
-     * tick, because the gait clock moves every tick while a command only
-     * arrives every fourth one - latching these with the command would feed a
-     * value up to 4 ms stale.
+     * Hand the drives this tick's velocity and torque. Every tick, because
+     * the gait clock moves every tick while a command only arrives every
+     * fourth one - latching these with the command would feed a value up to
+     * 4 ms stale.
+     *
+     * Armed, they come through the soft start: the ramp's own velocity, the
+     * gait's feedforward blended in (or none at all while held). Disarmed,
+     * nothing - the first segment after an arm must not inherit a stride's
+     * worth of torque from a gait the drives are not following yet.
      */
-    act_set_feedforward(s_gait_vel_turns, s_gait_tau_nm);
+    float ff_vel[NEXUS_NUM_JOINTS], ff_tau[NEXUS_NUM_JOINTS];
+
+    if (safety_state() == SAFETY_ARMED)
+    {
+        soft_start_tick(s_drive_ref_turns, s_gait_vel_turns, s_gait_tau_nm,
+                        s_hold_pose_turns, s_cmd_ref_turns, ff_vel, ff_tau);
+    }
+    else
+    {
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+        {
+            s_cmd_ref_turns[j] = s_drive_ref_turns[j];
+            ff_vel[j] = 0.0f;
+            ff_tau[j] = 0.0f;
+        }
+    }
+    act_set_feedforward(ff_vel, ff_tau);
 
     /* The packet reports the reference in radians on the output side, the same
        units and convention as joint_pos, so the Pi can subtract them. The
@@ -688,7 +779,24 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
         s_state.ref_angle[j] = s_ref_turns[j] * 6.28318530718f;
     }
     s_state.phase        = s_phase;
-    s_state.stream_flags = NEXUS_STREAM_GAIT_LIVE;
+
+    uint8_t flags = NEXUS_STREAM_GAIT_LIVE;
+    switch (soft_start_mode())
+    {
+    case SOFT_RAMP: flags |= NEXUS_STREAM_RAMP; break;
+    case SOFT_HOLD: flags |= NEXUS_STREAM_HOLD; break;
+    default: break;
+    }
+    if (s_ankles_zeroed)
+    {
+        flags |= NEXUS_STREAM_ANKLES_ZEROED;
+    }
+    if (s_arm_blocked != 0u)
+    {
+        flags |= NEXUS_STREAM_ARM_BLOCKED;
+        s_arm_blocked--;
+    }
+    s_state.stream_flags = flags;
 
     /* Estimate before packing, so the packet carries this tick's fused state
        rather than the previous one. */
@@ -762,9 +870,72 @@ void app_run(void)
              * bounds are applied to the number the drives will actually be
              * given rather than to the correction on its own.
              */
-            if (safety_accept_command(&cmd, s_drive_ref_turns, targets))
+            /*
+             * ZERO_ANKLES: once per rising edge, and never while armed - a
+             * drive told it is somewhere else mid-stride would leap there.
+             * Handled before the enable logic, because the command carrying
+             * it is normally an ENABLE-off one.
+             */
+            uint8_t zero = (cmd.flags & NEXUS_CMD_ZERO_ANKLES) ? 1u : 0u;
+
+            if (zero && !s_zero_prev && (safety_state() != SAFETY_ARMED))
             {
-                act_set_targets(targets);
+                uint8_t l = act_set_abs_pos(NEXUS_J_L_ANKLE_PITCH, 0.0f);
+                uint8_t r = act_set_abs_pos(NEXUS_J_R_ANKLE_PITCH, 0.0f);
+
+                if (l && r)
+                {
+                    s_ankles_zeroed = 1u;
+                }
+            }
+            s_zero_prev = zero;
+
+            uint8_t enabled = (cmd.flags & NEXUS_CMD_ENABLE) ? 1u : 0u;
+            uint8_t hold    = (cmd.flags & NEXUS_CMD_HOLD) ? 1u : 0u;
+            uint8_t armed   = (safety_state() == SAFETY_ARMED) ? 1u : 0u;
+
+            if (enabled && !armed && !s_pose_ok)
+            {
+                /*
+                 * No complete pose to ramp from: a drive reporting NaN (the
+                 * ankles after a reboot) or nothing at all. Without this the
+                 * first segment would seed from the target instead of the leg
+                 * - the jump the soft start exists to prevent. Not a rejection
+                 * either: nothing is wrong with the command, so nothing counts
+                 * towards a fault. The board just stays IDLE and says why.
+                 */
+                s_arm_blocked = ARM_BLOCKED_TICKS;
+            }
+            else
+            {
+                /*
+                 * Not armed yet, a command is built on the MEASURED pose, so
+                 * the arming target is where the robot already is and the
+                 * ramp starts from rest. Armed, on whatever the soft start
+                 * says this tick. And the residual is ignored until the gait
+                 * is actually running.
+                 */
+                nexus_cmd_t c = cmd;
+                const float *ref = armed ? s_cmd_ref_turns : s_meas_turns;
+
+                if (!armed || soft_start_ignores_residual())
+                {
+                    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+                    {
+                        c.residual[j] = 0.0f;
+                    }
+                }
+
+                if (safety_accept_command(&c, ref, targets))
+                {
+                    act_set_targets(targets);
+
+                    if (!armed)
+                    {
+                        soft_start_armed(ref, hold);
+                    }
+                    soft_start_hold_flag(hold);
+                }
             }
         }
 

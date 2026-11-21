@@ -139,6 +139,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/contact.c
     App/health.c
     App/safety.c
+    App/soft_start.c
     App/watchdog.c
     App/robot_config.c
     App/lie_group.c

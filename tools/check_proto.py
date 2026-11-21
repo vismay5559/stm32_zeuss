@@ -94,6 +94,24 @@ JOINT_MACROS = [
 ]
 
 
+# Values whose MEANING the two sides must share, not just their bytes: the
+# version byte that makes a mismatched pair refuse to talk, and every flag bit.
+# A flag defined on one side and not the other, or at a different bit, sends a
+# HOLD that the board reads as nothing - and arms straight into the gait.
+CONSTANTS = [
+    ("NEXUS_PROTO_VERSION",        "PROTO_VERSION"),
+    ("NEXUS_CMD_ENABLE",           "CMD_ENABLE"),
+    ("NEXUS_CMD_HOLD",             "CMD_HOLD"),
+    ("NEXUS_CMD_ZERO_ANKLES",      "CMD_ZERO_ANKLES"),
+    ("NEXUS_STREAM_GAIT_LIVE",     "STREAM_GAIT_LIVE"),
+    ("NEXUS_STREAM_LEG_TEST",      "STREAM_LEG_TEST"),
+    ("NEXUS_STREAM_RAMP",          "STREAM_RAMP"),
+    ("NEXUS_STREAM_HOLD",          "STREAM_HOLD"),
+    ("NEXUS_STREAM_ANKLES_ZEROED", "STREAM_ANKLES_ZEROED"),
+    ("NEXUS_STREAM_ARM_BLOCKED",   "STREAM_ARM_BLOCKED"),
+]
+
+
 def c_offsets():
     """Compile a probe that prints offsetof() for every field."""
     lines = ['#include <stdio.h>', '#include <stddef.h>', '#include "link_proto.h"',
@@ -105,6 +123,8 @@ def c_offsets():
     lines.append('  printf("__gains__ %zu\\n", sizeof(nexus_gains_t));')
     for macro, _ in JOINT_MACROS:
         lines.append(f'  printf("J:{macro} %d\\n", (int){macro});')
+    for macro, _ in CONSTANTS:
+        lines.append(f'  printf("K:{macro} %d\\n", (int)({macro}));')
     lines.append('  return 0;}')
 
     with tempfile.TemporaryDirectory() as td:
@@ -197,6 +217,22 @@ def main():
             print("  " + line)
     else:
         print(f"joint map: all {len(JOINT_MACROS)} NEXUS_J_* agree with JOINT_NAMES")
+
+    # Version and flags, C against Python.
+    print()
+    kbad = []
+    for macro, pyname in CONSTANTS:
+        cval = c["K:" + macro]
+        pval = getattr(P, pyname, None)
+        if pval != cval:
+            kbad.append(f"{macro} = {cval}, but nexus_proto.{pyname} is {pval!r}")
+    if kbad:
+        bad += 1
+        print("CONSTANT MISMATCH:")
+        for line in kbad:
+            print("  " + line)
+    else:
+        print(f"constants: version {P.PROTO_VERSION} and all {len(CONSTANTS) - 1} flag bits agree")
 
     print("\n" + ("PROTOCOL MISMATCH" if bad else "C and Python agree"))
     return 1 if bad else 0

@@ -138,6 +138,17 @@ uint8_t act_set_gains(const drive_gains_t gains[NEXUS_NUM_JOINTS]);
 
 /* The gains currently in force. */
 void act_get_gains(drive_gains_t out[NEXUS_NUM_JOINTS]);
+
+/*
+ * Redefine where a joint's drive says it is: Set_Absolute_Position, so that
+ * its position reads out_turns (output turns, URDF convention) from now on.
+ * Moves nothing. Refused (returns 0) while the board is driving, for a joint
+ * that does not exist, or for a non-finite value.
+ *
+ * Used for the ankles, whose drives come back from every reboot without a
+ * valid position: see NEXUS_CMD_ZERO_ANKLES in link_proto.h.
+ */
+uint8_t act_set_abs_pos(uint8_t joint, float out_turns);
 /*
  * The regular motor work: send out the current targets and ask for fresh
  * readings back. Call once per heartbeat.

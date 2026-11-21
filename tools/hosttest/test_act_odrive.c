@@ -58,6 +58,7 @@ static int s_fail;
 #define CMD_SET_INPUT_POS 0x00Cu
 #define CMD_CLEAR_ERRORS  0x018u
 #define CMD_GET_TORQUES   0x01Cu
+#define CMD_SET_ABS_POS   0x019u
 
 #define NODES_PER_BUS  4
 
@@ -1407,6 +1408,55 @@ static void test_the_left_ankle_motor_encoder_is_scaled_both_ways(void)
     }
 }
 
+static void test_set_abs_pos_speaks_each_drive_s_own_units_and_never_while_driving(void)
+{
+    printf("Set_Absolute_Position: drive units on the wire, refused while armed\n");
+
+    /*
+     * Expected, written first: the left ankle reads its motor through 15:1,
+     * so "this ankle is at 0.1 turns" is 1.5 motor turns on the wire; the
+     * right hip pitch counts backwards, so 0.1 is -0.1; zero is zero for
+     * both. While driving nothing may be sent - a drive told mid-stride that
+     * it is somewhere else leaps to make it true.
+     */
+    fresh_board();
+    host_can_forget_sent();
+
+    CHECK(act_set_abs_pos(NEXUS_J_L_ANKLE_PITCH, 0.1f) == 1u, "left ankle refused while idle");
+    act_tx_pump();
+    const host_can_frame_t *f = sent_to(NEXUS_J_L_ANKLE_PITCH, CMD_SET_ABS_POS);
+    CHECK(f && NEAR(get_f32(&f->data[0]), 1.5f, 1e-6f),
+          "left ankle 0.1 turns went out as %.4f, expected 1.5 motor turns",
+          f ? (double)get_f32(&f->data[0]) : -1.0);
+
+    host_can_forget_sent();
+    CHECK(act_set_abs_pos(NEXUS_J_R_HIP_PITCH, 0.1f) == 1u, "right hip refused while idle");
+    act_tx_pump();
+    f = sent_to(NEXUS_J_R_HIP_PITCH, CMD_SET_ABS_POS);
+    CHECK(f && NEAR(get_f32(&f->data[0]), -0.1f, 1e-6f),
+          "right hip 0.1 turns went out as %.4f, expected -0.1 (it counts backwards)",
+          f ? (double)get_f32(&f->data[0]) : -1.0);
+
+    host_can_forget_sent();
+    CHECK(act_set_abs_pos(NEXUS_J_R_ANKLE_PITCH, 0.0f) == 1u, "right ankle zero refused");
+    act_tx_pump();
+    f = sent_to(NEXUS_J_R_ANKLE_PITCH, CMD_SET_ABS_POS);
+    CHECK(f && get_f32(&f->data[0]) == 0.0f, "zero did not go out as 0.0");
+
+    CHECK(act_set_abs_pos(NEXUS_NUM_JOINTS, 0.0f) == 0u, "a joint that does not exist was accepted");
+    CHECK(act_set_abs_pos(NEXUS_J_L_ANKLE_PITCH, NAN) == 0u, "NaN was accepted");
+
+    /* Armed: refused, and nothing on the wire. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++) { drive_reports_position(j, 0.0f, 0.0f); }
+    set_all_targets(0.0f);
+    host_can_forget_sent();
+    CHECK(act_set_abs_pos(NEXUS_J_L_ANKLE_PITCH, 0.0f) == 0u,
+          "Set_Absolute_Position accepted while the robot is driving");
+    act_tx_pump();
+    CHECK(sent_to(NEXUS_J_L_ANKLE_PITCH, CMD_SET_ABS_POS) == 0,
+          "a position redefinition reached a drive mid-run");
+}
+
 int main(void)
 {
     printf("act_odrive.c host tests\n");
@@ -1428,6 +1478,7 @@ int main(void)
     test_replies_land_on_the_right_joint();
     test_a_reversed_drive_is_reversed_both_ways();
     test_the_left_ankle_motor_encoder_is_scaled_both_ways();
+    test_set_abs_pos_speaks_each_drive_s_own_units_and_never_while_driving();
     test_a_frame_from_a_wire_that_does_not_exist_is_bounded();
     test_a_reading_is_handed_over_once_and_then_ages();
     test_a_wire_that_shuts_itself_down_is_restarted();

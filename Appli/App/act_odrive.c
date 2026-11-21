@@ -18,6 +18,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define ODRV_CMD_GET_TORQUES      0x01Cu
 #define ODRV_CMD_SET_POS_GAIN     0x01Au
 #define ODRV_CMD_SET_VEL_GAINS    0x01Bu
+#define ODRV_CMD_SET_ABS_POS      0x019u   /* Set_Absolute_Position, float32 turns */
 
 /* How often a standing disarm request is repeated while faulted, in ticks.
    Once is not enough - the frame can be lost, or a drive can reboot into
@@ -438,6 +439,25 @@ void act_disarm(void)
 uint8_t act_is_armed(void)
 {
     return s_have_target;
+}
+
+uint8_t act_set_abs_pos(uint8_t joint, float out_turns)
+{
+    if ((joint >= NEXUS_NUM_JOINTS) || !isfinite(out_turns) || s_have_target)
+    {
+        return 0u;
+    }
+
+    /* Into the drive's own direction and shaft, the mirror of act_on_rx() -
+       for the left ankle that is motor turns, 15 per ankle turn. */
+    float   drive = g_joint_dir[joint] * g_joint_enc_ratio[joint] * out_turns;
+    uint8_t bus   = (uint8_t)(joint / ODRV_NODES_PER_BUS);
+    uint32_t node = (uint32_t)(joint % ODRV_NODES_PER_BUS) + 1u;
+    uint8_t d[8]  = { 0 };
+
+    memcpy(d, &drive, sizeof(drive));
+    tx_enqueue(bus, (node << 5) | ODRV_CMD_SET_ABS_POS, d);
+    return 1u;
 }
 
 static void request_all_closed_loop(void)

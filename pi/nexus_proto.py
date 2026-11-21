@@ -40,7 +40,9 @@ from typing import List, Optional, Tuple
 
 SYNC = 0xA5A5
 SYNC_BYTES = struct.pack("<H", SYNC)
-PROTO_VERSION = 9
+# v11: soft start - see NEXUS_PROTO_VERSION in link_proto.h. Same bytes as v9,
+# new meanings for flag bits, one of them safety-critical (HOLD).
+PROTO_VERSION = 11
 
 MSG_STATE = 0x01
 MSG_COMMAND = 0x02
@@ -174,11 +176,17 @@ FK_LEFT_VALID = 1 << 1
 # stream_flags - which optional parts of the packet are really being produced
 STREAM_GAIT_LIVE = 1 << 0
 STREAM_LEG_TEST = 1 << 1    # from the single-leg bench test, not the robot loop
+STREAM_RAMP = 1 << 2        # soft start: blending from the arming pose to the goal
+STREAM_HOLD = 1 << 3        # standing at the start pose, gait clock frozen
+STREAM_ANKLES_ZEROED = 1 << 4   # ZERO_ANKLES carried out since the board booted
+STREAM_ARM_BLOCKED = 1 << 5     # an enable was refused: a joint has no position
 
 ACT_TELEM_FRESH = 1 << 0
 ACT_HB_FRESH = 1 << 1
 
 CMD_ENABLE = 1 << 0
+CMD_HOLD = 1 << 1           # arm into a hold at the start pose, not into the gait
+CMD_ZERO_ANKLES = 1 << 2    # Set_Absolute_Position(0) on both ankles; disarmed only
 
 # Health bitmask, mirrors Appli/App/health.h
 HEALTH_IMU = 1 << 0
