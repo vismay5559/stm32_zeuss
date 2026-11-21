@@ -13,33 +13,31 @@
 void inekf_default_params(inekf_params_t *p)
 {
     /*
-     * IMU noise, from an hour of the BNO085 sitting still on the robot
-     * (2026-11-21, docs/IMU_NOISE.md). Allan deviation, worst axis:
+     * Process noise. These are deliberately NOT the IMU's measured floor.
      *
-     *                      measured floor     used here
-     *   gyro white         3.1e-4             1e-3     rad/s/sqrt(Hz)
-     *   accel white        1.8e-3             1e-2     m/s^2/sqrt(Hz)
-     *   gyro bias walk     < 2e-6             1e-5     rad/s^2/sqrt(Hz)
-     *   accel bias walk    1.2e-4             5e-4     m/s^3/sqrt(Hz)
+     * An hour of the robot's own BNO085 sitting still (2026-11-22,
+     * docs/IMU_NOISE.md) measured, worst axis: gyro white 3.1e-4 rad/s/sqrt(Hz),
+     * accel white 1.8e-3 m/s^2/sqrt(Hz), gyro bias walk < 2e-6, accel bias
+     * walk 1.2e-4. Those are right for the SENSOR. Set from them (1e-3, 1e-2,
+     * 1e-5, 5e-4), the filter DIVERGED on the robot within 20 s - hanging in
+     * the gantry, feet touching, nothing moving: velocity to 2 m/s, accel bias
+     * to 2 m/s^2. With these values, same robot, same minute: velocity
+     * 0 +/- 0.01 m/s, height steady, biases settled near the measured ones.
      *
-     * The used values sit 3-6x ABOVE the measured floor on purpose. A still
-     * robot has no motor vibration, no foot impacts, no timing jitter and no
-     * lever-arm error, and walking adds all four - every one of which reaches
-     * the filter looking like IMU noise. Set to the floor, the filter would
-     * trust the IMU over the legs and drift confidently between steps. Never
-     * set BELOW the floor: that is a claim the sensor cannot meet.
-     *
-     * The previous values (2e-3, 4e-2, 1e-3, 1e-3) were guesses, and were 4x
-     * to 15x more pessimistic than this sensor on white noise and ~100x looser
-     * on bias drift. They are the starting point for tuning against walking
-     * recordings, not the end of it.
+     * Process noise has to cover everything the model leaves out, not only
+     * the IMU: link flex, the series springs, a foot that is not perfectly
+     * still, timing between IMU and joint samples. Told the IMU is nearly
+     * perfect, the filter forces all of that into its bias states and they
+     * run away. So: the measured values are a FLOOR - never go below them -
+     * and these are tuned down from here only against recorded runs replayed
+     * through this filter, never straight from a datasheet or an Allan plot.
      *
      * All four are continuous-time densities: predict adds Qbar * dt.
      */
-    p->noise_gyro        = 1.0e-3f;
-    p->noise_accel       = 1.0e-2f;
-    p->noise_gyro_bias   = 1.0e-5f;
-    p->noise_accel_bias  = 5.0e-4f;
+    p->noise_gyro        = 0.002f;
+    p->noise_accel       = 0.04f;
+    p->noise_gyro_bias   = 0.001f;
+    p->noise_accel_bias  = 0.001f;
     p->noise_contact_vel = 0.05f;
 
     p->init_orientation  = 0.5236f;   /* 30 deg */

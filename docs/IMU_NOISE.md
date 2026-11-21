@@ -127,7 +127,26 @@ way it is real behaviour the filter must allow for.
   next, so the filter estimates it every run. The measured values only confirm
   that the starting uncertainty is large enough.
 
-## What the firmware uses
+## What the firmware uses — and why it is NOT the table below
+
+**Update, 2026-11-22, on the robot.** The values in the next table were flashed
+and the filter **diverged within 20 seconds** with the robot hanging in the
+gantry, feet touching, nothing moving: velocity grew to 2 m/s and the accel
+bias to 2 m/s². Reverted to the previous values (2e-3, 4e-2, 1e-3, 1e-3), on
+the same robot a minute later: velocity 0 ± 0.01 m/s, height steady at
+0.74–0.77 m, and gyro bias settled at about (−2.7, −1.4, −0.6) mrad/s, close to
+the bias this test measured.
+
+The measurements above are right for the **sensor**. Process noise has to
+cover everything the model leaves out — link flex, the series springs, a foot
+that is not perfectly still, timing between IMU and joint samples — and told
+the IMU is nearly perfect, the filter forced all of that into its bias states.
+So the firmware runs the earlier values, the table is the **floor** no setting
+may go below, and tightening happens only by replaying flight recordings
+through the filter against ground truth.
+
+The values that were tried and reverted:
+
 
 `Appli/App/inekf.c`, `inekf_default_params()`:
 

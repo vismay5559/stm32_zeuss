@@ -98,6 +98,33 @@ extern FDCAN_HandleTypeDef hfdcan2;
  */
 #define CANCFG_SAVE   1
 
+/*
+ * Which drives the write / zero / save stages touch. 0xFF = every drive seen.
+ *
+ * Saving REBOOTS a drive, so a run meant for one drive must not bounce the
+ * other seven. 2026-11-22: only the right ankle (bus 1, node 4) still had the
+ * factory rates (100 ms / 10 ms) - its save never completed the first time -
+ * and its zero was 6.5 degrees off the pose the robot was standing in.
+ */
+#define CANCFG_ONLY_BUS    1u
+#define CANCFG_ONLY_NODE   4u
+
+/*
+ * 1 = Set_Absolute_Position(0) on the targeted drive BEFORE the save, so the
+ * save persists the new offset with the rates. ONLY for a drive whose encoder
+ * is absolute over the joint's travel - a load-side encoder - and ONLY with
+ * the robot held in the URDF zero pose. It moves nothing: it redefines where
+ * zero is. See docs/ZEROING.md.
+ */
+#define CANCFG_ZERO_TARGET 1
+#define CANCFG_SET_ABS_POS 0x019u
+
+static uint8_t targeted(uint8_t bus, uint8_t node)
+{
+    return ((CANCFG_ONLY_BUS == 0xFFu) || (bus == CANCFG_ONLY_BUS)) &&
+           ((CANCFG_ONLY_NODE == 0xFFu) || (node == CANCFG_ONLY_NODE));
+}
+
 #define EP_NODE_ID         282u
 #define EP_HEARTBEAT_MS    284u
 #define EP_ENCODER_MS      285u
@@ -116,6 +143,7 @@ static volatile uint8_t  s_ver_got;
 static volatile uint8_t  s_ver[8];
 static volatile uint32_t s_hb_seen[2];
 static volatile uint32_t s_count[2][8][3];   /* [bus][node][0=hb 1=enc 2=torque] */
+static volatile float    s_pos[2][8];        /* last Get_Encoder_Estimates position, turns */
 
 static void start_bus(FDCAN_HandleTypeDef *h)
 {
@@ -183,7 +211,13 @@ void cancfg_on_rx(void *hfdcan)
             s_hb_seen[bus] |= 1u << n;
             if (n < 8u) { s_count[bus][n][0]++; }
         }
-        else if (cmd == 0x009u && n < 8u) { s_count[bus][n][1]++; }
+        else if (cmd == 0x009u && n < 8u)
+        {
+            float pos;
+            memcpy(&pos, d, sizeof(pos));
+            s_pos[bus][n] = pos;
+            s_count[bus][n][1]++;
+        }
         else if (cmd == 0x01Cu && n < 8u) { s_count[bus][n][2]++; }
         else if (cmd == CANCFG_TX_SDO)
         {
@@ -387,6 +421,8 @@ static uint8_t save_node(FDCAN_HandleTypeDef *h, uint8_t bus, uint8_t node)
     printf(", from flash: enc=%lu hb=%lu torque=%lu  %s\r\n",
            (unsigned long)enc, (unsigned long)hb, (unsigned long)tq,
            good ? "PERSISTED" : "*** NOT WHAT WE WROTE ***");
+    printf("      position after the reboot: %+.5f turns (%+.2f deg)\r\n",
+           (double)s_pos[bus][node], (double)(s_pos[bus][node] * 360.0f));
     return good;
 }
 #endif
@@ -479,6 +515,8 @@ void cancfg_run(void)
     printf("\r\nsweep done.\r\n");
 
 #if CANCFG_WRITE
+    printf("\r\n=== target: bus %u node %u (0xFF = all) ===\r\n",
+           (unsigned)CANCFG_ONLY_BUS, (unsigned)CANCFG_ONLY_NODE);
     printf("\r\n=== setting rates: encoder %u ms, heartbeat %u ms, torque %u ms ===\r\n",
            (unsigned)WANT_ENCODER_MS, (unsigned)WANT_HEARTBEAT_MS,
            (unsigned)WANT_TORQUE_MS);
@@ -491,6 +529,7 @@ void cancfg_run(void)
         for (uint8_t node = 1u; node <= 4u; node++)
         {
             if ((s_hb_seen[bus] & (1u << node)) == 0u) { continue; }
+            if (!targeted(bus, node)) { continue; }
 
             /* Confirm we are addressing the drive we think we are before
                writing a single byte to it. */
@@ -547,6 +586,22 @@ void cancfg_run(void)
         for (uint8_t node = 1u; node <= 4u; node++)
         {
             if ((s_hb_seen[bus] & (1u << node)) == 0u) { continue; }
+            if (!targeted(bus, node)) { continue; }
+#if CANCFG_ZERO_TARGET
+            {
+                uint8_t z[4];
+                float   zero = 0.0f;
+
+                printf("    bus %u node %u: position before zeroing %+.5f turns (%+.2f deg)\r\n",
+                       (unsigned)bus, (unsigned)node, (double)s_pos[bus][node],
+                       (double)(s_pos[bus][node] * 360.0f));
+                memcpy(z, &zero, sizeof(z));
+                tx_classic(h, node, CANCFG_SET_ABS_POS, z, 4u);
+                pump_for(300u);
+                printf("    bus %u node %u: Set_Absolute_Position(0) -> now %+.5f turns\r\n",
+                       (unsigned)bus, (unsigned)node, (double)s_pos[bus][node]);
+            }
+#endif
             (void)save_node(h, bus, node);
         }
     }
