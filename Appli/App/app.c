@@ -44,6 +44,29 @@ extern TIM_HandleTypeDef htim6;
  *
  *     NEXUS_LOOP_STATS=1 cmake --preset Debug
  */
+/*
+ * The robot loop is not allowed to be built unoptimised.
+ *
+ * Measured 2026-11-22 on the robot, ROBOT mode with only the IMU live:
+ *
+ *     -O0 (Debug)     loop worst 4.1-5.4 ms   estimator 2.4-3.1 ms   ~1000 overruns/s
+ *     -Os (Release)   loop worst 0.61-0.67 ms estimator 0.41 ms      0
+ *
+ * At -O0 the board ticked at 303 Hz instead of 1000 and the link test failed
+ * on a perfect cable - an evening spent suspecting USB, when the firmware had
+ * simply been built Debug, which is what Appli/build is configured as. An
+ * unoptimised build is not a slower robot, it is a different one: every
+ * timing figure the estimator and the safety logic assume is wrong.
+ *
+ * So refuse to compile it. Build flight firmware with --preset Release (see
+ * README, "Flight firmware"). To single-step the robot loop in a debugger
+ * anyway, knowing it will overrun, define NEXUS_ALLOW_UNOPTIMISED_ROBOT.
+ */
+#if (NEXUS_MODE == NEXUS_MODE_ROBOT) && !defined(__OPTIMIZE__) && \
+    !defined(NEXUS_ALLOW_UNOPTIMISED_ROBOT)
+#error "ROBOT mode built without optimisation: the 1 kHz loop overruns ~4x at -O0. Use --preset Release (or -DCMAKE_BUILD_TYPE=Release). Define NEXUS_ALLOW_UNOPTIMISED_ROBOT only to debug."
+#endif
+
 #ifndef NEXUS_LOOP_STATS
 #define NEXUS_LOOP_STATS  0
 #endif

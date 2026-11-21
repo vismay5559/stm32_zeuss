@@ -139,7 +139,14 @@ for d in /opt/st/stm32cubeide_*/plugins/com.st.stm32cube.ide.mcu.externaltools.{
 
 bash tools/hosttest/run.sh          # 15 suites, pure host C, no hardware needed
 python3 tools/check_proto.py        # the C struct against the Python one, field by field
-cmake --build Appli/build
+cmake --build Appli/build           # bench/test modes; Appli/build is a DEBUG (-O0) tree
+
+# ROBOT mode is flight firmware: Release only. At -O0 the estimator alone takes
+# 2.4-3.1 ms of the 1 ms tick and the board runs at ~300 Hz; app.c refuses to
+# compile ROBOT unoptimised. A Release ROBOT build in its own tree:
+cmake -S Appli -B build-robot -G Ninja -DCMAKE_TOOLCHAIN_FILE=$PWD/gcc-arm-none-eabi.cmake \
+      -DCMAKE_BUILD_TYPE=Release -DNEXUS_MODE=NEXUS_MODE_ROBOT
+cmake --build build-robot           # flash build-robot/nexus_first_Appli.hex
 
 ST_LOADER=$(ls /opt/st/stm32cubeide_*/plugins/*cubeprogrammer*/tools/bin/ExternalLoader/MX25UW25645G_NUCLEO-H7S3L8.stldr)
 STM32_Programmer_CLI -c port=SWD mode=UR -el "$ST_LOADER" -d Appli/build/nexus_first_Appli.hex -v -rst
