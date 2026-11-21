@@ -20,6 +20,7 @@
 #define NEXUS_MODE_CAN_SCAN   4  /* both CAN buses, receive only; no drive commands */
 #define NEXUS_MODE_ENC_SCAN   5  /* four spring encoders, SPI only */
 #define NEXUS_MODE_CAN_CFG    6  /* read/set ODrive CAN rates; never arms */
+#define NEXUS_MODE_SENSORS    7  /* CAN + encoders + IMU, read only, all at once */
 
 /*
  * THIS LINE is the mode. Edit it, rebuild, reflash.
@@ -58,8 +59,10 @@
 #define NEXUS_MODE_NAME  "ENC_SCAN"
 #elif (NEXUS_MODE == NEXUS_MODE_CAN_CFG)
 #define NEXUS_MODE_NAME  "CAN_CFG"
+#elif (NEXUS_MODE == NEXUS_MODE_SENSORS)
+#define NEXUS_MODE_NAME  "SENSORS"
 #else
-#error "NEXUS_MODE must be ROBOT / LEG_CAN / IMU / LEG_TORQUE / CAN_SCAN / ENC_SCAN / CAN_CFG"
+#error "NEXUS_MODE must be ROBOT / LEG_CAN / IMU / LEG_TORQUE / CAN_SCAN / ENC_SCAN / CAN_CFG / SENSORS"
 #endif
 
 #endif /* NEXUS_MODE_H */

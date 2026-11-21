@@ -10,6 +10,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define CANSCAN_HEARTBEAT  0x01u
 #define CANSCAN_ENCODER    0x09u
 #define CANSCAN_NODES      64u
+#define CANSCAN_CLASSIC    0   /* 1 = classic CAN 1 Mbit/s, FD off */
 
 typedef struct
 {
@@ -60,6 +61,18 @@ void canscan_init(void)
 {
     memset(s_node, 0, sizeof(s_node));
     memset(s_bus_frames, 0, sizeof(s_bus_frames));
+#if CANSCAN_CLASSIC
+    /* Classic CAN only. Nominal timing is untouched: 80 MHz / (1+69+10)
+       = 1 Mbit/s. Only FD and bit-rate switching are turned off. Re-running
+       HAL_FDCAN_Init on a READY handle reconfigures without MspInit. */
+    hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+    hfdcan2.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+    if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK || HAL_FDCAN_Init(&hfdcan2) != HAL_OK)
+    {
+        printf("classic CAN re-init FAILED\r\n");
+    }
+    printf("CAN scan: CLASSIC CAN, 1 Mbit/s nominal, FD off\r\n");
+#endif
     start_bus(&hfdcan1, 0u);
     start_bus(&hfdcan2, 1u);
     printf("CAN scan: both buses, all node IDs, no drive commands sent\r\n");
