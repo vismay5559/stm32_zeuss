@@ -9,7 +9,7 @@ static uint8_t     s_hold;          /* HOLD as it stands now                  */
 static uint8_t     s_ramp_held;     /* the ramp's goal is the frozen pose     */
 static uint32_t    s_t;             /* ticks into the ramp                    */
 static float       s_from[NEXUS_NUM_JOINTS];
-static float       s_home[NEXUS_NUM_JOINTS];   /* the pose measured at arming  */
+static float       s_home[NEXUS_NUM_JOINTS];   /* where RETURN goes: all zero  */
 static float       s_last[NEXUS_NUM_JOINTS];   /* the last reference handed out */
 
 void soft_start_idle(void)
@@ -26,7 +26,7 @@ void soft_start_idle(void)
 void soft_start_armed(const float from[NEXUS_NUM_JOINTS], uint8_t hold)
 {
     memcpy(s_from, from, sizeof(s_from));
-    memcpy(s_home, from, sizeof(s_home));
+    memset(s_home, 0, sizeof(s_home));   /* the standing pose - see soft_start.h */
     memcpy(s_last, from, sizeof(s_last));
     s_hold      = (hold != 0u);
     s_ramp_held = s_hold;

@@ -177,10 +177,9 @@
 
 /*
  * RETURN (v12): back to standing. During a held arm (the ramp to the start
- * pose, or the HOLD there), ramp back over SOFT_START_RAMP_S to the pose
- * measured when the robot armed, and hold it - so ENABLE off afterwards idles
- * the drives with the legs where they started, not from a 35 degree knee
- * bend. Ignored once the gait is running: a walking robot is stopped with
+ * pose, or the HOLD there), ramp over SOFT_START_RAMP_S to ZERO on every
+ * joint - the calibrated standing pose - and hold it, so ENABLE off afterwards
+ * idles the drives from a straight stand, not from a 35 degree knee bend. Ignored once the gait is running: a walking robot is stopped with
  * ENABLE off. Final until disarm. See soft_start.h.
  */
 #define NEXUS_CMD_RETURN        (1u << 3)

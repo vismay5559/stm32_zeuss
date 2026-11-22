@@ -182,7 +182,7 @@ STREAM_RAMP = 1 << 2        # soft start: blending from the arming pose to the g
 STREAM_HOLD = 1 << 3        # standing at the start pose, gait clock frozen
 STREAM_ANKLES_ZEROED = 1 << 4   # ZERO_ANKLES carried out since the board booted
 STREAM_ARM_BLOCKED = 1 << 5     # an enable was refused: a joint has no position
-STREAM_RETURN = 1 << 6          # going back to / holding the pose measured at arming
+STREAM_RETURN = 1 << 6          # going to / holding zero on every joint
 
 ACT_TELEM_FRESH = 1 << 0
 ACT_HB_FRESH = 1 << 1
@@ -190,7 +190,7 @@ ACT_HB_FRESH = 1 << 1
 CMD_ENABLE = 1 << 0
 CMD_HOLD = 1 << 1           # arm into a hold at the start pose, not into the gait
 CMD_ZERO_ANKLES = 1 << 2    # Set_Absolute_Position(0) on both ankles; disarmed only
-CMD_RETURN = 1 << 3         # held arm only: ramp back to the arming pose and hold it
+CMD_RETURN = 1 << 3         # held arm only: ramp to zero on every joint and hold it
 
 # Health bitmask, mirrors Appli/App/health.h
 HEALTH_IMU = 1 << 0

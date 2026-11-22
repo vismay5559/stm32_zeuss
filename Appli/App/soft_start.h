@@ -41,8 +41,11 @@
  * then not wanted after all: the way back down used to be ENABLE off, which
  * drops every joint at once from a 35 degree knee bend. RETURN instead ramps,
  * over the same SOFT_START_RAMP_S smoothstep, from wherever the reference is
- * now back to the pose measured at the moment of arming, and holds it there
- * (HOME). Then ENABLE off idles the drives with the robot where it started.
+ * now to ZERO on every joint - the calibrated standing pose, ankles flat as
+ * they were zeroed - and holds it there (HOME). Then ENABLE off idles the
+ * drives from a straight stand. Zero, not the pose measured at arming: that
+ * was the first version, and it brought the robot back to however it happened
+ * to be slumped when START was pressed (a hip at 4, a knee at 9 degrees).
  * Only from a held arm - the held ramp or HOLD. Not from RUN: mid-stride with
  * a foot in the air there is no safe straight line back, so a walking robot
  * is stopped with ENABLE off. Once begun it is final until disarm; clearing
@@ -58,8 +61,8 @@ typedef enum
     SOFT_RAMP = 1,      /* blending from the arming pose to the goal         */
     SOFT_HOLD = 2,      /* at the start pose, clock frozen, waiting          */
     SOFT_RUN  = 3,      /* the gait, unmodified                              */
-    SOFT_RETURN = 4,    /* ramping back to the pose measured at arming       */
-    SOFT_HOME = 5       /* holding the pose measured at arming               */
+    SOFT_RETURN = 4,    /* ramping to zero on every joint                    */
+    SOFT_HOME = 5       /* holding zero on every joint                       */
 } soft_mode_t;
 
 /* Back to IDLE: call at boot and whenever the board is not armed. */
@@ -103,7 +106,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
 
 /*
  * NEXUS_CMD_RETURN as it stands on each accepted command. Set during a held
- * ramp or HOLD: start ramping back to the arming pose. Anywhere else it does
+ * ramp or HOLD: start ramping to zero on every joint. Anywhere else it does
  * nothing - in particular not in RUN.
  */
 void soft_start_return_flag(uint8_t ret);

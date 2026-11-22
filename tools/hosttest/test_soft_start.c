@@ -232,7 +232,7 @@ static void test_disarming_means_the_next_arm_ramps_again(void)
 
 static void test_return_from_the_hold_goes_back_to_where_it_armed(void)
 {
-    printf("RETURN at the start pose: ramps back to the arming pose, holds it, no jump\n");
+    printf("RETURN at the start pose: ramps to zero on every joint, holds it, no jump\n");
     setup();
     soft_start_idle();
     soft_start_armed(s_stand, 1u);
@@ -263,7 +263,7 @@ static void test_return_from_the_hold_goes_back_to_where_it_armed(void)
         for (int j = 0; j < N; j++)
         {
             float over = fabsf(ref[j] - prev[j])
-                       - (1.5f * fabsf(s_pose0[j] - s_stand[j]) / (float)RAMP + 1e-7f);
+                       - (1.5f * fabsf(s_pose0[j]) / (float)RAMP + 1e-7f);
             if (over > worst) { worst = over; }
             CHECK(tau[j] == 0.0f, "t=%d joint %d: torque %.2f pushed on the way back", t, j,
                   (double)tau[j]);
@@ -281,9 +281,11 @@ static void test_return_from_the_hold_goes_back_to_where_it_armed(void)
     for (int k = 0; k < 500; k++) { tick(ref, vel, tau); }
     for (int j = 0; j < N; j++)
     {
-        CHECK(fabsf(ref[j] - s_stand[j]) < 1e-6f && vel[j] == 0.0f && tau[j] == 0.0f,
-              "joint %d: home at %.3f deg (v %.4f), expected the arming pose %.3f, still",
-              j, (double)(ref[j] * 360.0f), (double)vel[j], (double)(s_stand[j] * 360.0f));
+        /* Zero - NOT the standing pose it armed from, which has the right hip
+           roll at 4 deg: going back there kept every slump START began in. */
+        CHECK(fabsf(ref[j]) < 1e-6f && vel[j] == 0.0f && tau[j] == 0.0f,
+              "joint %d: home at %.3f deg (v %.4f), expected 0, still",
+              j, (double)(ref[j] * 360.0f), (double)vel[j]);
     }
 
     /* Home is final: clearing HOLD does not set off the gait from a standing robot. */
@@ -295,7 +297,7 @@ static void test_return_from_the_hold_goes_back_to_where_it_armed(void)
 
 static void test_return_mid_ramp_turns_round_where_it_is(void)
 {
-    printf("RETURN halfway out: turns round from the current reference, ends at the arming pose\n");
+    printf("RETURN halfway out: turns round from the current reference, ends at zero\n");
     setup();
     soft_start_idle();
     soft_start_armed(s_stand, 1u);
@@ -314,7 +316,7 @@ static void test_return_mid_ramp_turns_round_where_it_is(void)
     for (int t = 1; t <= RAMP; t++) { tick(ref, vel, tau); }
     for (int j = 0; j < N; j++)
     {
-        CHECK(fabsf(ref[j] - s_stand[j]) < 1e-6f, "joint %d: ended at %.3f deg, not the arming pose",
+        CHECK(fabsf(ref[j]) < 1e-6f, "joint %d: ended at %.3f deg, not zero",
               j, (double)(ref[j] * 360.0f));
     }
 }
