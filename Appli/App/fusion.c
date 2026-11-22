@@ -148,11 +148,18 @@ static float drive_angle(const joint_src_t *src, const act_telemetry_t *act)
  * when a bus goes quiet act->pos simply stops changing - the last value
  * persists and axis_error stays 0 - so without the age check the kinematics
  * would produce a confident foot position from angles that are seconds old.
+ *
+ * And not if the angle is not a number. Both ankle drives report NaN after a
+ * reboot until they are zeroed, with no axis error and fresh messages. That
+ * passed both checks above, went into the leg's kinematics, made the filter's
+ * state NaN, and the estimator reset itself every tick - one ankle took the
+ * whole estimate to INVALID with the other leg perfectly good (2026-11-22).
  */
 static uint8_t drive_ok(const joint_src_t *src, const act_telemetry_t *act)
 {
     return (act->axis_error[src->act_index] == 0u) &&
-           (act->pos_age[src->act_index] <= ACT_POS_STALE_TICKS);
+           (act->pos_age[src->act_index] <= ACT_POS_STALE_TICKS) &&
+           isfinite(act->pos[src->act_index]);
 }
 
 typedef struct

@@ -245,6 +245,43 @@ static void test_faulted_axis_invalidates_its_leg(void)
 }
 
 /*
+ * A drive reporting NaN - both ankle drives do after a reboot until they are
+ * zeroed - must take only ITS leg out, exactly like a faulted axis. Measured on
+ * the robot before this was checked: the NaN went into the leg's kinematics,
+ * the filter's state went NaN, and the whole estimator reset itself every tick
+ * - INVALID, with the other leg perfectly good and both feet on the ground.
+ */
+static void test_a_nan_drive_drops_its_leg_not_the_estimator(void)
+{
+    printf("a drive reporting NaN drops its leg; the estimator runs on the other\n");
+
+    fixtures_reset();
+    fusion_init();
+    for (int i = 0; i < 1500; i++) { tick(1, 0x3u); }
+
+    CHECK(fusion_status() != NEXUS_FUSION_INVALID,
+          "the estimator did not start with both legs good (status %u)",
+          (unsigned)fusion_status());
+
+    s_act.pos[g_leg_joints[1][ROBOT_JOINT_ANKLE].act_index] = NAN;
+    for (int i = 0; i < 500; i++) { tick(1, 0x3u); }
+
+    nexus_state_t st;
+    memset(&st, 0, sizeof(st));
+    fusion_fill_state(&st);
+
+    CHECK((st.fk_valid & NEXUS_FK_RIGHT_VALID) == 0u,
+          "right leg still counted valid with its ankle reading NaN");
+    CHECK((st.fk_valid & NEXUS_FK_LEFT_VALID) != 0u,
+          "left leg was dropped over a NaN on the right");
+    CHECK(fusion_status() != NEXUS_FUSION_INVALID,
+          "one NaN ankle took the whole estimator to INVALID");
+    CHECK(isfinite(st.pelvis_z) && isfinite(st.vel_hdg[0]),
+          "height %f / velocity %f went non-finite", (double)st.pelvis_z,
+          (double)st.vel_hdg[0]);
+}
+
+/*
  * A series-elastic joint's real angle is the motor side plus the spring. So a
  * knee whose drive reads 0.10 rad with 0.02 rad of spring wind-up must put the
  * foot exactly where a rigid knee at 0.12 rad would - not at 0.10 (springs
@@ -474,6 +511,7 @@ int main(void)
     test_foot_follows_the_drives();
     test_stale_leg_reports_nan_not_zero();
     test_faulted_axis_invalidates_its_leg();
+    test_a_nan_drive_drops_its_leg_not_the_estimator();
     test_spring_deflection_adds_to_the_drive();
     test_an_unreadable_spring_is_not_believed();
     test_one_legs_drives_do_not_move_the_other_foot();
