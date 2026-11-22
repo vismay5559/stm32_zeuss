@@ -216,31 +216,66 @@ static void test_a_sensor_fault_follows_the_live_state(void)
 
 static void test_timing_faults_can_be_acknowledged(void)
 {
-    printf("a timing fault latches, and clearing it does not need a power cycle\n");
+    printf("timing: an isolated miss is tolerated, a stall or a slow loop latches, ack clears\n");
 
+    /*
+     * One missed tick: what the first START on 2026-11-22 did (cold XIP code on
+     * the first arm). It must NOT disarm a standing robot.
+     */
     reset_world();
     healthy_ticks(50);
     CHECK((health_faults() & HEALTH_TIMING) == 0u, "setup: timing already faulted");
-
-    s_overruns = 1;                 /* one missed tick */
-    healthy_tick();
-    CHECK((health_faults() & HEALTH_TIMING) != 0u,
-          "a missed tick did not raise a timing fault");
-
+    s_overruns = 1;
     healthy_ticks(200);
-    CHECK((health_faults() & HEALTH_TIMING) != 0u,
-          "the timing fault cleared itself");
+    CHECK((health_faults() & HEALTH_TIMING) == 0u,
+          "one isolated missed tick faulted the robot - the first START would disarm it");
+
+    /* An isolated miss every 200 ms, for 10 s: the bucket drains between them. */
+    for (int k = 0; k < 50; k++)
+    {
+        s_overruns++;
+        healthy_ticks(200);
+    }
+    CHECK((health_faults() & HEALTH_TIMING) == 0u,
+          "a miss every 200 ms accumulated into a fault - the budget does not drain");
+
+    /* A 5 ms stall in one go (4 missed ticks at once): latches immediately. */
+    reset_world();
+    healthy_ticks(50);
+    s_overruns = 4;
+    healthy_tick();
+    CHECK((health_faults() & HEALTH_TIMING) != 0u, "a 5 ms stall did not raise a timing fault");
+    healthy_ticks(2000);
+    CHECK((health_faults() & HEALTH_TIMING) != 0u, "the timing fault cleared itself");
 
     health_clear_latched();
     healthy_ticks(10);
     CHECK((health_faults() & HEALTH_TIMING) == 0u,
-          "acknowledging the overrun did not clear the timing fault");
+          "acknowledging did not clear the timing fault");
 
-    /* A FURTHER overrun after the acknowledgement must raise it again. */
-    s_overruns = 2;
+    /* After the ack, the budget starts full again: one miss is fine, a burst is not. */
+    s_overruns += 1;
+    healthy_tick();
+    CHECK((health_faults() & HEALTH_TIMING) == 0u, "one miss right after the ack faulted");
+    s_overruns += 3;
     healthy_tick();
     CHECK((health_faults() & HEALTH_TIMING) != 0u,
-          "a second missed tick after acknowledgement was ignored");
+          "four misses within a few ms after the ack were ignored");
+
+    /*
+     * A loop that is simply too slow: -O0 ran it at ~300 Hz, a miss on most
+     * ticks. Must latch within 10 ms.
+     */
+    reset_world();
+    healthy_ticks(50);
+    int t;
+    for (t = 0; t < 10 && !(health_faults() & HEALTH_TIMING); t++)
+    {
+        s_overruns += 2;
+        healthy_tick();
+    }
+    CHECK((health_faults() & HEALTH_TIMING) != 0u,
+          "a loop missing 2 of every 3 ticks ran 10 ms without a timing fault");
 }
 
 static void test_only_watched_subsystems_are_reported(void)

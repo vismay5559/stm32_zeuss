@@ -22,7 +22,7 @@
 #define HEALTH_CAN1    (1u << 2)   /* blink 3: nothing heard on CAN bus 1     */
 #define HEALTH_CAN2    (1u << 3)   /* blink 4: nothing heard on CAN bus 2     */
 #define HEALTH_LINK    (1u << 4)   /* blink 5: no commands from the Pi        */
-#define HEALTH_TIMING  (1u << 5)   /* blink 6: the 1 kHz loop missed a tick   */
+#define HEALTH_TIMING  (1u << 5)   /* blink 6: the 1 kHz loop is missing ticks */
 
 #define HEALTH_COUNT   6u
 
@@ -108,8 +108,11 @@ uint32_t health_expected(void);
  * before it will let the robot move.
  *
  * HEALTH_TIMING is the exception. It latches, and only health_clear_latched()
- * clears it - a missed heartbeat means the robot lost track of time, and
- * that should not stop being true just because the next tick was punctual.
+ * clears it - a loop that fell behind lost track of time, and that should not
+ * stop being true just because the next tick was punctual. It is raised by
+ * more than an isolated miss: a budget of a few missed ticks that refills at
+ * one per 100 ms (see health.c), so a cold-cache hiccup is counted but does
+ * not idle a standing robot, and a stall or a slow loop still does.
  *
  * The consequence worth knowing: a sensor that drops out intermittently shows
  * as faulty only while it is actually out. Nothing here records that it

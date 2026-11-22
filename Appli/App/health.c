@@ -32,6 +32,28 @@
  */
 #define ENC_BAD_TICKS     200u
 
+/*
+ * Timing: a leaky budget of missed ticks, not "any miss is fatal".
+ *
+ * Every missed tick adds one to a bucket that drains by one every
+ * TIMING_DRAIN_TICKS; the fault latches when the bucket passes
+ * TIMING_BUDGET. So:
+ *   - an isolated miss is counted (app_overruns() still shows it) but does not
+ *     disarm the robot. On 2026-11-22 the first START armed, then faulted 60 ms
+ *     later on exactly ONE missed tick (work max 510 us): the first run of the
+ *     arming and ramp code, fetched cold from external flash (XIP). The same
+ *     cold miss would hit again on the first WALK. One late Set_Input_Pos is
+ *     invisible to a drive that holds its last target; idling every axis of a
+ *     robot standing on its feet is not.
+ *   - a stall of more than TIMING_BUDGET ms in one go faults at once.
+ *   - a loop that is genuinely too slow faults within a few ms: an -O0 build
+ *     at 300 Hz misses ~700 ticks a second, far past one per 100 ms.
+ * Still latched once raised, and still cleared only by the ENABLE-off
+ * handshake.
+ */
+#define TIMING_BUDGET       3u
+#define TIMING_DRAIN_TICKS  100u
+
 #define ENC_ALL_VALID     ((uint8_t)((1u << NEXUS_NUM_ENCODERS) - 1u))
 
 static uint32_t s_expected;
@@ -40,7 +62,9 @@ static uint32_t s_faults;
 static uint32_t s_prev_imu_seq;
 static uint32_t s_prev_can_rx[2];
 static uint32_t s_prev_link_cmds;
-static uint32_t s_ack_overruns;
+static uint32_t s_prev_overruns;
+static uint32_t s_timing_bucket;
+static uint16_t s_timing_drain;
 
 static uint16_t s_idle_imu;
 static uint16_t s_idle_can[2];
@@ -76,7 +100,9 @@ void health_init(uint32_t expected_mask)
     s_prev_can_rx[0] = 0;
     s_prev_can_rx[1] = 0;
     s_prev_link_cmds = 0;
-    s_ack_overruns   = 0;
+    s_prev_overruns  = 0;
+    s_timing_bucket  = 0;
+    s_timing_drain   = 0;
     s_idle_imu       = 0;
     s_idle_can[0]    = 0;
     s_idle_can[1]    = 0;
@@ -158,19 +184,25 @@ void health_tick(const imu_sample_t *imu, uint8_t enc_valid)
     /* --- Timing: latched, because a single missed tick still matters ----- */
 
     /*
-     * Latched against an ACKNOWLEDGED count, not against zero.
-     *
-     * Comparing to zero meant one missed tick at any point latched the fault
-     * for the rest of the run - and now that safety.c acts on it, that
-     * permanently prevented the robot from ever arming again short of a power
-     * cycle. It also made the FAULT -> IDLE recovery path dead code for the
-     * most likely fault there is.
-     *
-     * The fault still latches and still has to be cleared deliberately; it is
-     * just that clearing it is now possible, via the same ENABLE-off handshake
-     * the Pi already performs to take the robot back.
+     * Measured against the count already seen, not against zero: comparing to
+     * zero meant one miss locked the robot out until a power cycle. Clearing
+     * goes through the ENABLE-off handshake the Pi already performs.
      */
-    if (app_overruns() != s_ack_overruns)
+    uint32_t ov  = app_overruns();
+    uint32_t new_misses = ov - s_prev_overruns;
+    s_prev_overruns = ov;
+
+    if (new_misses > 0u)
+    {
+        s_timing_bucket += new_misses;
+    }
+    else if (s_timing_bucket > 0u && ++s_timing_drain >= TIMING_DRAIN_TICKS)
+    {
+        s_timing_drain = 0;
+        s_timing_bucket--;
+    }
+
+    if (s_timing_bucket > TIMING_BUDGET)
     {
         s_faults |= HEALTH_TIMING;
     }
@@ -178,7 +210,9 @@ void health_tick(const imu_sample_t *imu, uint8_t enc_valid)
 
 void health_clear_latched(void)
 {
-    s_ack_overruns = app_overruns();
+    s_prev_overruns = app_overruns();
+    s_timing_bucket = 0;
+    s_timing_drain  = 0;
     s_faults &= ~(uint32_t)HEALTH_TIMING;
 }
 
