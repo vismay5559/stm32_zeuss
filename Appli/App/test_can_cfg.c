@@ -83,6 +83,59 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define CANCFG_WRITE  1
 
 /*
+ * 1 = READ-ONLY CONFIG DUMP, then stop. Runs instead of everything below -
+ * no sweep, no write, no zero, no save. Prints, for every drive, the settings
+ * that decide whether a closed-loop axis actually pushes: control and input
+ * mode, gains, velocity / current / torque limits, the encoders it uses.
+ *
+ * Why: 2026-11-22 four drives (right hip pitch and roll, both ankles) sat in
+ * CLOSED_LOOP_CONTROL with no errors and 20-30 degrees of position error and
+ * reported ~0 torque, while the other four tracked. The robot firmware never
+ * sends mode or limits - they come from each drive's saved config - so the
+ * difference has to be there.
+ *
+ * Endpoint ids from odrivetool's cached schema for this firmware (0.6.12),
+ * ~/.cache/odrivetool/device_json/1f844edc.json, which agrees with every id
+ * this file had already confirmed on the robot: node_id 282, heartbeat 284,
+ * encoder 285, save_configuration 718. Reads cannot change anything.
+ */
+#define CANCFG_DUMP   1
+
+/*
+ * 1 = after the dump, put every drive in POSITION_CONTROL (3) with
+ * PASSTHROUGH input (1), read back, and save - then read the modes again on
+ * the other side of the reboot, which can only have come from flash.
+ *
+ * The dump on 2026-11-23 found right hip pitch, right hip roll and both
+ * ankles in VELOCITY_CONTROL + VEL_RAMP: a velocity-mode drive ignores the
+ * position in Set_Input_Pos, so those four sat in closed loop holding no
+ * position at all - the hips did not move, the backdrivable ankles sagged
+ * under load. Left hip roll and both knees were in POS_FILTER, which smooths
+ * every target through a 20 Hz second-order filter the policy never saw. Only
+ * the left hip pitch matched what act_odrive.c assumes. Nothing else is
+ * changed here - not gains, not limits.
+ */
+#define CANCFG_FIX_MODES 0     /* done 2026-11-23, all 8 saved - see the dump */
+#define EP_CONTROL_MODE  389u
+#define EP_INPUT_MODE    390u
+#define WANT_CONTROL     3u     /* POSITION_CONTROL */
+#define WANT_INPUT       1u     /* PASSTHROUGH      */
+
+/*
+ * Right hip roll (bus 1 node 2) only: its current limits were 5 A soft /
+ * 16.5 A hard against the left hip roll's 14.8 / 29.24 on the same motor
+ * (torque constant 0.0827 on both) - a third of the torque, by oversight.
+ * Matched to the left, as the builder asked on 2026-11-23. Hard first, so the
+ * soft limit is never written above it.
+ */
+#define EP_CURRENT_SOFT  325u
+#define EP_CURRENT_HARD  326u
+#define RHR_BUS          1u
+#define RHR_NODE         2u
+#define RHR_SOFT_A       14.8f
+#define RHR_HARD_A       29.24f
+
+/*
  * 1 = also call save_configuration, so the rates survive a power cycle.
  *
  * This REBOOTS every drive it touches. Each one drops off the bus for a
@@ -462,6 +515,195 @@ void cancfg_init(void)
 #endif
 }
 
+#if CANCFG_DUMP
+typedef enum { T_U8, T_U32, T_F32, T_BOOL } ep_type_t;
+typedef struct { uint16_t ep; ep_type_t t; const char *name; } ep_desc_t;
+
+static const ep_desc_t s_dump[] = {
+    {  43u, T_U32,  "system_stats.uptime (ms since boot)" },
+    { 232u, T_U8,   "current_state (8=closed loop)" },
+    { 226u, T_U32,  "active_errors" },
+    { 227u, T_U32,  "disarm_reason" },
+    { 389u, T_U8,   "control_mode (3=position)" },
+    { 390u, T_U8,   "input_mode (1=passthrough)" },
+    { 391u, T_F32,  "pos_gain" },
+    { 392u, T_F32,  "vel_gain" },
+    { 393u, T_F32,  "vel_integrator_gain" },
+    { 396u, T_F32,  "vel_limit [turn/s]" },
+    { 383u, T_BOOL, "enable_vel_limit" },
+    { 397u, T_F32,  "vel_limit_tolerance" },
+    { 409u, T_F32,  "input_filter_bandwidth" },
+    { 408u, T_F32,  "inertia" },
+    { 402u, T_BOOL, "absolute_setpoints" },
+    { 400u, T_BOOL, "circular_setpoints" },
+    { 325u, T_F32,  "motor.current_soft_max [A]" },
+    { 326u, T_F32,  "motor.current_hard_max [A]" },
+    { 312u, T_F32,  "motor.torque_constant [Nm/A]" },
+    { 304u, T_F32,  "torque_soft_min [Nm]" },
+    { 305u, T_F32,  "torque_soft_max [Nm]" },
+    { 294u, T_U8,   "load_encoder" },
+    { 295u, T_U8,   "commutation_encoder" },
+    { 234u, T_F32,  "pos_estimate [turn]" },
+};
+
+static const char *const s_joint[2][4] = {
+    { "L hip_pitch", "L hip_roll", "L knee", "L ankle" },
+    { "R hip_pitch", "R hip_roll", "R knee", "R ankle" },
+};
+
+static void dump_all(void)
+{
+    printf("\r\n=== READ-ONLY drive config dump (CANCFG_DUMP) - nothing is written ===\r\n");
+    for (uint8_t bus = 0u; bus < 2u; bus++)
+    {
+        FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+
+        for (uint8_t node = 1u; node <= 4u; node++)
+        {
+            uint32_t id = 0xFFFFFFFFu;
+
+            printf("\r\n-- bus %u node %u  %s --\r\n", (unsigned)bus, (unsigned)node,
+                   s_joint[bus][node - 1u]);
+            if ((s_hb_seen[bus] & (1u << node)) == 0u)
+            {
+                printf("   no heartbeat - skipped\r\n");
+                continue;
+            }
+            if (!sdo_read_u32(h, node, EP_NODE_ID, &id) || id != node)
+            {
+                printf("   node_id reads %lu - wrong subtree, skipped\r\n", (unsigned long)id);
+                continue;
+            }
+            for (unsigned i = 0u; i < sizeof(s_dump) / sizeof(s_dump[0]); i++)
+            {
+                uint32_t v = 0u;
+
+                if (!sdo_read_u32(h, node, s_dump[i].ep, &v))
+                {
+                    printf("   %-34s (no reply)\r\n", s_dump[i].name);
+                    continue;
+                }
+                switch (s_dump[i].t)
+                {
+                case T_F32:
+                {
+                    float f;
+                    memcpy(&f, &v, sizeof(f));
+                    printf("   %-34s %.6g\r\n", s_dump[i].name, (double)f);
+                    break;
+                }
+                case T_U8:   printf("   %-34s %lu\r\n", s_dump[i].name, (unsigned long)(v & 0xFFu)); break;
+                case T_BOOL: printf("   %-34s %s\r\n", s_dump[i].name, (v & 0xFFu) ? "true" : "false"); break;
+                default:
+                    if (s_dump[i].ep == 43u) { printf("   %-34s %lu  (%.1f min)\r\n", s_dump[i].name, (unsigned long)v, (double)v / 60000.0); }
+                    else { printf("   %-34s 0x%08lX\r\n", s_dump[i].name, (unsigned long)v); }
+                    break;
+                }
+                HAL_Delay(2);   /* the console is asynchronous; do not outrun it */
+            }
+        }
+    }
+    printf("\r\n=== dump done. Nothing was written. ===\r\n");
+}
+#endif
+
+#if CANCFG_DUMP && CANCFG_FIX_MODES
+static uint8_t read_modes(FDCAN_HandleTypeDef *h, uint8_t node, uint32_t *cm, uint32_t *im)
+{
+    return sdo_read_u32(h, node, EP_CONTROL_MODE, cm) && sdo_read_u32(h, node, EP_INPUT_MODE, im);
+}
+
+static uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, sizeof(u)); return u; }
+static float    u2f(uint32_t u) { float f; memcpy(&f, &u, sizeof(f)); return f; }
+
+/* 1 = the right hip roll's limits now read 14.8 / 29.24 A. */
+static uint8_t fix_rhr_current(FDCAN_HandleTypeDef *h)
+{
+    uint32_t s0 = 0u, h0 = 0u, s1 = 0u, h1 = 0u;
+
+    if (!sdo_read_u32(h, RHR_NODE, EP_CURRENT_SOFT, &s0) || !sdo_read_u32(h, RHR_NODE, EP_CURRENT_HARD, &h0))
+    {
+        printf("    R hip_roll current: cannot read - not written\r\n");
+        return 0u;
+    }
+    (void)sdo_write_u32(h, RHR_NODE, EP_CURRENT_HARD, f2u(RHR_HARD_A));
+    (void)sdo_write_u32(h, RHR_NODE, EP_CURRENT_SOFT, f2u(RHR_SOFT_A));
+    uint8_t ok = sdo_read_u32(h, RHR_NODE, EP_CURRENT_SOFT, &s1) && sdo_read_u32(h, RHR_NODE, EP_CURRENT_HARD, &h1);
+    ok = ok && (u2f(s1) == RHR_SOFT_A) && (u2f(h1) == RHR_HARD_A);
+    printf("    R hip_roll current soft %.2f -> %.2f A, hard %.2f -> %.2f A %s\r\n",
+           (double)u2f(s0), (double)u2f(s1), (double)u2f(h0), (double)u2f(h1),
+           ok ? "read back ok" : "*** DID NOT TAKE ***");
+    return ok;
+}
+
+static void fix_modes(void)
+{
+    printf("\r\n=== modes -> POSITION_CONTROL (3) + PASSTHROUGH (1). Nothing is armed. ===\r\n");
+    for (uint8_t bus = 0u; bus < 2u; bus++)
+    {
+        FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+
+        for (uint8_t node = 1u; node <= 4u; node++)
+        {
+            uint32_t id = 0xFFFFFFFFu, cm = 0u, im = 0u;
+
+            if ((s_hb_seen[bus] & (1u << node)) == 0u) { continue; }
+            if (!sdo_read_u32(h, node, EP_NODE_ID, &id) || id != node || !read_modes(h, node, &cm, &im))
+            {
+                printf("    bus %u node %u: cannot read it - SKIPPED\r\n", (unsigned)bus, (unsigned)node);
+                continue;
+            }
+            cm &= 0xFFu; im &= 0xFFu;
+            uint8_t rhr = (bus == RHR_BUS) && (node == RHR_NODE);
+            if (rhr && !fix_rhr_current(h))
+            {
+                printf("    bus %u node %u: current limits not confirmed - NOTHING saved on it\r\n",
+                       (unsigned)bus, (unsigned)node);
+                continue;
+            }
+            if (cm == WANT_CONTROL && im == WANT_INPUT && !rhr)
+            {
+                printf("    bus %u node %u: already 3/1\r\n", (unsigned)bus, (unsigned)node);
+                continue;
+            }
+            /* Input mode first: never leave a drive in position control with
+               a velocity-ramp input mode, even for a few milliseconds. */
+            (void)sdo_write_u32(h, node, EP_INPUT_MODE, WANT_INPUT);
+            (void)sdo_write_u32(h, node, EP_CONTROL_MODE, WANT_CONTROL);
+            uint32_t cm2 = 0u, im2 = 0u;
+            if (!read_modes(h, node, &cm2, &im2) || (cm2 & 0xFFu) != WANT_CONTROL || (im2 & 0xFFu) != WANT_INPUT)
+            {
+                printf("    bus %u node %u: %lu/%lu -> wrote, read back %lu/%lu - *** DID NOT TAKE, not saved ***\r\n",
+                       (unsigned)bus, (unsigned)node, (unsigned long)cm, (unsigned long)im,
+                       (unsigned long)(cm2 & 0xFFu), (unsigned long)(im2 & 0xFFu));
+                continue;
+            }
+            printf("    bus %u node %u: %lu/%lu -> 3/1, read back ok\r\n",
+                   (unsigned)bus, (unsigned)node, (unsigned long)cm, (unsigned long)im);
+            if (save_node(h, bus, node))
+            {
+                uint32_t cm3 = 0u, im3 = 0u;
+                uint8_t ok = read_modes(h, node, &cm3, &im3);
+                printf("    bus %u node %u: after the reboot %lu/%lu %s\r\n", (unsigned)bus, (unsigned)node,
+                       (unsigned long)(cm3 & 0xFFu), (unsigned long)(im3 & 0xFFu),
+                       (ok && (cm3 & 0xFFu) == WANT_CONTROL && (im3 & 0xFFu) == WANT_INPUT)
+                       ? "- SAVED" : "*** NOT PERSISTED ***");
+                if (rhr)
+                {
+                    uint32_t s2 = 0u, h2 = 0u;
+                    (void)sdo_read_u32(h, node, EP_CURRENT_SOFT, &s2);
+                    (void)sdo_read_u32(h, node, EP_CURRENT_HARD, &h2);
+                    printf("    R hip_roll after the reboot: current soft %.2f / hard %.2f A %s\r\n",
+                           (double)u2f(s2), (double)u2f(h2),
+                           (u2f(s2) == RHR_SOFT_A && u2f(h2) == RHR_HARD_A) ? "- SAVED" : "*** NOT PERSISTED ***");
+                }
+            }
+        }
+    }
+    printf("\r\n=== modes done ===\r\n");
+}
+#endif
+
 void cancfg_run(void)
 {
     /* Listen first: only talk to drives that are actually there. */
@@ -481,6 +723,14 @@ void cancfg_run(void)
             (void)check_version(h, node);
         }
     }
+
+#if CANCFG_DUMP
+    dump_all();
+#if CANCFG_FIX_MODES
+    fix_modes();
+#endif
+    for (;;) { HAL_Delay(1000); }
+#endif
 
     /*
      * Sweep the candidate range on the FIRST live node of each bus. Two drives

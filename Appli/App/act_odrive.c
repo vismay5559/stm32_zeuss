@@ -19,6 +19,9 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define ODRV_CMD_SET_POS_GAIN     0x01Au
 #define ODRV_CMD_SET_VEL_GAINS    0x01Bu
 #define ODRV_CMD_SET_ABS_POS      0x019u   /* Set_Absolute_Position, float32 turns */
+#define ODRV_CMD_SET_CTRL_MODE    0x00Bu   /* Set_Controller_Mode: u32 control, u32 input */
+#define ODRV_CONTROL_POSITION     3u
+#define ODRV_INPUT_PASSTHROUGH    1u
 
 /* How often a standing disarm request is repeated while faulted, in ticks.
    Once is not enough - the frame can be lost, or a drive can reboot into
@@ -94,7 +97,14 @@ _Static_assert((CMD_SEGMENT_TICKS % ODRV_CMD_DIVIDER) == 0u,
  * Both the producer (act_tick_1khz) and the consumer (act_tx_pump) run in
  * main-loop context, never in an ISR, so the queue needs no locking.
  */
-#define CAN_TXQ_LEN   16u    /* must be a power of two */
+/*
+ * 32, not 16: an arm queues, per bus and in one burst before the wire can
+ * drain any of it, 8 gain frames + 4 controller modes + up to 4 clear-errors
+ * + 4 closed-loop requests = 20. Sixteen (15 usable behind the 3 in the
+ * hardware) would drop the last closed-loop requests whenever every axis had
+ * tripped - the case where re-arming matters most.
+ */
+#define CAN_TXQ_LEN   32u    /* must be a power of two */
 #define CAN_TXQ_MASK  (CAN_TXQ_LEN - 1u)
 
 typedef struct
@@ -573,6 +583,28 @@ void act_request_arm(void)
     /* Gains before closed loop: a drive that has just been told to hold
        position should be holding it with the gains we think it has. */
     send_gains();
+
+    /*
+     * Position control with passthrough input, on every drive, every arm -
+     * the mode act_tick_1khz()'s Set_Input_Pos frames assume. Set_Input_Pos
+     * does NOT select it: it only sets input_pos, which a drive in any other
+     * mode ignores. 2026-11-23: four drives (right hip pitch and roll, both
+     * ankles) had VELOCITY_CONTROL + VEL_RAMP saved in their own config and
+     * sat in closed loop holding no position at all, and three more had
+     * POS_FILTER. Fixed in their saved config too (test_can_cfg.c), but the
+     * board no longer depends on that being right.
+     */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        uint8_t  bus  = (uint8_t)(j / ODRV_NODES_PER_BUS);
+        uint32_t node = (uint32_t)(j % ODRV_NODES_PER_BUS) + 1u;
+
+        memset(data, 0, sizeof(data));
+        data[0] = (uint8_t)ODRV_CONTROL_POSITION;
+        data[4] = (uint8_t)ODRV_INPUT_PASSTHROUGH;
+        tx_enqueue(bus, (node << 5) | ODRV_CMD_SET_CTRL_MODE, data);
+    }
+    memset(data, 0, sizeof(data));   /* Clear_Errors below sends these bytes */
 
     s_disarmed   = 0;
     s_arming     = 1;

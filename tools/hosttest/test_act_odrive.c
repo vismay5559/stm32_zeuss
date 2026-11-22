@@ -59,6 +59,7 @@ static int s_fail;
 #define CMD_CLEAR_ERRORS  0x018u
 #define CMD_GET_TORQUES   0x01Cu
 #define CMD_SET_ABS_POS   0x019u
+#define CMD_SET_CTRL_MODE 0x00Bu
 
 #define NODES_PER_BUS  4
 
@@ -640,9 +641,9 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
 
     /*
      * The hardware itself holds only three messages at a time, so the
-     * firmware keeps its own queue of fifteen behind that and feeds them in
+     * firmware keeps its own queue of thirty-one behind that and feeds them in
      * as room appears. Block the wire and both fill up: three in the
-     * hardware, fifteen waiting, and everything after that is lost.
+     * hardware, thirty-one waiting, and everything after that is lost.
      *
      * That is the right thing to do - waiting instead would stall the
      * heartbeat that keeps the whole robot alive - but it must be COUNTED,
@@ -652,10 +653,10 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     host_can_wire_blocked(0, 1);
 
     set_all_targets(1.0f);
-    cmd_ticks(5);                    /* 5 command ticks x 4 joints = 20 commands */
+    cmd_ticks(10);                   /* 10 command ticks x 4 joints = 40 commands */
 
-    CHECK(act_tx_dropped(0) == 2u,
-          "the blocked wire lost %u commands; expected 20 sent minus the 18 "
+    CHECK(act_tx_dropped(0) == 6u,
+          "the blocked wire lost %u commands; expected 40 sent minus the 34 "
           "it can hold", act_tx_dropped(0));
     CHECK(act_tx_dropped(1) == 0u,
           "the healthy wire lost %u commands and should have lost none",
@@ -667,10 +668,10 @@ static void test_a_blocked_wire_loses_commands_and_says_so(void)
     host_can_forget_sent();
     act_tx_pump();
 
-    CHECK(host_can_sent_count(0) == 15u,
+    CHECK(host_can_sent_count(0) == 31u,
           "%u queued commands went out after the wire recovered, expected the "
-          "15 that were waiting", host_can_sent_count(0));
-    CHECK(act_tx_dropped(0) == 2u,
+          "31 that were waiting", host_can_sent_count(0));
+    CHECK(act_tx_dropped(0) == 6u,
           "the lost-command count changed after recovery, to %u",
           act_tx_dropped(0));
 }
@@ -1094,6 +1095,64 @@ static void test_arming_writes_the_gains_to_every_drive(void)
           count_of_cmd(CMD_SET_POS_GAIN));
 }
 
+/*
+ * What a failure here means on the robot: a drive left in whatever mode its
+ * saved config says. On 2026-11-23 four drives sat in VELOCITY_CONTROL - in
+ * closed loop, no errors, ignoring every position they were sent: two hips
+ * that never moved and two ankles that sagged under the robot's weight.
+ */
+static void test_arming_puts_every_drive_in_position_passthrough_first(void)
+{
+    printf("arming sets position control + passthrough on every drive, before closed loop\n");
+
+    fresh_board();
+    /* The worst case for the queue: every axis has tripped and is idle, so
+       each gets gains, a mode, a clear-errors and a closed-loop request - all
+       in one burst, with the wire blocked so nothing drains meanwhile. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        drive_reports_state(j, 0x20u, (uint8_t)ODRV_AXIS_STATE_IDLE);
+    }
+    host_can_forget_sent();
+    host_can_wire_blocked(0, 1);
+    host_can_wire_blocked(1, 1);
+    act_request_arm();
+    CHECK(act_tx_dropped(0) == 0u && act_tx_dropped(1) == 0u,
+          "arming with every axis tripped dropped %u + %u frames - some drive "
+          "would never be asked into closed loop", act_tx_dropped(0), act_tx_dropped(1));
+    host_can_wire_blocked(0, 0);
+    host_can_wire_blocked(1, 0);
+    act_tx_pump();
+    act_tx_pump();
+
+    CHECK(count_of_cmd(CMD_SET_CTRL_MODE) == (uint32_t)NEXUS_NUM_JOINTS,
+          "%u drives were given a controller mode, expected all %d",
+          count_of_cmd(CMD_SET_CTRL_MODE), NEXUS_NUM_JOINTS);
+
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        const host_can_frame_t *m = sent_to(j, CMD_SET_CTRL_MODE);
+        const host_can_frame_t *s = sent_to(j, CMD_SET_STATE);
+        uint32_t ctl = m ? (uint32_t)m->data[0] | ((uint32_t)m->data[1] << 8) : 0u;
+        uint32_t inp = m ? (uint32_t)m->data[4] | ((uint32_t)m->data[5] << 8) : 0u;
+
+        CHECK(m != NULL && ctl == 3u && inp == 1u,
+              "joint %d: controller mode %u / input %u, expected 3 (position) / 1 (passthrough)",
+              j, (unsigned)ctl, (unsigned)inp);
+        /* The mode must land before the axis goes into closed loop, or the
+           first closed-loop instants run in the old mode. Frames on one bus
+           go out in queue order, so the earlier pointer was sent first. */
+        CHECK(m != NULL && s != NULL && m < s,
+              "joint %d: the closed-loop request went out before the mode", j);
+        /* Clear_Errors shares the arm's frame buffer; its byte 0 is the
+           Identify flag, so mode bytes left in it would blink every drive. */
+        const host_can_frame_t *c = sent_to(j, CMD_CLEAR_ERRORS);
+        CHECK(c != NULL && c->data[0] == 0u && c->data[4] == 0u,
+              "joint %d: Clear_Errors carried bytes %u/%u from another frame", j,
+              c ? (unsigned)c->data[0] : 99u, c ? (unsigned)c->data[4] : 99u);
+    }
+}
+
 static void test_the_pi_can_replace_the_gains_between_runs(void)
 {
     printf("gains from the Pi are written now and kept for the next arm\n");
@@ -1497,6 +1556,7 @@ int main(void)
     test_a_wire_that_shuts_itself_down_is_restarted();
     test_the_emergency_stop_bypasses_everything();
     test_arming_writes_the_gains_to_every_drive();
+    test_arming_puts_every_drive_in_position_passthrough_first();
     test_the_pi_can_replace_the_gains_between_runs();
     test_gains_are_refused_while_the_robot_is_driving();
     test_the_target_that_went_out_can_be_read_back();
