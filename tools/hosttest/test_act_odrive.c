@@ -716,12 +716,16 @@ static void test_replies_land_on_the_right_joint(void)
     act_telemetry_t t;
     act_get(&t);
 
-    CHECK(NEAR(t.pos[7], 7.5f, 1e-6f),
-          "joint 7's position came back as %.4f, expected 7.5",
-          (double)t.pos[7]);
-    CHECK(NEAR(t.vel[7], -1.25f, 1e-6f),
-          "joint 7's speed came back as %.4f, expected -1.25",
-          (double)t.vel[7]);
+    /* Joint 7 is the right ankle, which reads its motor encoder through
+       15:1, so the drive's 7.5 / -1.25 arrive as output turns. What this
+       test is about is WHICH joint they land on; the scaling has its own. */
+    const float r7 = g_joint_enc_ratio[7] * g_joint_dir[7];
+    CHECK(NEAR(t.pos[7], 7.5f / r7, 1e-6f),
+          "joint 7's position came back as %.4f, expected %.4f",
+          (double)t.pos[7], (double)(7.5f / r7));
+    CHECK(NEAR(t.vel[7], -1.25f / r7, 1e-6f),
+          "joint 7's speed came back as %.4f, expected %.4f",
+          (double)t.vel[7], (double)(-1.25f / r7));
     CHECK(t.pos_age[7] == 0u,
           "joint 7's brand new reading looked %u ticks old", t.pos_age[7]);
     CHECK(act_rx_count(1) == before + 1u,
@@ -1357,9 +1361,18 @@ static void test_the_left_ankle_motor_encoder_is_scaled_both_ways(void)
     CHECK(g_joint_enc_ratio[j] == 15.0f,
           "left ankle encoder ratio is %.1f, stated 15:1 commutation encoder",
           (double)g_joint_enc_ratio[j]);
-    CHECK(g_joint_enc_ratio[NEXUS_J_R_ANKLE_PITCH] == 1.0f,
-          "right ankle must stay load-side (1.0), is %.1f",
+    CHECK(g_joint_enc_ratio[NEXUS_J_R_ANKLE_PITCH] == 15.0f,
+          "right ankle reads its commutation encoder too since 2026-11-22 (15), is %.1f",
           (double)g_joint_enc_ratio[NEXUS_J_R_ANKLE_PITCH]);
+    for (int k = 0; k < NEXUS_NUM_JOINTS; k++)
+    {
+        if ((k != NEXUS_J_L_ANKLE_PITCH) && (k != NEXUS_J_R_ANKLE_PITCH))
+        {
+            CHECK(g_joint_enc_ratio[k] == 1.0f,
+                  "joint %d is load-side and must read 1:1, is %.1f", k,
+                  (double)g_joint_enc_ratio[k]);
+        }
+    }
 
     fresh_board();
     drive_reports_position(j, 1.5f, 3.0f);

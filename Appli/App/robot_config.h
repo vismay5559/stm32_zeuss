@@ -186,9 +186,10 @@ extern const float g_joint_dir[NEXUS_NUM_JOINTS];
  * drive's encoder is on the load side of the gearbox, the gear ratio where it
  * is the motor's own commutation encoder.
  *
- * Every drive on this robot reads the load side EXCEPT the left ankle, which
- * uses its commutation encoder through the 15:1 box (stated by the builder,
- * 2026-11-22). Unscaled, that drive reports and is commanded in motor turns:
+ * Every drive on this robot reads the load side EXCEPT the two ankles, which
+ * use their commutation encoders through the 15:1 box (stated by the builder,
+ * 2026-11-22: the left from the start, the right moved over from a load-side
+ * encoder later that day). Unscaled, such a drive reports and is commanded in motor turns:
  * a 10 degree gait command turns the ankle 0.7 degrees, and its angle in the
  * estimator is 15x too large.
  *

@@ -109,7 +109,7 @@ const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS] = {
     /* R hip_pitch   */ { 12.5f,  1.60420f,   0.0f },  /* 150 / 12, N 47     */
     /* R hip_roll    */ { 15.0f,  0.96664f,   0.0f },  /*  60 / 4,  N 26     */
     /* R knee_pitch  */ { 12.5f,  1.60420f,   0.0f },  /* 150 / 12, N 47     */
-    /* R ankle_pitch */ { 25.0f,  0.50265f,   0.0f },  /*  30 / 1.2, N 15    */
+    /* R ankle_pitch */ { 25.0f,  0.033510f,  0.0f },  /*  30 / 1.2, N^2 225 */
 };
 
 const uint8_t g_leg_springs[2][2] = {
@@ -136,7 +136,10 @@ const uint8_t g_leg_springs[2][2] = {
  *   right hip roll   count rises as the foot moves inward     +1 (= robot left)
  *   right knee       count rises as the shin swings back      +1
  *   left  ankle      count rises as the toes go down          +1
- *   right ankle      count rises as the toes go down          +1
+ *   right ankle      count rises as the toes go down          +1  (LOAD-side
+ *                    encoder; the drive was moved to its commutation encoder
+ *                    later the same day - RE-MEASURE before the first arm: a
+ *                    motor encoder can count the other way through the box)
  */
 const float g_joint_dir[NEXUS_NUM_JOINTS] = {
     /* L hip_pitch   */ +1.0f,
@@ -158,7 +161,7 @@ const float g_joint_enc_ratio[NEXUS_NUM_JOINTS] = {
     /* R hip_pitch   */  1.0f,
     /* R hip_roll    */  1.0f,
     /* R knee_pitch  */  1.0f,
-    /* R ankle_pitch */  1.0f,
+    /* R ankle_pitch */ 15.0f,   /* commutation encoder, 15:1 (since 2026-11-22) */
 };
 
 const float g_joint_gear[NEXUS_NUM_JOINTS] = {
