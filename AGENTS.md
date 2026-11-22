@@ -71,8 +71,9 @@ USB CDC. The board is the device, the Pi is the host.
 
 - USB ID **`0483:5740`**. `0483:374x` is the **ST-LINK** — a different chip, the
   debugger and text console, not the data link.
-- **Protocol v11** (the v9 bytes; v11 added the soft-start HOLD and ZERO_ANKLES
-  command flags and four stream flags). State packet **426 bytes, board → Pi, every 1 ms**. Command
+- **Protocol v12** (the v9 bytes; v11 added the soft-start HOLD and ZERO_ANKLES
+  command flags and four stream flags; v12 added RETURN, back to standing from
+  the start pose). State packet **426 bytes, board → Pi, every 1 ms**. Command
   **44 bytes**, Pi → board, ~250 Hz. Gains message 106 bytes.
 - The state packet opens with a contiguous **44-float32 policy block** at byte
   offset 12, so the policy takes one array with no per-field parsing. This is

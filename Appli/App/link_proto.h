@@ -32,6 +32,10 @@
 
 #define NEXUS_SYNC              0xA5A5u
 /*
+ * v12: NEXUS_CMD_RETURN and NEXUS_STREAM_RETURN - back to standing from the
+ * start pose. Same bytes again; a v11 board would ignore RETURN and stay bent
+ * at the start pose, which is why the number moves.
+ *
  * v11: soft start. Same bytes as v9 - every field, offset and size unchanged -
  * but two command flags and four stream flags now MEAN something, and the
  * meaning is a safety one: a v9 board ignores NEXUS_CMD_HOLD and arms straight
@@ -42,7 +46,7 @@
  *
  * v9: one foot switch per foot, not two.
  */
-#define NEXUS_PROTO_VERSION     11u
+#define NEXUS_PROTO_VERSION     12u
 
 #define NEXUS_MSG_STATE         0x01u
 #define NEXUS_MSG_COMMAND       0x02u
@@ -171,6 +175,16 @@
  */
 #define NEXUS_CMD_ZERO_ANKLES   (1u << 2)
 
+/*
+ * RETURN (v12): back to standing. During a held arm (the ramp to the start
+ * pose, or the HOLD there), ramp back over SOFT_START_RAMP_S to the pose
+ * measured when the robot armed, and hold it - so ENABLE off afterwards idles
+ * the drives with the legs where they started, not from a 35 degree knee
+ * bend. Ignored once the gait is running: a walking robot is stopped with
+ * ENABLE off. Final until disarm. See soft_start.h.
+ */
+#define NEXUS_CMD_RETURN        (1u << 3)
+
 /* safety_state values - see safety.h. */
 #define NEXUS_SAFETY_BOOT       0u
 #define NEXUS_SAFETY_IDLE       1u
@@ -222,6 +236,12 @@
  * not a rejection: the board simply stays IDLE until every joint reports.
  */
 #define NEXUS_STREAM_ARM_BLOCKED (1u << 5)
+
+/*
+ * RETURN (v12): the board is going back to, or holding, the pose it measured
+ * at arming. With RAMP: on the way. Without: there, waiting for ENABLE off.
+ */
+#define NEXUS_STREAM_RETURN     (1u << 6)
 
 typedef struct __attribute__((packed))
 {

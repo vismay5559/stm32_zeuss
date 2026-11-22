@@ -9,6 +9,8 @@ static uint8_t     s_hold;          /* HOLD as it stands now                  */
 static uint8_t     s_ramp_held;     /* the ramp's goal is the frozen pose     */
 static uint32_t    s_t;             /* ticks into the ramp                    */
 static float       s_from[NEXUS_NUM_JOINTS];
+static float       s_home[NEXUS_NUM_JOINTS];   /* the pose measured at arming  */
+static float       s_last[NEXUS_NUM_JOINTS];   /* the last reference handed out */
 
 void soft_start_idle(void)
 {
@@ -17,11 +19,15 @@ void soft_start_idle(void)
     s_ramp_held = 0;
     s_t         = 0;
     memset(s_from, 0, sizeof(s_from));
+    memset(s_home, 0, sizeof(s_home));
+    memset(s_last, 0, sizeof(s_last));
 }
 
 void soft_start_armed(const float from[NEXUS_NUM_JOINTS], uint8_t hold)
 {
     memcpy(s_from, from, sizeof(s_from));
+    memcpy(s_home, from, sizeof(s_home));
+    memcpy(s_last, from, sizeof(s_last));
     s_hold      = (hold != 0u);
     s_ramp_held = s_hold;
     s_t         = 0;
@@ -38,6 +44,20 @@ void soft_start_hold_flag(uint8_t hold)
     }
 }
 
+void soft_start_return_flag(uint8_t ret)
+{
+    uint8_t held = (s_mode == SOFT_HOLD) || ((s_mode == SOFT_RAMP) && s_ramp_held);
+
+    if (ret && held)
+    {
+        /* From the reference the drives were last given, so the way back
+           starts exactly where the way out stopped - mid-ramp included. */
+        memcpy(s_from, s_last, sizeof(s_from));
+        s_t    = 0;
+        s_mode = SOFT_RETURN;
+    }
+}
+
 soft_mode_t soft_start_mode(void)
 {
     return s_mode;
@@ -48,7 +68,8 @@ uint8_t soft_start_clock_frozen(void)
     /* Frozen through a held ramp and the hold itself - also when HOLD was
        cleared mid-ramp: the goal is still the frozen pose until the ramp ends,
        and starting the clock under it would move the goal it is ramping to. */
-    return ((s_mode == SOFT_RAMP) && s_ramp_held) || (s_mode == SOFT_HOLD);
+    return ((s_mode == SOFT_RAMP) && s_ramp_held) || (s_mode == SOFT_HOLD)
+        || (s_mode == SOFT_RETURN) || (s_mode == SOFT_HOME);
 }
 
 uint8_t soft_start_ignores_residual(void)
@@ -58,7 +79,7 @@ uint8_t soft_start_ignores_residual(void)
 
 float soft_start_progress(void)
 {
-    if (s_mode != SOFT_RAMP)
+    if ((s_mode != SOFT_RAMP) && (s_mode != SOFT_RETURN))
     {
         return 1.0f;
     }
@@ -100,6 +121,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
             out_vel[j] = ds * (goal - s_from[j]) + s * gv;
             out_tau[j] = s * gt;
         }
+        memcpy(s_last, out_ref, sizeof(s_last));
 
         if (++s_t >= RAMP_TICKS)
         {
@@ -120,6 +142,38 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
             out_vel[j] = 0.0f;
             out_tau[j] = 0.0f;
         }
+        memcpy(s_last, out_ref, sizeof(s_last));
+        return;
+
+    case SOFT_RETURN:
+    {
+        /* The arming ramp in reverse: same smoothstep, nothing pushing. */
+        float x  = (float)s_t / (float)RAMP_TICKS;
+        float s  = x * x * (3.0f - 2.0f * x);
+        float ds = 6.0f * x * (1.0f - x) / SOFT_START_RAMP_S;
+
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+        {
+            out_ref[j] = s_from[j] + s * (s_home[j] - s_from[j]);
+            out_vel[j] = ds * (s_home[j] - s_from[j]);
+            out_tau[j] = 0.0f;
+        }
+        memcpy(s_last, out_ref, sizeof(s_last));
+        if (++s_t >= RAMP_TICKS)
+        {
+            s_mode = SOFT_HOME;
+        }
+        return;
+    }
+
+    case SOFT_HOME:
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+        {
+            out_ref[j] = s_home[j];
+            out_vel[j] = 0.0f;
+            out_tau[j] = 0.0f;
+        }
+        memcpy(s_last, out_ref, sizeof(s_last));
         return;
 
     case SOFT_RUN:

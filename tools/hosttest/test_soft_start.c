@@ -230,6 +230,115 @@ static void test_disarming_means_the_next_arm_ramps_again(void)
           (double)(ref[2] * 360.0f), (double)(elsewhere[2] * 360.0f));
 }
 
+static void test_return_from_the_hold_goes_back_to_where_it_armed(void)
+{
+    printf("RETURN at the start pose: ramps back to the arming pose, holds it, no jump\n");
+    setup();
+    soft_start_idle();
+    soft_start_armed(s_stand, 1u);
+    float ref[N], vel[N], tau[N], prev[N];
+    for (int t = 0; t < RAMP + 100; t++) { tick(ref, vel, tau); }
+    CHECK(soft_start_mode() == SOFT_HOLD, "setup: not holding (mode %d)", (int)soft_start_mode());
+
+    soft_start_return_flag(1u);
+    CHECK(soft_start_mode() == SOFT_RETURN, "RETURN in HOLD did not start the way back (mode %d)",
+          (int)soft_start_mode());
+
+    /* First tick back: still exactly at the start pose - no jump. */
+    memcpy(prev, ref, sizeof(prev));
+    tick(ref, vel, tau);
+    for (int j = 0; j < N; j++)
+    {
+        CHECK(fabsf(ref[j] - s_pose0[j]) < 1e-7f,
+              "joint %d: first tick of the return at %.4f deg, was holding %.4f - a jump",
+              j, (double)(ref[j] * 360.0f), (double)(s_pose0[j] * 360.0f));
+    }
+
+    /* The way back is as gentle as the way out, pushes nothing, leaves the clock frozen. */
+    float worst = 0.0f;
+    for (int t = 1; t < RAMP; t++)
+    {
+        memcpy(prev, ref, sizeof(prev));
+        tick(ref, vel, tau);
+        for (int j = 0; j < N; j++)
+        {
+            float over = fabsf(ref[j] - prev[j])
+                       - (1.5f * fabsf(s_pose0[j] - s_stand[j]) / (float)RAMP + 1e-7f);
+            if (over > worst) { worst = over; }
+            CHECK(tau[j] == 0.0f, "t=%d joint %d: torque %.2f pushed on the way back", t, j,
+                  (double)tau[j]);
+        }
+        CHECK(soft_start_clock_frozen(), "t=%d: the gait clock ran on the way back", t);
+        CHECK(soft_start_ignores_residual(), "t=%d: residual passed on the way back", t);
+        if (s_fail > 20) { return; }
+    }
+    CHECK(worst <= 0.0f, "a return tick stepped %.5f deg more than smoothstep allows",
+          (double)(worst * 360.0f));
+
+    tick(ref, vel, tau);
+    CHECK(soft_start_mode() == SOFT_HOME, "after the return ramp the mode is %d, expected HOME",
+          (int)soft_start_mode());
+    for (int k = 0; k < 500; k++) { tick(ref, vel, tau); }
+    for (int j = 0; j < N; j++)
+    {
+        CHECK(fabsf(ref[j] - s_stand[j]) < 1e-6f && vel[j] == 0.0f && tau[j] == 0.0f,
+              "joint %d: home at %.3f deg (v %.4f), expected the arming pose %.3f, still",
+              j, (double)(ref[j] * 360.0f), (double)vel[j], (double)(s_stand[j] * 360.0f));
+    }
+
+    /* Home is final: clearing HOLD does not set off the gait from a standing robot. */
+    soft_start_hold_flag(0u);
+    soft_start_return_flag(0u);
+    CHECK(soft_start_mode() == SOFT_HOME, "clearing HOLD at home started the gait (mode %d)",
+          (int)soft_start_mode());
+}
+
+static void test_return_mid_ramp_turns_round_where_it_is(void)
+{
+    printf("RETURN halfway out: turns round from the current reference, ends at the arming pose\n");
+    setup();
+    soft_start_idle();
+    soft_start_armed(s_stand, 1u);
+    float ref[N], vel[N], tau[N], here[N];
+    for (int t = 0; t < RAMP / 2; t++) { tick(ref, vel, tau); }
+    memcpy(here, ref, sizeof(here));
+
+    soft_start_return_flag(1u);
+    tick(ref, vel, tau);
+    for (int j = 0; j < N; j++)
+    {
+        CHECK(fabsf(ref[j] - here[j]) < 1e-7f,
+              "joint %d: turned round from %.4f deg, the reference was at %.4f - a jump",
+              j, (double)(ref[j] * 360.0f), (double)(here[j] * 360.0f));
+    }
+    for (int t = 1; t <= RAMP; t++) { tick(ref, vel, tau); }
+    for (int j = 0; j < N; j++)
+    {
+        CHECK(fabsf(ref[j] - s_stand[j]) < 1e-6f, "joint %d: ended at %.3f deg, not the arming pose",
+              j, (double)(ref[j] * 360.0f));
+    }
+}
+
+static void test_return_is_refused_while_walking(void)
+{
+    printf("RETURN while the gait runs does nothing - a foot may be in the air\n");
+    setup();
+    soft_start_idle();
+    soft_start_armed(s_stand, 0u);                 /* unheld: heading for RUN */
+    float ref[N], vel[N], tau[N];
+    tick(ref, vel, tau);
+    soft_start_return_flag(1u);
+    CHECK(soft_start_mode() == SOFT_RAMP, "RETURN hijacked a ramp into the running gait");
+    for (int t = 0; t < RAMP + 5; t++) { tick(ref, vel, tau); }
+    CHECK(soft_start_mode() == SOFT_RUN, "setup: not running (mode %d)", (int)soft_start_mode());
+    soft_start_return_flag(1u);
+    CHECK(soft_start_mode() == SOFT_RUN, "RETURN stopped a running gait mid-stride");
+
+    soft_start_idle();
+    soft_start_return_flag(1u);
+    CHECK(soft_start_mode() == SOFT_IDLE, "RETURN did something while disarmed");
+}
+
 int main(void)
 {
     printf("soft_start.c host tests\n");
@@ -240,6 +349,9 @@ int main(void)
     test_hold_cleared_mid_ramp_finishes_the_ramp_first();
     test_an_unheld_arm_blends_into_the_running_gait();
     test_disarming_means_the_next_arm_ramps_again();
+    test_return_from_the_hold_goes_back_to_where_it_armed();
+    test_return_mid_ramp_turns_round_where_it_is();
+    test_return_is_refused_while_walking();
 
     printf("-----------------------\n");
     if (s_fail)

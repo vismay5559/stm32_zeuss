@@ -785,6 +785,8 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
     {
     case SOFT_RAMP: flags |= NEXUS_STREAM_RAMP; break;
     case SOFT_HOLD: flags |= NEXUS_STREAM_HOLD; break;
+    case SOFT_RETURN: flags |= NEXUS_STREAM_RAMP | NEXUS_STREAM_RETURN; break;
+    case SOFT_HOME: flags |= NEXUS_STREAM_RETURN; break;
     default: break;
     }
     if (s_ankles_zeroed)
@@ -935,6 +937,7 @@ void app_run(void)
                         soft_start_armed(ref, hold);
                     }
                     soft_start_hold_flag(hold);
+                    soft_start_return_flag((cmd.flags & NEXUS_CMD_RETURN) ? 1u : 0u);
                 }
             }
         }
