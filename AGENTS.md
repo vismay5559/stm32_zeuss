@@ -232,9 +232,19 @@ Each has a comment in the code explaining it. **Do not undo them.**
 3. **Never `printf` synchronously from the 1 kHz loop.** The console UART is
    polled — 87 µs per character. `console.c` makes it asynchronous; a burst that
    outruns the wire is dropped and counted, never waited for.
-4. **XSPI2 must not be re-initialised in Appli.** The code executes through it;
-   re-initialising hangs the bus forever with no fault and no message.
-5. **DMA buffers must be non-cacheable** — `NEXUS_DMA_BUFFER` in
+4. **XSPI2 must not be re-initialised in Appli.** The reset handler, the
+   vector table and all constant data are read through it; re-initialising
+   hangs the bus forever with no fault and no message.
+5. **The Appli's code runs from RAM, not in place from flash.** The linker
+   script (`Appli/stm32h7rsxx_ROMxspi2.ld`) keeps only the reset handler and
+   `SystemInit` in flash and copies everything else into AXI SRAM at boot.
+   Executing in place, every I-cache miss was a ~1 µs external-flash read: the
+   1 kHz loop ran at median 0.5 ms with up to 21% of ticks over 1 ms, and an
+   unrelated code change tipped the armed path into a loop-timing fault on
+   every START. From RAM: median 78 µs, worst 379 µs. `SystemInit` must call
+   nothing (it runs before the copy), and the linker script is not a build
+   dependency - delete the .elf to relink after editing it.
+6. **DMA buffers must be non-cacheable** — `NEXUS_DMA_BUFFER` in
    `dma_buffer.h`, which must agree with MPU region 2 in Boot. `app.c` checks
    that agreement at startup rather than trusting it.
 

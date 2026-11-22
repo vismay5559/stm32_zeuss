@@ -72,12 +72,32 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  /* The program code and other data into "FLASH" Rom type memory */
+  /*
+   * ONLY the code that runs before .data is copied stays in flash: the reset
+   * handler (startup) and SystemInit. Everything else is placed in .data
+   * below - stored in flash, copied to AXI SRAM by the reset handler, and
+   * executed from there.
+   *
+   * Why (2026-11-23): executing in place from the external octal flash, every
+   * I-cache miss is a flash read at the XSPI clock /4, on the order of a
+   * microsecond. The 1 kHz loop ran at median 0.5 ms with 5-20% of ticks over
+   * 1 ms, and a small code change (which moved every later function's address
+   * and so its place in the cache) took the ARMED path from 0.17 missed ticks
+   * a second to 87, and the board timing-faulted on every START. The whole
+   * application is ~64 KB of code against 448 KB of SRAM, so all of it runs
+   * from RAM and no layout change can do that again.
+   *
+   * Safe because Boot disables both caches before it jumps here
+   * (stm32_boot_xip.c JumpToApplication), so the copy lands in SRAM
+   * directly, and main() enables the I-cache (which invalidates it) after.
+   * SystemInit must stay in flash and call nothing that is moved: it runs
+   * before the copy.
+   */
   .text :
   {
     . = ALIGN(4);
-    *(.text)           /* .text sections (code) */
-    *(.text*)          /* .text* sections (code) */
+    *startup_stm32h7s3xx.s.obj(.text .text*)
+    *system_stm32h7rsxx.c.obj(.text .text*)
     *(.glue_7)         /* glue arm to thumb code */
     *(.glue_7t)        /* glue thumb to arm code */
     *(.eh_frame)
@@ -98,21 +118,6 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  .ARM.extab (READONLY) :
-  {
-    . = ALIGN(4);
-    *(.ARM.extab* .gnu.linkonce.armextab.*)
-    . = ALIGN(4);
-  } >FLASH
-
-  .ARM (READONLY) :
-  {
-    . = ALIGN(4);
-    __exidx_start = .;
-    *(.ARM.exidx*)
-    __exidx_end = .;
-    . = ALIGN(4);
-  } >FLASH
 
   .preinit_array (READONLY) :
   {
@@ -155,9 +160,34 @@ SECTIONS
     *(.data*)          /* .data* sections */
     *(.RamFunc)        /* .RamFunc sections */
     *(.RamFunc*)       /* .RamFunc* sections */
+    . = ALIGN(4);
+    *(.text)           /* all other code: runs from RAM - see .text above */
+    *(.text*)
 
     . = ALIGN(4);
 
+  } >RAM AT> FLASH
+
+  /*
+   * The unwind tables move with the code: .ARM.exidx holds 31-bit offsets to
+   * the functions it describes, and flash (0x70000000) is out of reach of
+   * RAM (0x24000000). Placed between .data and .tdata so the reset handler's
+   * one copy (_sdata.._edata) carries them too.
+   */
+  .ARM.extab :
+  {
+    . = ALIGN(4);
+    *(.ARM.extab* .gnu.linkonce.armextab.*)
+    . = ALIGN(4);
+  } >RAM AT> FLASH
+
+  .ARM :
+  {
+    . = ALIGN(4);
+    __exidx_start = .;
+    *(.ARM.exidx*)
+    __exidx_end = .;
+    . = ALIGN(4);
   } >RAM AT> FLASH
 
   /* Initialized TLS data section */

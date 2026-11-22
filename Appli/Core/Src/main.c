@@ -143,7 +143,7 @@ int main(void)
   (void)BSP_COM_Init(COM1, &BspCOMInit);
   console_init();      /* printf stops blocking from here on */
 
-  printf("\r\n>>> APPLI running from XIP at 0x70000000 <<<\r\n");
+  printf("\r\n>>> APPLI running from RAM (copied from 0x70000000 at reset) <<<\r\n");
   printf("APPLI: starting peripheral init\r\n");
   /* USER CODE END SysInit */
 
