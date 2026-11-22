@@ -757,6 +757,7 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
 
     if (safety_state() == SAFETY_ARMED)
     {
+        soft_start_measured(s_meas_turns, s_pose_ok);
         soft_start_tick(s_drive_ref_turns, s_gait_vel_turns, s_gait_tau_nm,
                         s_hold_pose_turns, s_cmd_ref_turns, ff_vel, ff_tau);
     }

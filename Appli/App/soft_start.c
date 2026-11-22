@@ -1,5 +1,6 @@
 #include "soft_start.h"
 
+#include <math.h>
 #include <string.h>
 
 #define RAMP_TICKS   ((uint32_t)(SOFT_START_RAMP_S * 1000.0f + 0.5f))
@@ -11,6 +12,9 @@ static uint32_t    s_t;             /* ticks into the ramp                    */
 static float       s_from[NEXUS_NUM_JOINTS];
 static float       s_home[NEXUS_NUM_JOINTS];   /* where RETURN goes: all zero  */
 static float       s_last[NEXUS_NUM_JOINTS];   /* the last reference handed out */
+static float       s_trim[NEXUS_NUM_JOINTS];   /* HOME trim, turns past zero    */
+static float       s_meas[NEXUS_NUM_JOINTS];
+static uint8_t     s_meas_ok;
 
 void soft_start_idle(void)
 {
@@ -21,6 +25,8 @@ void soft_start_idle(void)
     memset(s_from, 0, sizeof(s_from));
     memset(s_home, 0, sizeof(s_home));
     memset(s_last, 0, sizeof(s_last));
+    memset(s_trim, 0, sizeof(s_trim));
+    s_meas_ok = 0u;
 }
 
 void soft_start_armed(const float from[NEXUS_NUM_JOINTS], uint8_t hold)
@@ -28,6 +34,7 @@ void soft_start_armed(const float from[NEXUS_NUM_JOINTS], uint8_t hold)
     memcpy(s_from, from, sizeof(s_from));
     memset(s_home, 0, sizeof(s_home));   /* the standing pose - see soft_start.h */
     memcpy(s_last, from, sizeof(s_last));
+    memset(s_trim, 0, sizeof(s_trim));
     s_hold      = (hold != 0u);
     s_ramp_held = s_hold;
     s_t         = 0;
@@ -41,6 +48,39 @@ void soft_start_hold_flag(uint8_t hold)
     if ((s_mode == SOFT_HOLD) && !s_hold)
     {
         s_mode = SOFT_RUN;
+    }
+}
+
+void soft_start_measured(const float meas[NEXUS_NUM_JOINTS], uint8_t ok)
+{
+    memcpy(s_meas, meas, sizeof(s_meas));
+    s_meas_ok = (ok != 0u);
+}
+
+static uint8_t is_ankle(int j)
+{
+    return (j == NEXUS_J_L_ANKLE_PITCH) || (j == NEXUS_J_R_ANKLE_PITCH);
+}
+
+/* One tick of the HOME trim for joint j - see soft_start.h. */
+static void home_trim(int j)
+{
+    if (is_ankle(j) || !s_meas_ok)
+    {
+        return;
+    }
+    float err = s_home[j] - s_meas[j];
+
+    if (err * s_trim[j] < 0.0f)
+    {
+        s_trim[j] = 0.0f;          /* crossed zero: stop pushing, let it brake */
+        return;
+    }
+    if (fabsf(err) > SOFT_TRIM_DEADBAND)
+    {
+        s_trim[j] += SOFT_TRIM_RATE * err * 0.001f;
+        if (s_trim[j] >  SOFT_TRIM_MAX) { s_trim[j] =  SOFT_TRIM_MAX; }
+        if (s_trim[j] < -SOFT_TRIM_MAX) { s_trim[j] = -SOFT_TRIM_MAX; }
     }
 }
 
@@ -169,7 +209,8 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
     case SOFT_HOME:
         for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
         {
-            out_ref[j] = s_home[j];
+            home_trim(j);
+            out_ref[j] = s_home[j] + s_trim[j];
             out_vel[j] = 0.0f;
             out_tau[j] = 0.0f;
         }

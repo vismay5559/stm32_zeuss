@@ -50,10 +50,33 @@
  * a foot in the air there is no safe straight line back, so a walking robot
  * is stopped with ENABLE off. Once begun it is final until disarm; clearing
  * the bit does not turn the robot round again.
+ *
+ * HOME TRIM. Holding zero with the trained PD alone left the hips 4.5 deg
+ * short, pushing a steady 12 Nm (150 Nm/rad x 4.5 deg) and not moving: the
+ * gearboxes are not backdrivable and their breakaway friction is above what
+ * the PD makes at that error (the training model had 0.05 Nm). So in HOME
+ * only, each joint stuck more than SOFT_TRIM_DEADBAND away from zero has its
+ * target nudged further past zero, at SOFT_TRIM_RATE x error, up to
+ * SOFT_TRIM_MAX, until friction breaks; the instant it crosses zero the trim
+ * is dropped, so it brakes there instead of hunting back and forth. Not the
+ * ankles: they are backdrivable, and an ankle off zero in HOME is the floor
+ * holding the foot, which more push would only tip the robot against. Not in
+ * HOLD or RUN: the policy expects the PD it was trained with.
  */
+#define SOFT_TRIM_DEADBAND  (0.5f / 360.0f)   /* turns */
+#define SOFT_TRIM_RATE      1.0f              /* 1/s: trim grows err per second */
+#define SOFT_TRIM_MAX       (8.0f / 360.0f)   /* turns */
 
 #define SOFT_START_RAMP_S   3.0f
-#define SOFT_START_PHASE    0.0f    /* inside the policy's start window 0.95-0.30 */
+/*
+ * 0.95: double support, both feet down, right foot ~27 cm ahead of the left
+ * (the gait library's own sole positions and contact flags at 0.30 m/s).
+ * Was 0.0, where the left foot is already lifting - a pose a robot cannot
+ * stand in on the floor. Inside the policy's start window (0.95-0.30); the
+ * closed-loop sim check walks 20 s from rest at 0.95 (tilt p95 5.2 deg),
+ * against 4.7 at phase 0 (sim_check/RESULTS.md in zeus_8dof_deploy).
+ */
+#define SOFT_START_PHASE    0.95f
 
 typedef enum
 {
@@ -110,6 +133,12 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
  * nothing - in particular not in RUN.
  */
 void soft_start_return_flag(uint8_t ret);
+
+/*
+ * The pose the drives report this tick (output turns), and whether all of it
+ * is fresh. Used only by the HOME trim; with ok 0 the trim holds still.
+ */
+void soft_start_measured(const float meas[NEXUS_NUM_JOINTS], uint8_t ok);
 
 soft_mode_t soft_start_mode(void);
 

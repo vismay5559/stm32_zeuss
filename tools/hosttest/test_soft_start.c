@@ -341,6 +341,97 @@ static void test_return_is_refused_while_walking(void)
     CHECK(soft_start_mode() == SOFT_IDLE, "RETURN did something while disarmed");
 }
 
+/* Arm held, ramp out, hold, RETURN, finish the way back: in HOME. */
+static void to_home(float ref[N], float vel[N], float tau[N])
+{
+    setup();
+    soft_start_idle();
+    soft_start_armed(s_stand, 1u);
+    for (int t = 0; t < RAMP + 10; t++) { tick(ref, vel, tau); }
+    soft_start_return_flag(1u);
+    for (int t = 0; t <= RAMP; t++) { tick(ref, vel, tau); }
+}
+
+static void test_home_trim_breaks_friction_then_lets_go(void)
+{
+    printf("HOME trim: a joint stuck short of zero gets pushed harder, and let go once it crosses\n");
+    float ref[N], vel[N], tau[N], meas[N];
+    to_home(ref, vel, tau);
+    CHECK(soft_start_mode() == SOFT_HOME, "setup: not HOME (mode %d)", (int)soft_start_mode());
+
+    /*
+     * Where the robot actually stopped on 2026-11-23 (output degrees): hips
+     * 4.4 / -4.5 short and pushing 12 Nm without moving, right hip roll 4.1,
+     * left ankle 7.1 with its foot on the floor.
+     */
+    const int LH = NEXUS_J_L_HIP_PITCH, RH = NEXUS_J_R_HIP_PITCH, LA = NEXUS_J_L_ANKLE_PITCH;
+    for (int j = 0; j < N; j++) { meas[j] = 0.0f; }
+    meas[LH] = 4.4f * DEG;  meas[RH] = -4.5f * DEG;  meas[5] = 4.1f * DEG;  meas[LA] = 7.1f * DEG;
+
+    for (int t = 0; t < 1000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
+    /* 1 s at rate 1/s on a 4.4 deg error: the target is now ~4.4 deg past
+       zero on the far side, i.e. ~-4.4 deg. */
+    CHECK(fabsf(ref[LH] - (-4.4f * DEG)) < 0.1f * DEG,
+          "left hip target %.2f deg after 1 s stuck at +4.4, expected about -4.4",
+          (double)(ref[LH] * 360.0f));
+    CHECK(fabsf(ref[RH] - (4.5f * DEG)) < 0.1f * DEG,
+          "right hip target %.2f deg after 1 s stuck at -4.5, expected about +4.5",
+          (double)(ref[RH] * 360.0f));
+    CHECK(ref[LA] == 0.0f, "the left ankle was trimmed (target %.2f deg) - its error is the floor",
+          (double)(ref[LA] * 360.0f));
+    CHECK(vel[LH] == 0.0f && tau[LH] == 0.0f, "the trim pushed a velocity or torque feedforward");
+
+    for (int t = 0; t < 10000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
+    CHECK(fabsf(ref[LH] + 8.0f * DEG) < 1e-6f,
+          "left hip trim %.2f deg after 11 s, expected clamped at -8", (double)(ref[LH] * 360.0f));
+
+    /* It breaks away and crosses zero: the trim goes at once, so the PD
+       brakes it at zero instead of driving on to -8. */
+    meas[LH] = -0.2f * DEG;
+    soft_start_measured(meas, 1u);
+    tick(ref, vel, tau);
+    CHECK(ref[LH] == 0.0f, "left hip crossed zero but its target is still %.2f deg",
+          (double)(ref[LH] * 360.0f));
+    CHECK(fabsf(ref[RH] - 8.0f * DEG) < 1e-6f, "the right hip lost its trim when the left crossed");
+
+    /* Inside the deadband it stays put - no creeping target. */
+    meas[LH] = 0.3f * DEG;
+    for (int t = 0; t < 2000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
+    CHECK(ref[LH] == 0.0f, "left hip 0.3 deg off (inside 0.5) but the target moved to %.3f deg",
+          (double)(ref[LH] * 360.0f));
+
+    /* No fresh pose, no trim change. */
+    float before = ref[RH];
+    for (int t = 0; t < 1000; t++) { soft_start_measured(meas, 0u); tick(ref, vel, tau); }
+    CHECK(ref[RH] == before, "the trim moved on a stale pose");
+}
+
+static void test_trim_is_home_only_and_forgotten_on_disarm(void)
+{
+    printf("the trim never acts in HOLD, and a disarm forgets it\n");
+    float ref[N], vel[N], tau[N], meas[N];
+    for (int j = 0; j < N; j++) { meas[j] = 0.0f; }
+    meas[NEXUS_J_L_HIP_PITCH] = 4.0f * DEG;
+
+    setup();
+    soft_start_idle();
+    soft_start_armed(s_stand, 1u);
+    for (int t = 0; t < RAMP + 3000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
+    CHECK(fabsf(ref[NEXUS_J_L_HIP_PITCH] - s_pose0[NEXUS_J_L_HIP_PITCH]) < 1e-6f,
+          "HOLD target %.3f deg moved off the start pose %.3f - the trim acted in HOLD",
+          (double)(ref[NEXUS_J_L_HIP_PITCH] * 360.0f),
+          (double)(s_pose0[NEXUS_J_L_HIP_PITCH] * 360.0f));
+
+    to_home(ref, vel, tau);
+    for (int t = 0; t < 3000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
+    CHECK(ref[NEXUS_J_L_HIP_PITCH] < -1.0f * DEG, "setup: no trim built up");
+
+    to_home(ref, vel, tau);                  /* disarm, re-arm, back home */
+    tick(ref, vel, tau);
+    CHECK(ref[NEXUS_J_L_HIP_PITCH] == 0.0f,
+          "after a disarm the old trim came back: %.2f deg", (double)(ref[NEXUS_J_L_HIP_PITCH] * 360.0f));
+}
+
 int main(void)
 {
     printf("soft_start.c host tests\n");
@@ -354,6 +445,8 @@ int main(void)
     test_return_from_the_hold_goes_back_to_where_it_armed();
     test_return_mid_ramp_turns_round_where_it_is();
     test_return_is_refused_while_walking();
+    test_home_trim_breaks_friction_then_lets_go();
+    test_trim_is_home_only_and_forgotten_on_disarm();
 
     printf("-----------------------\n");
     if (s_fail)
