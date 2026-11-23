@@ -116,6 +116,24 @@ extern FDCAN_HandleTypeDef hfdcan2;
  * changed here - not gains, not limits.
  */
 #define CANCFG_FIX_MODES 0     /* done 2026-11-23, all 8 saved - see the dump */
+
+/*
+ * 1 = set both ANKLE drives' vel_limit (endpoint 396, motor turns/s) to
+ * ANKLE_VEL_LIMIT, read back, save, and read again after the reboot.
+ *
+ * Why (first walk, 2026-11-24): the left ankle ran 25-31 deg off its target
+ * while its drive put out only ~4.5 Nm at the joint, nowhere near its current
+ * limit. The ankles' position is the MOTOR encoder through 15:1, so the
+ * position loop asks for pos_gain (25) x error x 15 motor turns/s - past ~10
+ * deg of error that is over the 10 turn/s vel_limit, the request is clipped,
+ * and the correcting torque stops growing at ~5 Nm. The trained PD (30 Nm/rad)
+ * would give ~15 Nm there. The other joints measure on the output shaft and
+ * never reach the limit. vel_limit_tolerance (1.2) still trips an overspeed
+ * error at 48 turn/s.
+ */
+#define CANCFG_FIX_ANKLE_VEL 0   /* done 2026-11-24, both ankles 40 turn/s, saved */
+#define EP_VEL_LIMIT     396u
+#define ANKLE_VEL_LIMIT  40.0f
 #define EP_CONTROL_MODE  389u
 #define EP_INPUT_MODE    390u
 #define WANT_CONTROL     3u     /* POSITION_CONTROL */
@@ -726,6 +744,41 @@ void cancfg_run(void)
 
 #if CANCFG_DUMP
     dump_all();
+#if CANCFG_FIX_ANKLE_VEL
+    printf("\r\n=== ankle vel_limit -> %.0f turn/s. Nothing is armed. ===\r\n", (double)ANKLE_VEL_LIMIT);
+    for (uint8_t bus = 0u; bus < 2u; bus++)
+    {
+        FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+        uint32_t id = 0xFFFFFFFFu, v0 = 0u, v1 = 0u, v2 = 0u;
+        float f;
+
+        if ((s_hb_seen[bus] & (1u << 4)) == 0u || !sdo_read_u32(h, 4u, EP_NODE_ID, &id) || id != 4u
+            || !sdo_read_u32(h, 4u, EP_VEL_LIMIT, &v0))
+        {
+            printf("    bus %u ankle: cannot read it - SKIPPED\r\n", (unsigned)bus);
+            continue;
+        }
+        f = ANKLE_VEL_LIMIT;
+        uint32_t want;
+        memcpy(&want, &f, sizeof(want));
+        (void)sdo_write_u32(h, 4u, EP_VEL_LIMIT, want);
+        if (!sdo_read_u32(h, 4u, EP_VEL_LIMIT, &v1) || v1 != want)
+        {
+            printf("    bus %u ankle: *** DID NOT TAKE, not saved ***\r\n", (unsigned)bus);
+            continue;
+        }
+        float a, b, c;
+        memcpy(&a, &v0, 4); memcpy(&b, &v1, 4);
+        printf("    bus %u ankle: vel_limit %.1f -> %.1f, read back ok\r\n", (unsigned)bus, (double)a, (double)b);
+        if (save_node(h, bus, 4u) && sdo_read_u32(h, 4u, EP_VEL_LIMIT, &v2))
+        {
+            memcpy(&c, &v2, 4);
+            printf("    bus %u ankle: after the reboot %.1f %s\r\n", (unsigned)bus, (double)c,
+                   (v2 == want) ? "- SAVED" : "*** NOT PERSISTED ***");
+        }
+    }
+    printf("\r\n=== ankle vel_limit done ===\r\n");
+#endif
 #if CANCFG_FIX_MODES
     fix_modes();
 #endif

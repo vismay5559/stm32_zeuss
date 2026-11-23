@@ -497,6 +497,10 @@ static void foot_sample(uint32_t now)
         {
             s_foot_edges[i]++;
             s_foot_level[i] = lvl;
+            /* Live, the moment it changes, 1 = pressed: for testing each
+               switch by hand without waiting for the once-a-second block. */
+            printf(">> FOOT %s %u  (%s)\r\n", s_foot[i].name, lvl ? 0u : 1u,
+                   lvl ? "released" : "PRESSED");
         }
         if (lvl == 0u)
         {
