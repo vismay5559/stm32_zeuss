@@ -15,7 +15,16 @@
  * measured yet.
  *
  * ---------------------------------------------------------------------------
- * NOTHING BELOW HAS BEEN MEASURED ON THE ROBOT.
+ * MEASURED, and signed off 2026-11-23 (ROBOT_CONFIG_CALIBRATED 1):
+ *   - drive directions vs the URDF, by hand (2026-11-21)
+ *   - hip/knee/roll zeros in the URDF zero pose; ankles zeroed every session
+ *   - spring encoder zeros (2026-11-22) and signs (2026-11-23, right leg -1)
+ *   - IMU axes (2026-11-21), confirmed by a tilt test on 2026-11-23
+ *   - estimator against the robot: standing 60 s, height 0.782 m vs 0.79 m
+ *     taped, velocity ~0.006 m/s rms; pushed fore/aft and sideways, velocity
+ *     followed and returned to zero (tools/replay, motion_raw recording)
+ * If any of these is redone - a drive replaced, an encoder remounted, the IMU
+ * moved - set the flag back to 0 until it has been measured again.
  *
  * The leg GEOMETRY is no longer here: it comes from the robot's URDF, via
  * tools/gen_kinematics.py into zeus_kinematics_model.h. What is left is what a
@@ -28,7 +37,7 @@
  * values, set the flag to 1, and the estimator becomes usable.
  * ---------------------------------------------------------------------------
  */
-#define ROBOT_CONFIG_CALIBRATED  0
+#define ROBOT_CONFIG_CALIBRATED  1
 
 /* ===================================================================== */
 /*  Which drive is which joint                                            */
