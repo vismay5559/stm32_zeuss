@@ -192,7 +192,7 @@ void lg_gamma0(inekf_real_t *G, const inekf_real_t *phi)
 {
     inekf_real_t S[9], S2[9];
     inekf_real_t th2 = phi[0] * phi[0] + phi[1] * phi[1] + phi[2] * phi[2];
-    inekf_real_t th  = sqrtf(th2);
+    inekf_real_t th  = LG_SQRT(th2);
 
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
@@ -202,14 +202,14 @@ void lg_gamma0(inekf_real_t *G, const inekf_real_t *phi)
         blend(G, S, S2, 1.0f, lg_ser_sinc(th2), lg_ser_2(th2));
         return;
     }
-    blend(G, S, S2, 1.0f, sinf(th) / th, (1.0f - cosf(th)) / th2);
+    blend(G, S, S2, 1.0f, LG_SIN(th) / th, (1.0f - LG_COS(th)) / th2);
 }
 
 void lg_gamma1(inekf_real_t *G, const inekf_real_t *phi)
 {
     inekf_real_t S[9], S2[9];
     inekf_real_t th2 = phi[0] * phi[0] + phi[1] * phi[1] + phi[2] * phi[2];
-    inekf_real_t th  = sqrtf(th2);
+    inekf_real_t th  = LG_SQRT(th2);
 
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
@@ -220,15 +220,15 @@ void lg_gamma1(inekf_real_t *G, const inekf_real_t *phi)
         return;
     }
     blend(G, S, S2, 1.0f,
-          (1.0f - cosf(th)) / th2,
-          (th - sinf(th)) / (th2 * th));
+          (1.0f - LG_COS(th)) / th2,
+          (th - LG_SIN(th)) / (th2 * th));
 }
 
 void lg_gamma2(inekf_real_t *G, const inekf_real_t *phi)
 {
     inekf_real_t S[9], S2[9];
     inekf_real_t th2 = phi[0] * phi[0] + phi[1] * phi[1] + phi[2] * phi[2];
-    inekf_real_t th  = sqrtf(th2);
+    inekf_real_t th  = LG_SQRT(th2);
 
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
@@ -239,15 +239,15 @@ void lg_gamma2(inekf_real_t *G, const inekf_real_t *phi)
         return;
     }
     blend(G, S, S2, 0.5f,
-          (th - sinf(th)) / (th2 * th),
-          (th2 + 2.0f * cosf(th) - 2.0f) / (2.0f * th2 * th2));
+          (th - LG_SIN(th)) / (th2 * th),
+          (th2 + 2.0f * LG_COS(th) - 2.0f) / (2.0f * th2 * th2));
 }
 
 void lg_gamma3(inekf_real_t *G, const inekf_real_t *phi)
 {
     inekf_real_t S[9], S2[9];
     inekf_real_t th2 = phi[0] * phi[0] + phi[1] * phi[1] + phi[2] * phi[2];
-    inekf_real_t th  = sqrtf(th2);
+    inekf_real_t th  = LG_SQRT(th2);
 
     lg_skew(S, phi);
     lg_mat3_mul(S2, S, S);
@@ -258,8 +258,8 @@ void lg_gamma3(inekf_real_t *G, const inekf_real_t *phi)
         return;
     }
     blend(G, S, S2, 1.0f / 6.0f,
-          (th2 * 0.5f - 1.0f + cosf(th)) / (th2 * th2),
-          (sinf(th) - th + th2 * th / 6.0f) / (th2 * th2 * th));
+          (th2 * 0.5f - 1.0f + LG_COS(th)) / (th2 * th2),
+          (LG_SIN(th) - th + th2 * th / 6.0f) / (th2 * th2 * th));
 }
 
 /* --------------------------------------------------------------------- */

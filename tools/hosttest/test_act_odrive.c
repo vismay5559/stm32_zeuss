@@ -939,6 +939,30 @@ static void test_a_reading_is_handed_over_once_and_then_ages(void)
           b.pos_age[NEXUS_NUM_JOINTS - 1]);
 }
 
+/*
+ * What a failure means on the robot: the estimator only updates its foot
+ * contacts on a NEW position, and for tens of seconds at a time never saw one
+ * - the 1 kHz aging ran between the frame landing and the read, so "new" was
+ * gone by the time anyone looked. It dead-reckoned to metres per second.
+ */
+static void test_a_new_position_survives_the_aging_before_the_read(void)
+{
+    printf("a new position is still new after the tick's aging, and only once\n");
+
+    fresh_board();
+    drive_reports_position(2, 0.5f, 0.0f);
+    ticks(1);                         /* the aging runs before the read... */
+
+    act_telemetry_t a, b;
+    act_get(&a);
+    CHECK(a.pos_age[2] == 1u, "setup: age %u, expected 1 after one tick", a.pos_age[2]);
+    CHECK(a.pos_new[2] == 1u, "a frame that arrived before the tick's aging was not handed over as new");
+    CHECK(a.pos_new[3] == 0u, "a joint that sent nothing was handed over as new");
+
+    act_get(&b);
+    CHECK(b.pos_new[2] == 0u, "the same position was handed over as new twice");
+}
+
 static void test_a_wire_that_shuts_itself_down_is_restarted(void)
 {
     printf("a wire in trouble\n");
@@ -1553,6 +1577,7 @@ int main(void)
     test_set_abs_pos_speaks_each_drive_s_own_units_and_never_while_driving();
     test_a_frame_from_a_wire_that_does_not_exist_is_bounded();
     test_a_reading_is_handed_over_once_and_then_ages();
+    test_a_new_position_survives_the_aging_before_the_read();
     test_a_wire_that_shuts_itself_down_is_restarted();
     test_the_emergency_stop_bypasses_everything();
     test_arming_writes_the_gains_to_every_drive();

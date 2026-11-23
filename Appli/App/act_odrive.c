@@ -148,6 +148,7 @@ static uint8_t       s_gains_loaded;
 /* Ticks since each joint last reported a position. Written from the FDCAN
    ISRs and from the tick, so every access is inside a critical section. */
 static volatile uint16_t s_pos_age[NEXUS_NUM_JOINTS];
+static volatile uint8_t  s_pos_new[NEXUS_NUM_JOINTS];   /* see act_telemetry_t.pos_new */
 
 /* Non-zero while a disarm is standing, with a countdown to the next repeat. */
 static uint8_t  s_disarmed;
@@ -320,6 +321,7 @@ void act_init(void)
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
         s_pos_age[j] = 0xFFFFu;
+        s_pos_new[j] = 0u;
     }
 
     s_disarmed      = 0;
@@ -382,6 +384,7 @@ void act_on_rx(uint8_t bus_index)
             s_telem.vel[j] = g_joint_dir[j] * le_f32(&data[4]) / g_joint_enc_ratio[j];
             s_telem.flags[j] |= NEXUS_ACT_TELEM_FRESH;
             s_pos_age[j] = 0u;      /* this is the one that means "trustworthy" */
+            s_pos_new[j] = 1u;
             break;
 
         case ODRV_CMD_GET_TORQUES:
@@ -1020,6 +1023,8 @@ void act_get(act_telemetry_t *out)
     for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
     {
         out->pos_age[j]  = s_pos_age[j];
+        out->pos_new[j]  = s_pos_new[j];
+        s_pos_new[j]     = 0u;
         s_telem.flags[j] = 0;
     }
 

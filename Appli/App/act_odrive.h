@@ -67,6 +67,22 @@ typedef struct
      * deciding whether to TRUST a position wants this instead.
      */
     uint16_t pos_age[NEXUS_NUM_JOINTS];
+
+    /*
+     * 1 if a position frame arrived since the previous act_get(), else 0 -
+     * set by the RX interrupt, cleared by act_get(), so every frame is handed
+     * over exactly once whenever in the tick it lands.
+     *
+     * This is "is there a NEW measurement", which pos_age == 0 is not:
+     * act_tick_1khz() ages every position at the start of the tick, before
+     * act_get() reads it, so age 0 only survived for a frame that landed in
+     * the few microseconds between the two. The drives send at very nearly
+     * 1 kHz on their own clocks, so for tens of seconds at a time no frame
+     * landed there, the estimator made no contact updates and dead-reckoned
+     * to metres per second, then snapped back when the phase came round
+     * again (2026-11-23, stand2 recording: snaps 33 s apart).
+     */
+    uint8_t  pos_new[NEXUS_NUM_JOINTS];
 } act_telemetry_t;
 
 /*

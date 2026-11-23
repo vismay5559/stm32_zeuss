@@ -538,7 +538,7 @@ void inekf_update_contact(inekf_t *f, int slot,
         S[1] * (S[3] * S[8] - S[5] * S[6]) +
         S[2] * (S[3] * S[7] - S[4] * S[6]);
 
-    if (fabsf(det) < 1e-20f)
+    if (LG_FABS(det) < 1e-20f)
     {
         return;   /* singular - skip rather than produce garbage */
     }
@@ -699,7 +699,7 @@ void inekf_quaternion(const inekf_t *f, inekf_real_t *q4)
 
     if (tr > 0.0f)
     {
-        inekf_real_t s = sqrtf(tr + 1.0f) * 2.0f;
+        inekf_real_t s = LG_SQRT(tr + 1.0f) * 2.0f;
         q4[0] = 0.25f * s;
         q4[1] = (R[7] - R[5]) / s;
         q4[2] = (R[2] - R[6]) / s;
@@ -707,7 +707,7 @@ void inekf_quaternion(const inekf_t *f, inekf_real_t *q4)
     }
     else if ((R[0] > R[4]) && (R[0] > R[8]))
     {
-        inekf_real_t s = sqrtf(1.0f + R[0] - R[4] - R[8]) * 2.0f;
+        inekf_real_t s = LG_SQRT(1.0f + R[0] - R[4] - R[8]) * 2.0f;
         q4[0] = (R[7] - R[5]) / s;
         q4[1] = 0.25f * s;
         q4[2] = (R[1] + R[3]) / s;
@@ -715,7 +715,7 @@ void inekf_quaternion(const inekf_t *f, inekf_real_t *q4)
     }
     else if (R[4] > R[8])
     {
-        inekf_real_t s = sqrtf(1.0f + R[4] - R[0] - R[8]) * 2.0f;
+        inekf_real_t s = LG_SQRT(1.0f + R[4] - R[0] - R[8]) * 2.0f;
         q4[0] = (R[2] - R[6]) / s;
         q4[1] = (R[1] + R[3]) / s;
         q4[2] = 0.25f * s;
@@ -723,7 +723,7 @@ void inekf_quaternion(const inekf_t *f, inekf_real_t *q4)
     }
     else
     {
-        inekf_real_t s = sqrtf(1.0f + R[8] - R[0] - R[4]) * 2.0f;
+        inekf_real_t s = LG_SQRT(1.0f + R[8] - R[0] - R[4]) * 2.0f;
         q4[0] = (R[3] - R[1]) / s;
         q4[1] = (R[2] + R[6]) / s;
         q4[2] = (R[5] + R[7]) / s;

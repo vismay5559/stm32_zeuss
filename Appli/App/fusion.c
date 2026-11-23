@@ -77,6 +77,26 @@
  */
 #define FREE_RESET_TICKS  1000u
 
+/*
+ * Corrupted IMU samples. The BNO085 talks over a UART protocol with no
+ * checksum, and on the robot about one sample in 2000 arrives with one axis
+ * garbled: gyro 1.5, 2.0, 9.5 and 12.5 rad/s, accelerometer -4.5 instead of
+ * -1.5 and 0.6 instead of 9.6, on a robot standing still (2026-11-23,
+ * tools/replay). The filter integrated every one as real motion - 12.5 rad/s
+ * for 2.5 ms is an 1.8 deg turn that the feet then had to fight.
+ *
+ * Real motion changes smoothly from sample to sample; a glitch disagrees with
+ * the samples on both sides. So a sample that steps further than this from
+ * the last good one is HELD for one sample: if the next agrees with it, the
+ * change was real and is taken, 2.5 ms late; if the next agrees with the last
+ * good one, it was a glitch and is dropped. Never more than IMU_MAX_HELD in a
+ * row, so a genuine violent change cannot be locked out. Standing, the largest
+ * real step was 0.035 rad/s and 0.12 m/s^2.
+ */
+#define IMU_GYRO_STEP    0.4f    /* rad/s per sample  */
+#define IMU_ACCEL_STEP   3.0f    /* m/s^2 per sample  */
+#define IMU_MAX_HELD     3u
+
 /* ===================================================================== */
 /*  JOINT NOISE                                                           */
 /* ===================================================================== */
@@ -112,6 +132,12 @@ static uint8_t  s_down[INEKF_MAX_CONTACTS];   /* what the filter currently belie
 static uint8_t  s_ground_anchored;     /* has the z datum been established?   */
 static uint32_t s_converged_ticks;
 static uint32_t s_free_ticks;          /* ticks with no contact in the filter */
+
+/* The IMU glitch filter (IMU_GYRO_STEP). */
+static float    s_good_w[3], s_good_a[3];   /* last sample believed            */
+static float    s_held_w[3], s_held_a[3];   /* a suspect waiting for a second  */
+static uint8_t  s_have_good, s_have_held, s_n_held;
+static uint32_t s_imu_rejected;
 static uint8_t  s_status;
 
 /* ------------------------------------------------------------------ */
@@ -129,7 +155,63 @@ void fusion_init(void)
     s_converged_ticks = 0;
     s_ground_anchored = 0;
     s_free_ticks      = 0;
+    s_have_good = s_have_held = s_n_held = 0;
+    s_imu_rejected    = 0;
     s_status          = NEXUS_FUSION_INVALID;
+}
+
+static uint8_t near3(const float a[3], const float b[3], float tol)
+{
+    return (fabsf(a[0] - b[0]) <= tol) && (fabsf(a[1] - b[1]) <= tol) &&
+           (fabsf(a[2] - b[2]) <= tol);
+}
+
+static uint8_t near_both(const float w[3], const float a[3],
+                         const float rw[3], const float ra[3])
+{
+    return near3(w, rw, IMU_GYRO_STEP) && near3(a, ra, IMU_ACCEL_STEP);
+}
+
+/*
+ * The sample to propagate with, glitches removed - see IMU_GYRO_STEP. Writes
+ * the believed gyro and accelerometer into w_out / a_out.
+ */
+static void imu_believe(const float w[3], const float a[3], float w_out[3], float a_out[3])
+{
+    if (!s_have_good || near_both(w, a, s_good_w, s_good_a))
+    {
+        /* Normal, or the very first sample. */
+        memcpy(s_good_w, w, sizeof(s_good_w));
+        memcpy(s_good_a, a, sizeof(s_good_a));
+        s_have_good = 1u;
+        s_have_held = 0u;
+        s_n_held    = 0u;
+    }
+    else if ((s_have_held && near_both(w, a, s_held_w, s_held_a)) || (s_n_held >= IMU_MAX_HELD))
+    {
+        /* Two in a row agree on the new value (or it has been held long
+           enough): the change is real. */
+        memcpy(s_good_w, w, sizeof(s_good_w));
+        memcpy(s_good_a, a, sizeof(s_good_a));
+        s_have_held = 0u;
+        s_n_held    = 0u;
+    }
+    else
+    {
+        /* A step from the last good sample that nothing has confirmed yet. */
+        memcpy(s_held_w, w, sizeof(s_held_w));
+        memcpy(s_held_a, a, sizeof(s_held_a));
+        s_have_held = 1u;
+        s_n_held++;
+        s_imu_rejected++;
+    }
+    memcpy(w_out, s_good_w, sizeof(s_good_w));
+    memcpy(a_out, s_good_a, sizeof(s_good_a));
+}
+
+uint32_t fusion_imu_rejected(void)
+{
+    return s_imu_rejected;
 }
 
 /*
@@ -197,8 +279,11 @@ typedef struct
  * far faster than the information justifies - and an over-tight P passes the
  * convergence gate early. The spring encoders are read every tick, but a leg
  * whose drives have not moved on has not told the filter anything new.
- * (pos_age is zeroed in the FDCAN ISR and aged in act_tick_1khz(), which runs
- * before this, so zero means "arrived since the last tick".)
+ * "New" is act->pos_new: set by the FDCAN interrupt, cleared by act_get(),
+ * so each frame counts once. It used to be pos_age == 0, which act_tick_1khz()
+ * ages away before this reads it unless the frame landed in a few-microsecond
+ * window - contact updates came and went for tens of seconds at a time as the
+ * drives' clocks beat against the tick (see act_telemetry_t.pos_new).
  */
 static void leg_input(int leg,
                       const act_telemetry_t *act,
@@ -229,7 +314,7 @@ static void leg_input(int leg,
         in->q[motor_q[j]]   = drive_angle(src, act);
         in->var[motor_q[j]] = motor_var;
         in->ok    = (uint8_t)(in->ok & drive_ok(src, act));
-        in->fresh = (uint8_t)(in->fresh | (act->pos_age[src->act_index] == 0u));
+        in->fresh = (uint8_t)(in->fresh | act->pos_new[src->act_index]);
     }
 
     for (int k = 0; k < 2; k++)
@@ -247,6 +332,15 @@ static void leg_input(int leg,
             in->q[spring_q[k]]   = 0.0f;
             in->var[spring_q[k]] = NOISE_SPRING_UNKNOWN_RAD * NOISE_SPRING_UNKNOWN_RAD;
         }
+    }
+}
+
+/* The kinematics are single precision; the filter is double (lie_group.h). */
+static void to_real(inekf_real_t *out, const float *in, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        out[i] = (inekf_real_t)in[i];
     }
 }
 
@@ -430,8 +524,16 @@ void fusion_tick(const imu_sample_t *imu,
                inject a huge spurious motion, so skip and resynchronise. */
             if ((d_us > 200u) && (d_us < 50000u))
             {
-                inekf_predict(&s_f, imu->gyro, imu->accel,
-                              (inekf_real_t)d_us * 1e-6f);
+                float wb[3], ab[3];
+                imu_believe(imu->gyro, imu->accel, wb, ab);
+
+                inekf_real_t w[3], a[3];
+                for (int i = 0; i < 3; i++)
+                {
+                    w[i] = (inekf_real_t)wb[i];
+                    a[i] = (inekf_real_t)ab[i];
+                }
+                inekf_predict(&s_f, w, a, (inekf_real_t)d_us * 1e-6);
             }
         }
 
@@ -503,13 +605,17 @@ void fusion_tick(const imu_sample_t *imu,
                     restart = 0u;
                 }
 
+                inekf_real_t pb[3], Cd[9];
+                to_real(pb, p_body[k], 3);
+                to_real(Cd, C, 9);
+
                 if (!s_ground_anchored)
                 {
-                    anchor_ground(p_body[k]);
+                    anchor_ground(pb);
                 }
                 /* Touchdown. The kinematics at THIS instant fix where the
                    point is anchored in the world. */
-                inekf_add_contact(&s_f, slot, p_body[k], C);
+                inekf_add_contact(&s_f, slot, pb, Cd);
                 s_down[slot] = 1u;
             }
             else if (!down[k] && s_down[slot])
@@ -521,7 +627,11 @@ void fusion_tick(const imu_sample_t *imu,
             {
                 float C[9];
                 point_cov(C, J[k], in.var);
-                inekf_update_contact(&s_f, slot, p_body[k], C);
+
+                inekf_real_t pb[3], Cd[9];
+                to_real(pb, p_body[k], 3);
+                to_real(Cd, C, 9);
+                inekf_update_contact(&s_f, slot, pb, Cd);
             }
         }
     }
@@ -542,9 +652,9 @@ void fusion_tick(const imu_sample_t *imu,
 void fusion_fill_state(nexus_state_t *st)
 {
     /* ---- estimator internals, for logging ---------------------------- */
-    st->fused_pos[0] = s_f.p[0];
-    st->fused_pos[1] = s_f.p[1];
-    st->fused_pos[2] = s_f.p[2];
+    st->fused_pos[0] = (float)s_f.p[0];
+    st->fused_pos[1] = (float)s_f.p[1];
+    st->fused_pos[2] = (float)s_f.p[2];
 
     /* nexus_state_t is packed for the wire, so taking the address of a member
      * to hand to a function is an unaligned-pointer risk in the general case —
@@ -553,18 +663,29 @@ void fusion_fill_state(nexus_state_t *st)
      * copy, the same way the bias arrays below already do. */
     inekf_real_t vel_world[3];
     inekf_velocity_world(&s_f, vel_world);
-    memcpy(st->fused_vel, vel_world, sizeof(st->fused_vel));
-
-    memcpy(st->fused_gyro_bias,  s_f.bg, sizeof(st->fused_gyro_bias));
-    memcpy(st->fused_accel_bias, s_f.ba, sizeof(st->fused_accel_bias));
+    /* Element-wise into float locals first: a byte copy is only right while
+       inekf_real_t happens to be float, and silently wrong the day it is
+       made double (lie_group.h says that is the switch to try). */
+    float vel_f[3], bg_f[3], ba_f[3];
+    for (int i = 0; i < 3; i++)
+    {
+        vel_f[i] = (float)vel_world[i];
+        bg_f[i]  = (float)s_f.bg[i];
+        ba_f[i]  = (float)s_f.ba[i];
+    }
+    memcpy(st->fused_vel,        vel_f, sizeof(st->fused_vel));
+    memcpy(st->fused_gyro_bias,  bg_f,  sizeof(st->fused_gyro_bias));
+    memcpy(st->fused_accel_bias, ba_f,  sizeof(st->fused_accel_bias));
 
     st->fused_valid = s_status;
 
     /* ---- policy block ------------------------------------------------ */
     inekf_real_t quat_wxyz[4];
     inekf_quaternion(&s_f, quat_wxyz);
-    memcpy(st->quat, quat_wxyz, sizeof(st->quat));
-    st->pelvis_z = s_f.p[2];
+    float quat_f[4];
+    for (int i = 0; i < 4; i++) { quat_f[i] = (float)quat_wxyz[i]; }
+    memcpy(st->quat, quat_f, sizeof(st->quat));
+    st->pelvis_z = (float)s_f.p[2];
 
     /*
      * World velocity rotated into the HEADING frame - world turned about z by
@@ -618,7 +739,7 @@ void fusion_fill_state(nexus_state_t *st)
                 {
                     const float *b = s_point_body[leg][k];
                     /* Third row of R times the body-frame offset. */
-                    float z = s_f.p[2] + R[6] * b[0] + R[7] * b[1] + R[8] * b[2];
+                    float z = (float)(s_f.p[2] + R[6] * b[0] + R[7] * b[1] + R[8] * b[2]);
 
                     lowest = (k == 0 || z < lowest) ? z : lowest;
                 }

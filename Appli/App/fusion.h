@@ -68,6 +68,9 @@ void fusion_fill_state(nexus_state_t *st);
  */
 uint8_t fusion_status(void);
 
+/* IMU samples held back as glitches since fusion_init() - see fusion.c. */
+uint32_t fusion_imu_rejected(void);
+
 /*
  * How many consecutive ticks the estimate has been converged, for
  * diagnostics. Resets to zero whenever it stops being converged, so a value

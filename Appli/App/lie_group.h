@@ -30,17 +30,33 @@
  * "active" count says how much of it is in use. Rows and columns belonging to
  * inactive contacts are zeroed, which makes them inert in every product.
  *
- * WHY float RATHER THAN double
+ * WHY double RATHER THAN float
  *
- * The M7 has a double-precision FPU, but singles are roughly twice as fast and
- * halve the memory traffic - and covariance propagation is the hot path. The
- * filter uses Joseph-form updates and explicit symmetrisation to stay stable in
- * single precision. If numerical trouble ever appears, changing inekf_real_t
- * to double is the single switch that fixes it.
+ * DOUBLE, since 2026-11-23. The InEKF's contact update builds its innovation
+ * covariance as P_pp + P_dd - P_pd - P_dp: the absolute body and foot
+ * positions are unobservable when standing, so those terms grow without
+ * bound (0.056 m^2 after 37 s) while staying almost perfectly correlated, and
+ * the difference that matters is ~1e-5. Single precision cannot carry that:
+ * replaying 60 s of the robot standing still, H P H^T went NEGATIVE
+ * (-1.5e-4 at 37.06 s, -2.9e-3 by 48.8 s), the next update inverted a near-
+ * singular S, and the estimate jumped to 5 m/s with the gyro bias at 50 deg/s
+ * (tools/replay). Joseph form and symmetrisation cannot fix a covariance whose
+ * entries have lost the digits that matter. The M7 has a double-precision FPU,
+ * and since the Appli runs from RAM the loop has the headroom for it.
+ *
+ * Use the LG_* maths below on inekf_real_t values, never sqrtf/sinf/fabsf:
+ * those silently drop back to single precision.
  * ---------------------------------------------------------------------------
  */
 
-typedef float inekf_real_t;
+#include <math.h>
+
+typedef double inekf_real_t;
+
+#define LG_SQRT(x)  sqrt(x)
+#define LG_SIN(x)   sin(x)
+#define LG_COS(x)   cos(x)
+#define LG_FABS(x)  fabs(x)
 
 /*
  * Two contact points: one switch per foot, NEXUS_CONTACT_* order.

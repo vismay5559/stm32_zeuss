@@ -75,6 +75,9 @@ int main(int argc, char **argv)
 
         for (int j = 0; j < NEXUS_NUM_JOINTS; j++) { act.pos[j]     = (float)r[i++]; }
         for (int j = 0; j < NEXUS_NUM_JOINTS; j++) { act.pos_age[j] = (uint16_t)r[i++]; }
+        /* gen_walk.py writes age 0 on the tick a frame arrives: that is what
+           act_get() reports as pos_new on the board. */
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++) { act.pos_new[j] = (uint8_t)(act.pos_age[j] == 0u); }
 
         float spring[NEXUS_NUM_ENCODERS];
         for (int e = 0; e < NEXUS_NUM_ENCODERS; e++)

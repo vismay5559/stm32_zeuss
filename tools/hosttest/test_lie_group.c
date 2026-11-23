@@ -88,8 +88,8 @@ static void test_rotation_is_a_rotation(void)
         inekf_real_t Rv[3];
         lg_mat3_vec(Rv, R, v);
 
-        inekf_real_t n_in  = sqrtf(v[0]*v[0]   + v[1]*v[1]   + v[2]*v[2]);
-        inekf_real_t n_out = sqrtf(Rv[0]*Rv[0] + Rv[1]*Rv[1] + Rv[2]*Rv[2]);
+        inekf_real_t n_in  = LG_SQRT(v[0]*v[0]   + v[1]*v[1]   + v[2]*v[2]);
+        inekf_real_t n_out = LG_SQRT(Rv[0]*Rv[0] + Rv[1]*Rv[1] + Rv[2]*Rv[2]);
         CHECK(close_to(n_in, n_out, TOL),
               "rotation changed the length of a vector in case %d (%f -> %f)",
               k, (double)n_in, (double)n_out);

@@ -68,6 +68,12 @@ static void tick(uint8_t inertial, uint8_t contacts)
         s_imu.seq++;
     }
 
+    /* A joint this harness marks age 0 is one whose frame just arrived. */
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        s_act.pos_new[j] = (uint8_t)(s_act.pos_age[j] == 0u);
+    }
+
     fusion_tick(&s_imu, &s_act, s_spring, s_spring_valid, contacts, s_now_us);
 }
 
@@ -535,6 +541,100 @@ static void test_a_short_dropout_does_not_restart(void)
           (double)before, (double)after);
 }
 
+static float yaw_now(void)
+{
+    nexus_state_t st;
+    memset(&st, 0, sizeof(st));
+    fusion_fill_state(&st);
+    float w = st.quat[0], x = st.quat[1], y = st.quat[2], z = st.quat[3];
+    return atan2f(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z));
+}
+
+static void stand_still(int ticks)
+{
+    for (int i = 0; i < ticks; i++) { age_all_joints(0); tick(1, (uint8_t)ALL_SWITCHES); }
+}
+
+/*
+ * What a failure means on the robot: one garbled gyro sample out of the
+ * IMU's checksum-less serial link (12.5 rad/s seen, standing still) taken as
+ * real - a sudden turn the feet then fight, and the estimate jumps.
+ */
+static void test_a_single_garbled_imu_sample_is_ignored(void)
+{
+    printf("one garbled IMU sample (12.5 rad/s, standing still) does not turn the robot\n");
+    fixtures_reset();
+    fusion_init();
+    stand_still(500);
+    float before = yaw_now();
+    uint32_t rej0 = fusion_imu_rejected();
+
+    s_imu.gyro[2] = 12.5f;            /* the value seen on 2026-11-23 */
+    age_all_joints(0);
+    tick(1, (uint8_t)ALL_SWITCHES);
+    s_imu.gyro[2] = 0.0f;
+    stand_still(20);
+
+    /* Taken as real, 12.5 rad/s for this harness's 1 ms is 0.0125 rad. */
+    CHECK(fabsf(yaw_now() - before) < 0.001f,
+          "a single garbled sample turned the estimate %.4f rad", (double)(yaw_now() - before));
+    CHECK(fusion_imu_rejected() - rej0 == 1u, "%u samples rejected, expected exactly the one",
+          fusion_imu_rejected() - rej0);
+}
+
+static void test_a_real_change_still_gets_through(void)
+{
+    printf("a real, sustained change in rotation rate is taken, one sample late\n");
+    fixtures_reset();
+    fusion_init();
+    stand_still(500);
+    float before = yaw_now();
+
+    s_imu.gyro[2] = 0.6f;             /* a step above the threshold, and it stays */
+    stand_still(100);
+    s_imu.gyro[2] = 0.0f;
+
+    /* 0.6 rad/s for 100 ms is 0.06 rad; one held sample costs 0.0006. */
+    float turned = yaw_now() - before;
+    CHECK(turned > 0.055f && turned < 0.065f, "turned %.4f rad, expected ~0.06", (double)turned);
+}
+
+/*
+ * The board's view of a drive reporting every millisecond: its age always
+ * reads 1 (aged at the start of the tick, before the read) but there is a new
+ * frame every tick. Contact updates must run on that - when they keyed off
+ * age == 0 instead, the estimate on the robot dead-reckoned to 3 m/s.
+ */
+static void test_contact_updates_run_on_new_frames_not_on_age_zero(void)
+{
+    printf("contact updates run on every new frame, even though its age reads 1\n");
+    uint8_t both = (uint8_t)(ALL_SWITCHES);
+    float v_new = 0.0f, v_none = 0.0f;
+
+    for (int run = 0; run < 2; run++)
+    {
+        fixtures_reset();
+        fusion_init();
+        s_imu.accel[0] = 0.3f;       /* a constant error the contacts must hold */
+        for (int i = 0; i < 5000; i++)
+        {
+            s_now_us += 1000u;
+            s_imu.accel_seq++; s_imu.gyro_seq++; s_imu.seq++;
+            for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+            {
+                s_act.pos_age[j] = 1u;
+                s_act.pos_new[j] = (uint8_t)(run == 0);
+            }
+            fusion_tick(&s_imu, &s_act, s_spring, s_spring_valid, both, s_now_us);
+        }
+        if (run == 0) { v_new = speed(); } else { v_none = speed(); }
+    }
+    /* Without updates, 0.3 m/s^2 for 5 s is ~1.5 m/s. With them, near zero. */
+    CHECK(v_none > 1.0f, "setup: with no new frames the drift was only %.2f m/s", (double)v_none);
+    CHECK(v_new < 0.05f, "a new frame every tick (age 1) still drifted to %.3f m/s - contact "
+          "updates are keyed off something the board never sees", (double)v_new);
+}
+
 /* No NaN may ever reach the packet from a healthy run. */
 static void test_no_nan_in_a_healthy_run(void)
 {
@@ -576,6 +676,9 @@ int main(void)
     printf("fusion.c host tests\n-------------------\n");
 
     test_a_long_blackout_restarts_on_touchdown();
+    test_a_single_garbled_imu_sample_is_ignored();
+    test_contact_updates_run_on_new_frames_not_on_age_zero();
+    test_a_real_change_still_gets_through();
     test_a_short_dropout_does_not_restart();
     test_quat_only_frames_do_not_propagate();
     test_inertial_frames_do_propagate();

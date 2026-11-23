@@ -81,12 +81,12 @@ static void test_a_robot_standing_still_does_not_wander(void)
      */
     for (int k = 0; k < 3; k++)
     {
-        CHECK(fabsf(v[k]) < 0.05f,
+        CHECK(LG_FABS(v[k]) < 0.05f,
               "standing still, velocity component %d drifted to %f m/s",
               k, (double)v[k]);
     }
 
-    CHECK(fabsf(inekf_height(&f)) < 0.05f,
+    CHECK(LG_FABS(inekf_height(&f)) < 0.05f,
           "standing still, height drifted to %f m", (double)inekf_height(&f));
 }
 
@@ -121,7 +121,7 @@ static void test_free_fall_accelerates_downwards_at_g(void)
           "expected about %f", (double)v[2], (double)expect);
     CHECK(v[2] < 0.0f, "free fall produced an UPWARD velocity (%f) - the sign "
           "of gravity is inverted", (double)v[2]);
-    CHECK(fabsf(v[0]) < 0.05f && fabsf(v[1]) < 0.05f,
+    CHECK(LG_FABS(v[0]) < 0.05f && LG_FABS(v[1]) < 0.05f,
           "free fall also moved the robot sideways: (%f, %f)",
           (double)v[0], (double)v[1]);
     CHECK(inekf_height(&f) < 0.0f,
@@ -159,18 +159,18 @@ static void test_a_steady_spin_is_reported_as_that_spin(void)
      */
     const inekf_real_t half = 0.70710678f;
 
-    CHECK(close_to(fabsf(q[0]), half, 0.02f),
+    CHECK(close_to(LG_FABS(q[0]), half, 0.02f),
           "after a quarter turn the scalar part is %f, expected about %f",
-          (double)fabsf(q[0]), (double)half);
-    CHECK(close_to(fabsf(q[3]), half, 0.02f),
+          (double)LG_FABS(q[0]), (double)half);
+    CHECK(close_to(LG_FABS(q[3]), half, 0.02f),
           "after a quarter turn the z part is %f, expected about %f",
-          (double)fabsf(q[3]), (double)half);
-    CHECK(fabsf(q[1]) < 0.02f && fabsf(q[2]) < 0.02f,
+          (double)LG_FABS(q[3]), (double)half);
+    CHECK(LG_FABS(q[1]) < 0.02f && LG_FABS(q[2]) < 0.02f,
           "turning about z also tilted the robot: x=%f y=%f",
           (double)q[1], (double)q[2]);
 
     /* However it is signed, a quaternion is a unit vector. */
-    inekf_real_t n = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+    inekf_real_t n = LG_SQRT(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
     CHECK(close_to(n, 1.0f, 1e-3f), "the quaternion is not unit length: %f",
           (double)n);
 }
@@ -191,14 +191,14 @@ static void test_the_orientation_stays_a_rotation(void)
     for (int i = 0; i < 10000; i++)
     {
         inekf_real_t t = (inekf_real_t)i * DT;
-        inekf_real_t w[3] = { 0.8f * sinf(t), 0.6f * cosf(0.7f * t), 0.4f };
-        inekf_real_t a[3] = { 0.5f * sinf(2.0f * t), 0.3f * cosf(t), GRAV };
+        inekf_real_t w[3] = { 0.8f * LG_SIN(t), 0.6f * LG_COS(0.7f * t), 0.4f };
+        inekf_real_t a[3] = { 0.5f * LG_SIN(2.0f * t), 0.3f * LG_COS(t), GRAV };
         inekf_predict(&f, w, a, DT);
     }
 
     inekf_real_t q[4];
     inekf_quaternion(&f, q);
-    inekf_real_t n = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+    inekf_real_t n = LG_SQRT(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
 
     CHECK(close_to(n, 1.0f, 1e-2f),
           "after ten seconds the quaternion has length %f, not 1 - the "
@@ -275,7 +275,7 @@ static void test_a_planted_foot_pulls_the_drift_back(void)
 
     inekf_real_t v_before[3];
     inekf_velocity_world(&f, v_before);
-    CHECK(fabsf(v_before[0]) > 0.05f,
+    CHECK(LG_FABS(v_before[0]) > 0.05f,
           "setup: the bias did not produce drift to correct (%f)",
           (double)v_before[0]);
 
@@ -295,7 +295,7 @@ static void test_a_planted_foot_pulls_the_drift_back(void)
     inekf_real_t v_after[3];
     inekf_velocity_world(&f, v_after);
 
-    CHECK(fabsf(v_after[0]) < fabsf(v_before[0]),
+    CHECK(LG_FABS(v_after[0]) < LG_FABS(v_before[0]),
           "the planted foot did not reduce the drift: %f before, %f after",
           (double)v_before[0], (double)v_after[0]);
 
@@ -512,9 +512,9 @@ static void test_reset_returns_it_to_knowing_nothing(void)
           close_to(v[2], 0.0f, 1e-4f),
           "reset left a velocity behind: (%f, %f, %f)",
           (double)v[0], (double)v[1], (double)v[2]);
-    CHECK(close_to(fabsf(q[0]), 1.0f, 1e-4f),
+    CHECK(close_to(LG_FABS(q[0]), 1.0f, 1e-4f),
           "reset did not return the robot to upright (scalar part %f)",
-          (double)fabsf(q[0]));
+          (double)LG_FABS(q[0]));
     CHECK(inekf_num_contacts(&f) == 0,
           "reset left %d contacts behind", inekf_num_contacts(&f));
 }

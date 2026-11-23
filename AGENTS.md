@@ -244,7 +244,17 @@ Each has a comment in the code explaining it. **Do not undo them.**
    every START. From RAM: median 78 µs, worst 379 µs. `SystemInit` must call
    nothing (it runs before the copy), and the linker script is not a build
    dependency - delete the .elf to relink after editing it.
-6. **DMA buffers must be non-cacheable** — `NEXUS_DMA_BUFFER` in
+6. **The estimator is double precision, on purpose** (`lie_group.h`). In
+   single precision its contact update subtracts two ~0.06 m² position
+   variances to get a ~1e-5 difference, which went negative after ~35 s of
+   standing still and blew the estimate up. Use the `LG_*` maths on
+   `inekf_real_t` values, never `sqrtf`/`fabsf`.
+7. **Replay before you tune.** `tools/replay/run.sh RECORDING` runs the
+   firmware's own `fusion.c` on a laptop, fed a recording of the state stream
+   (raw `/dev/zeus_stm32` bytes or a link-node `.flt`), next to what the board
+   reported. Every estimator fix on 2026-11-23 was found and proven there
+   first. If replay and board disagree, an input is not what you think it is.
+8. **DMA buffers must be non-cacheable** — `NEXUS_DMA_BUFFER` in
    `dma_buffer.h`, which must agree with MPU region 2 in Boot. `app.c` checks
    that agreement at startup rather than trusting it.
 
