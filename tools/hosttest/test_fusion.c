@@ -466,6 +466,75 @@ static void test_never_reports_ok_while_uncalibrated(void)
           "expected CONVERGING, got %u", st);
 }
 
+/*
+ * What a failure means on the robot: drives unpowered for a while, the filter
+ * integrating the IMU alone, and then - with the legs back - carrying on from
+ * millions of metres and a 100 degree roll (seen 2026-11-23) instead of
+ * starting again. Or the opposite: a stance switch flickering for a few
+ * hundred milliseconds mid-walk throwing the whole estimate away.
+ */
+static float speed(void)
+{
+    nexus_state_t st;
+    memset(&st, 0, sizeof(st));
+    fusion_fill_state(&st);
+    return sqrtf(st.fused_vel[0] * st.fused_vel[0] + st.fused_vel[1] * st.fused_vel[1] +
+                 st.fused_vel[2] * st.fused_vel[2]);
+}
+
+static void blackout_then_touchdown(int blackout_ticks, float *v_before, float *v_after,
+                                    uint8_t *st_during)
+{
+    uint8_t both = (uint8_t)(ALL_SWITCHES);
+
+    fixtures_reset();
+    fusion_init();
+    for (int i = 0; i < 500; i++) { age_all_joints(0); tick(1, both); }
+
+    /* Legs gone (drives silent), and the accelerometer 1 m/s^2 off level:
+       with nothing to correct it, the velocity estimate runs away at 1 m/s^2. */
+    s_imu.accel[0] = 1.0f;
+    for (int i = 0; i < blackout_ticks; i++) { age_all_joints(60000u); tick(1, both); }
+    *st_during = fusion_status();
+    *v_before  = speed();
+
+    /* Legs back, at rest, both feet planted. */
+    s_imu.accel[0] = 0.0f;
+    age_all_joints(0);
+    tick(1, both);
+    *v_after = speed();
+}
+
+static void test_a_long_blackout_restarts_on_touchdown(void)
+{
+    printf("5 s with no contact: the next touchdown restarts the filter from rest\n");
+    float before, after;
+    uint8_t during;
+    blackout_then_touchdown(5000, &before, &after, &during);
+
+    CHECK(during == NEXUS_FUSION_INVALID, "status %u with no contact, expected INVALID", during);
+    CHECK(before > 2.0f, "setup: only %.2f m/s of drift after 5 s at 1 m/s^2", (double)before);
+    CHECK(after < 0.05f, "touchdown after a 5 s blackout kept %.2f m/s - it carried on from "
+          "the dead-reckoned state instead of restarting", (double)after);
+
+    for (int i = 0; i < 10; i++) { age_all_joints(0); tick(1, (uint8_t)ALL_SWITCHES); }
+    CHECK(fusion_status() == NEXUS_FUSION_CONVERGING,
+          "status %u after the restart, expected CONVERGING", fusion_status());
+}
+
+static void test_a_short_dropout_does_not_restart(void)
+{
+    printf("0.3 s with no contact: the estimate is kept, not thrown away\n");
+    float before, after;
+    uint8_t during;
+    blackout_then_touchdown(300, &before, &after, &during);
+
+    /* 0.3 s at 1 m/s^2: ~0.3 m/s, still there right at touchdown. */
+    CHECK(before > 0.2f, "setup: only %.3f m/s of drift", (double)before);
+    CHECK(after > 0.2f, "a 0.3 s dropout restarted the filter (%.3f -> %.3f m/s)",
+          (double)before, (double)after);
+}
+
 /* No NaN may ever reach the packet from a healthy run. */
 static void test_no_nan_in_a_healthy_run(void)
 {
@@ -506,6 +575,8 @@ int main(void)
 {
     printf("fusion.c host tests\n-------------------\n");
 
+    test_a_long_blackout_restarts_on_touchdown();
+    test_a_short_dropout_does_not_restart();
     test_quat_only_frames_do_not_propagate();
     test_inertial_frames_do_propagate();
     test_foot_follows_the_drives();

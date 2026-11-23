@@ -62,6 +62,21 @@
 /* If the IMU stops, the estimate is dead reckoning on nothing. */
 #define IMU_STALE_TICKS   50u
 
+/*
+ * With no foot in contact the filter is integrating the IMU alone, and
+ * nothing bounds that: on 2026-11-23, after the drives had been unpowered a
+ * while, it read position in the millions of metres, velocity in the
+ * thousands of m/s and roll +101 deg against gravity's -9. INVALID said so,
+ * but every number stayed finite, so the NaN check never restarted it - and
+ * when the legs came back it carried on from there instead of from scratch.
+ *
+ * So after this long with no contact (drives off or not reporting, robot
+ * lifted, or just booted), the next touchdown restarts the filter first.
+ * Walking always has a foot down; a switch dropping out for a few ticks is
+ * nowhere near a second.
+ */
+#define FREE_RESET_TICKS  1000u
+
 /* ===================================================================== */
 /*  JOINT NOISE                                                           */
 /* ===================================================================== */
@@ -96,6 +111,7 @@ static uint8_t  s_have_imu_time;
 static uint8_t  s_down[INEKF_MAX_CONTACTS];   /* what the filter currently believes */
 static uint8_t  s_ground_anchored;     /* has the z datum been established?   */
 static uint32_t s_converged_ticks;
+static uint32_t s_free_ticks;          /* ticks with no contact in the filter */
 static uint8_t  s_status;
 
 /* ------------------------------------------------------------------ */
@@ -112,6 +128,7 @@ void fusion_init(void)
     memset(s_down, 0, sizeof(s_down));
     s_converged_ticks = 0;
     s_ground_anchored = 0;
+    s_free_ticks      = 0;
     s_status          = NEXUS_FUSION_INVALID;
 }
 
@@ -427,6 +444,11 @@ void fusion_tick(const imu_sample_t *imu,
     }
 
     /* ---- 2. contact events and updates ------------------------------- */
+
+    /* Long enough with nothing to anchor it: restart on the next touchdown
+       (FREE_RESET_TICKS). */
+    uint8_t restart = (inekf_num_contacts(&s_f) == 0) && (s_free_ticks >= FREE_RESET_TICKS);
+
     for (int leg = 0; leg < 2; leg++)
     {
         leg_input_t in;
@@ -472,6 +494,15 @@ void fusion_tick(const imu_sample_t *imu,
                 float C[9];
                 point_cov(C, J[k], in.var);
 
+                if (restart)
+                {
+                    inekf_reset(&s_f);
+                    memset(s_down, 0, sizeof(s_down));
+                    s_ground_anchored = 0;
+                    s_converged_ticks = 0;
+                    restart = 0u;
+                }
+
                 if (!s_ground_anchored)
                 {
                     anchor_ground(p_body[k]);
@@ -493,6 +524,15 @@ void fusion_tick(const imu_sample_t *imu,
                 inekf_update_contact(&s_f, slot, p_body[k], C);
             }
         }
+    }
+
+    if (inekf_num_contacts(&s_f) == 0)
+    {
+        if (s_free_ticks < 0xFFFFFFFFu) { s_free_ticks++; }
+    }
+    else
+    {
+        s_free_ticks = 0;
     }
 
     /* ---- 3. is any of this trustworthy yet? -------------------------- */
