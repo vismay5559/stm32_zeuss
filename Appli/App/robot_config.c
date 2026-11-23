@@ -215,17 +215,25 @@ const joint_limit_t g_joint_limit[NEXUS_NUM_JOINTS] = {
  * SENSORS, and ROBOT before and after glitch rejection), so these are the
  * springs' rest positions rather than one lucky sample.
  *
- * SIGNS are still +1, i.e. not measured: the springs cannot be pushed by hand
- * with the robot assembled. They are to be read off the first walk - stance
- * loads the knee and hip springs in a known direction (spring_angle in the
- * flight recording against the stance phase), and any that read the wrong
- * way get -1 here.
+ * SIGNS, measured 2026-11-23 by hand: drives idle, so the non-backdrivable
+ * gearboxes hold the motor side and a push on the foot winds only the spring.
+ * Each foot pushed backward (positive hip pitch in the URDF: the leg swings
+ * back) and each knee bent (positive knee), then the reverse, ~3 s each.
+ * Resting noise 0.002 deg; the pushes read 0.05-0.18 deg.
+ *
+ *   L hip   +0.046 then -0.085   L knee  +0.107 then -0.127    -> +1
+ *   R hip   -0.064 then +0.181   R knee  -0.107 then +0.127    -> -1
+ *
+ * The right leg is the left one mirrored, and so are its spring magnets: the
+ * raw count runs the other way. Cross-check in the same recording: bending
+ * the right knee also moved the right hip spring negative, straightening it
+ * positive - consistent only with both right signs inverted.
  */
 const spring_enc_cal_t g_spring_enc[NEXUS_NUM_ENCODERS] = {
     /* L hip   (PF1)  */ { 13586u, 1.0f },
     /* L knee  (PD15) */ {  9411u, 1.0f },
-    /* R hip   (PD14) */ {  7730u, 1.0f },
-    /* R knee  (PF5)  */ {  6033u, 1.0f },
+    /* R hip   (PD14) */ {  7730u, -1.0f },
+    /* R knee  (PF5)  */ {  6033u, -1.0f },
 };
 
 #define ENC_COUNTS       16384u          /* AS5047P is 14-bit over a full turn */

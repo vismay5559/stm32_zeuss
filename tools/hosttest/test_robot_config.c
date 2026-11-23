@@ -75,11 +75,14 @@ static void test_continuous_across_the_zero(void)
               "(expected about %f) - the wrap is not being folded",
               e, (double)fabsf(above - below), (double)(2.0f * PER_COUNT));
 
-        /* And they must straddle zero with the right signs. */
-        CHECK(below < 0.0f, "enc %d: one count below zero read %f, expected negative",
-              e, (double)below);
-        CHECK(above > 0.0f, "enc %d: one count above zero read %f, expected positive",
-              e, (double)above);
+        /* And they must straddle zero, in the direction the encoder's sign
+           says: the right leg's magnets are mirrored (sign -1), so a count
+           above zero is a NEGATIVE deflection there. */
+        float sg = g_spring_enc[e].sign;
+        CHECK(below * sg < 0.0f, "enc %d: one count below zero read %f with sign %+.0f",
+              e, (double)below, (double)sg);
+        CHECK(above * sg > 0.0f, "enc %d: one count above zero read %f with sign %+.0f",
+              e, (double)above, (double)sg);
     }
 }
 
