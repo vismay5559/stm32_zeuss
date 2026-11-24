@@ -150,6 +150,38 @@ static uint8_t       s_gains_loaded;
 static volatile uint16_t s_pos_age[NEXUS_NUM_JOINTS];
 static volatile uint8_t  s_pos_new[NEXUS_NUM_JOINTS];   /* see act_telemetry_t.pos_new */
 
+/*
+ * Position glitch rejection (2026-11-24). After a rewiring the left knee's
+ * output encoder picked up interference: standing still at -12.6 deg, single
+ * position frames read -29, -23, +10, +66 and straight back - 10,000 times in
+ * ten minutes - while the SAME frames' velocity stayed smooth near zero. The
+ * drive's velocity is a filtered estimate; its position is the raw read. So a
+ * frame whose position is further from the last good one than its own velocity
+ * could have carried it is a bad read, not a move: drop it and keep the last
+ * good value. ACT_POS_GLITCH_RESYNC in a row are believed anyway, so a real
+ * discontinuity (an ankle re-zeroed) cannot lock a joint out.
+ */
+#define ACT_POS_GLITCH_MARGIN_TURNS  (2.0f / 360.0f)
+#define ACT_POS_GLITCH_RESYNC        5u
+static uint8_t  s_pos_reject_run[NEXUS_NUM_JOINTS];
+static uint32_t s_pos_rejects[NEXUS_NUM_JOINTS];
+
+static uint8_t pos_believable(int j, float pos, float vel)
+{
+    if ((s_pos_age[j] > ACT_POS_STALE_TICKS) || !isfinite(s_telem.pos[j]))
+    {
+        return 1u;                       /* nothing recent to compare with */
+    }
+    float v  = fmaxf(fabsf(vel), fabsf(s_telem.vel[j]));
+    float dt = ((float)s_pos_age[j] + 1.0f) * 0.001f;
+    return (fabsf(pos - s_telem.pos[j]) <= (2.0f * v * dt + ACT_POS_GLITCH_MARGIN_TURNS)) ? 1u : 0u;
+}
+
+uint32_t act_pos_rejects(int joint)
+{
+    return ((joint >= 0) && (joint < NEXUS_NUM_JOINTS)) ? s_pos_rejects[joint] : 0u;
+}
+
 /* Non-zero while a disarm is standing, with a countdown to the next repeat. */
 static uint8_t  s_disarmed;
 static uint32_t s_disarm_repeat;
@@ -322,6 +354,8 @@ void act_init(void)
     {
         s_pos_age[j] = 0xFFFFu;
         s_pos_new[j] = 0u;
+        s_pos_reject_run[j] = 0u;
+        s_pos_rejects[j] = 0u;
     }
 
     s_disarmed      = 0;
@@ -378,14 +412,26 @@ void act_on_rx(uint8_t bus_index)
         switch (cmd)
         {
         case ODRV_CMD_GET_ENCODER:
+        {
             /* Into the URDF's direction and OUTPUT turns here and nowhere
                else - see g_joint_dir and g_joint_enc_ratio in robot_config.h. */
-            s_telem.pos[j] = g_joint_dir[j] * le_f32(&data[0]) / g_joint_enc_ratio[j];
-            s_telem.vel[j] = g_joint_dir[j] * le_f32(&data[4]) / g_joint_enc_ratio[j];
+            float pos = g_joint_dir[j] * le_f32(&data[0]) / g_joint_enc_ratio[j];
+            float vel = g_joint_dir[j] * le_f32(&data[4]) / g_joint_enc_ratio[j];
+
+            if (!pos_believable(j, pos, vel) && (s_pos_reject_run[j] < ACT_POS_GLITCH_RESYNC))
+            {
+                s_pos_reject_run[j]++;
+                s_pos_rejects[j]++;
+                break;              /* a bad read: keep the last good one */
+            }
+            s_pos_reject_run[j] = 0u;
+            s_telem.pos[j] = pos;
+            s_telem.vel[j] = vel;
             s_telem.flags[j] |= NEXUS_ACT_TELEM_FRESH;
             s_pos_age[j] = 0u;      /* this is the one that means "trustworthy" */
             s_pos_new[j] = 1u;
             break;
+        }
 
         case ODRV_CMD_GET_TORQUES:
             s_telem.torque[j] = g_joint_dir[j] * le_f32(&data[4]);

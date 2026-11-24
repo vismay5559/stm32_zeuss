@@ -562,6 +562,19 @@ static const ep_desc_t s_dump[] = {
     { 294u, T_U8,   "load_encoder" },
     { 295u, T_U8,   "commutation_encoder" },
     { 234u, T_F32,  "pos_estimate [turn]" },
+    /* Encoder inputs (2026-11-25: the left knee's position reads glitched by
+       interference; which input each drive uses and how many bad reads it
+       will tolerate). load_encoder: 5/6/7 = spi_encoder0/1/2, 10-12 = rs485,
+       13 = onboard. */
+    { 671u, T_U8,   "spi_encoder0.config.mode" },
+    { 673u, T_F32,  "spi_encoder0.config.max_error_rate" },
+    { 668u, T_U32,  "spi_encoder0.n_errors" },
+    { 664u, T_U8,   "spi_encoder0.status" },
+    { 687u, T_U8,   "spi_encoder1.config.mode" },
+    { 689u, T_F32,  "spi_encoder1.config.max_error_rate" },
+    { 684u, T_U32,  "spi_encoder1.n_errors" },
+    { 632u, T_U8,   "rs485_encoder_group0.config.mode" },
+    { 633u, T_F32,  "rs485_encoder_group0.config.max_error_rate" },
 };
 
 static const char *const s_joint[2][4] = {

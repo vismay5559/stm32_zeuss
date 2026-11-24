@@ -963,6 +963,63 @@ static void test_a_new_position_survives_the_aging_before_the_read(void)
     CHECK(b.pos_new[2] == 0u, "the same position was handed over as new twice");
 }
 
+/*
+ * What a failure means on the robot: after a rewiring the left knee's encoder
+ * picked up interference (2026-11-24). Standing still at -12.6 deg, single
+ * frames read -29, -23, +10, +66 deg and straight back, with the frame's own
+ * velocity near zero - and the policy steered on them at 50 Hz.
+ */
+static void test_a_position_glitch_is_dropped_but_real_motion_is_not(void)
+{
+    printf("a position that jumps further than its own velocity allows is a bad read\n");
+    const int K = 2;                               /* left knee */
+    const float DEG = 1.0f / 360.0f;
+
+    fresh_board();
+    act_telemetry_t a;
+    drive_reports_position(K, -12.6f * DEG, 0.0f);
+    ticks(1);
+    drive_reports_position(K, -12.6f * DEG, 0.0f);
+
+    /* The recorded glitches, one frame each, 1 ms apart, velocity ~0. */
+    const float glitch[] = { -29.3f, -12.6f, 10.1f, -12.6f, 66.1f, -12.6f, -23.2f, -12.6f };
+    for (unsigned i = 0; i < sizeof(glitch) / sizeof(glitch[0]); i++)
+    {
+        ticks(1);
+        drive_reports_position(K, glitch[i] * DEG, 0.001f);
+        act_get(&a);
+        CHECK(NEAR(a.pos[K], -12.6f * DEG, 0.1f * DEG),
+              "after a %.1f deg read the knee is believed at %.2f deg",
+              (double)glitch[i], (double)(a.pos[K] * 360.0f));
+    }
+    CHECK(act_pos_rejects(K) == 4u, "%u reads dropped, expected the 4 glitches",
+          (unsigned)act_pos_rejects(K));
+
+    /* Real motion at walking speed - 300 deg/s, a frame a millisecond - is
+       followed exactly: each step is within what the velocity allows. */
+    float q = -12.6f * DEG;
+    for (int i = 0; i < 50; i++)
+    {
+        q += 0.3f * DEG;
+        ticks(1);
+        drive_reports_position(K, q, 300.0f * DEG);
+    }
+    act_get(&a);
+    CHECK(NEAR(a.pos[K], q, 1e-6f), "a 300 deg/s move was not followed (%.2f deg, expected %.2f)",
+          (double)(a.pos[K] * 360.0f), (double)(q * 360.0f));
+
+    /* A genuine discontinuity - an ankle re-zeroed - is believed after
+       ACT_POS_GLITCH_RESYNC frames, never locked out. */
+    for (int i = 0; i < 6; i++)
+    {
+        ticks(1);
+        drive_reports_position(K, 40.0f * DEG, 0.0f);
+    }
+    act_get(&a);
+    CHECK(NEAR(a.pos[K], 40.0f * DEG, 1e-6f), "a lasting jump to 40 deg was never accepted (%.2f deg)",
+          (double)(a.pos[K] * 360.0f));
+}
+
 static void test_a_wire_that_shuts_itself_down_is_restarted(void)
 {
     printf("a wire in trouble\n");
@@ -1578,6 +1635,7 @@ int main(void)
     test_a_frame_from_a_wire_that_does_not_exist_is_bounded();
     test_a_reading_is_handed_over_once_and_then_ages();
     test_a_new_position_survives_the_aging_before_the_read();
+    test_a_position_glitch_is_dropped_but_real_motion_is_not();
     test_a_wire_that_shuts_itself_down_is_restarted();
     test_the_emergency_stop_bypasses_everything();
     test_arming_writes_the_gains_to_every_drive();

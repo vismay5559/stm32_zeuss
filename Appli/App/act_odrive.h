@@ -319,4 +319,8 @@ uint32_t act_tx_dropped(uint8_t bus);
  */
 uint32_t act_rx_count(uint8_t bus);
 
+/* Position frames dropped as bad reads on this joint since act_init()
+   (see pos_believable in act_odrive.c). */
+uint32_t act_pos_rejects(int joint);
+
 #endif /* ACT_ODRIVE_H */
