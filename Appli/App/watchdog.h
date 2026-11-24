@@ -74,4 +74,11 @@ void    wdg_init_reset_cause(void);
  */
 uint8_t wdg_reset_was_watchdog(void);
 
+/*
+ * RCC_RSR exactly as found at boot (2026-11-24: the board was rebooting
+ * itself while standing still, and "was it the watchdog" alone could not say
+ * whether the supply dipped, the reset pin was pulled, or the core crashed).
+ */
+uint32_t wdg_reset_flags(void);
+
 #endif /* WATCHDOG_H */

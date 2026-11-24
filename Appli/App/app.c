@@ -459,6 +459,20 @@ void app_init(void)
     {
         printf("APPLI: *** last reset came from the WATCHDOG ***\r\n");
     }
+    {
+        /* Every cause, not just the watchdog. A flash or the debugger's reset
+           reads PIN; a supply dip reads BOR (and POR if it went all the way
+           down); a crash reads IWDG (the fault handlers spin until it bites). */
+        uint32_t f = wdg_reset_flags();
+        printf("APPLI: reset cause RSR=0x%08lX%s%s%s%s%s%s%s\r\n", (unsigned long)f,
+               (f & RCC_RSR_PORRSTF)  ? " POWER-ON" : "",
+               (f & RCC_RSR_BORRSTF)  ? " BROWN-OUT(supply dipped)" : "",
+               (f & RCC_RSR_PINRSTF)  ? " PIN" : "",
+               (f & RCC_RSR_SFTRSTF)  ? " SOFTWARE" : "",
+               (f & RCC_RSR_IWDGRSTF) ? " WATCHDOG" : "",
+               (f & RCC_RSR_WWDGRSTF) ? " WWDG" : "",
+               (f & RCC_RSR_LPWRRSTF) ? " LOW-POWER" : "");
+    }
 
     check_noncacheable_region();
 

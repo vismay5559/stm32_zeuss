@@ -39,6 +39,7 @@
 #define IWDG_SR_SPINS   2000000u
 
 static uint8_t s_was_watchdog;
+static uint32_t s_rsr;          /* RCC_RSR as found at boot, all flags */
 static uint8_t s_running;
 
 static uint8_t wait_sr_clear(uint32_t mask)
@@ -55,7 +56,8 @@ static uint8_t wait_sr_clear(uint32_t mask)
 
 void wdg_init_reset_cause(void)
 {
-    s_was_watchdog = (RCC->RSR & RCC_RSR_IWDGRSTF) ? 1u : 0u;
+    s_rsr = RCC->RSR;
+    s_was_watchdog = (s_rsr & RCC_RSR_IWDGRSTF) ? 1u : 0u;
 
     /* Clear the flags so the NEXT reset's cause is unambiguous. They are
        sticky across resets and would otherwise accumulate. */
@@ -65,6 +67,11 @@ void wdg_init_reset_cause(void)
 uint8_t wdg_reset_was_watchdog(void)
 {
     return s_was_watchdog;
+}
+
+uint32_t wdg_reset_flags(void)
+{
+    return s_rsr;
 }
 
 uint8_t wdg_start(void)
