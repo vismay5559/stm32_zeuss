@@ -132,6 +132,20 @@ extern FDCAN_HandleTypeDef hfdcan2;
  * error at 48 turn/s.
  */
 #define CANCFG_FIX_ANKLE_VEL 0   /* done 2026-11-24, both ankles 40 turn/s, saved */
+
+/*
+ * 1 = set spi_encoder0.config.max_error_rate (endpoint 673) on EVERY drive to
+ * ENC_MAX_ERROR_RATE, read back, then save all eight. Asked for 2026-11-25:
+ * the left knee's output encoder takes interference (316,511 failed reads in
+ * one power-on) and the defaults were mixed - 0.005 / 0.2 / 0.3 / 0.9 - so a
+ * burst of bad reads on a 0.005 drive declared its encoder lost (error 0x8,
+ * MISSING_ESTIMATE). The ankles use the onboard encoder; the value is written
+ * there too, harmlessly, so every drive reads the same. After the save the
+ * drives go quiet until motor power is cycled.
+ */
+#define CANCFG_FIX_ERROR_RATE 0   /* done 2026-11-25: all 8 drives 0.700 read back, saved */
+#define EP_SPI0_MAX_ERROR_RATE 673u
+#define ENC_MAX_ERROR_RATE     0.7f
 #define EP_VEL_LIMIT     396u
 #define ANKLE_VEL_LIMIT  40.0f
 #define EP_CONTROL_MODE  389u
@@ -791,6 +805,58 @@ void cancfg_run(void)
         }
     }
     printf("\r\n=== ankle vel_limit done ===\r\n");
+#endif
+#if CANCFG_FIX_ERROR_RATE
+    {
+        printf("\r\n=== spi_encoder0 max_error_rate -> %.2f on every drive. Nothing is armed. ===\r\n",
+               (double)ENC_MAX_ERROR_RATE);
+        float f = ENC_MAX_ERROR_RATE;
+        uint32_t want;
+        memcpy(&want, &f, sizeof(want));
+        uint8_t ok_mask[2] = { 0u, 0u };
+
+        for (uint8_t bus = 0u; bus < 2u; bus++)
+        {
+            FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+            for (uint8_t node = 1u; node <= 4u; node++)
+            {
+                uint32_t id = 0xFFFFFFFFu, v0 = 0u, v1 = 0u;
+                if ((s_hb_seen[bus] & (1u << node)) == 0u || !sdo_read_u32(h, node, EP_NODE_ID, &id)
+                    || id != node || !sdo_read_u32(h, node, EP_SPI0_MAX_ERROR_RATE, &v0))
+                {
+                    printf("    %s: cannot read it - SKIPPED\r\n", s_joint[bus][node - 1u]);
+                    continue;
+                }
+                (void)sdo_write_u32(h, node, EP_SPI0_MAX_ERROR_RATE, want);
+                float a0, a1;
+                memcpy(&a0, &v0, 4);
+                if (!sdo_read_u32(h, node, EP_SPI0_MAX_ERROR_RATE, &v1) || v1 != want)
+                {
+                    printf("    %s: %.3f -> *** DID NOT TAKE, not saved ***\r\n", s_joint[bus][node - 1u], (double)a0);
+                    continue;
+                }
+                memcpy(&a1, &v1, 4);
+                printf("    %s: max_error_rate %.3f -> %.3f, read back ok\r\n", s_joint[bus][node - 1u], (double)a0, (double)a1);
+                ok_mask[bus] |= (uint8_t)(1u << node);
+            }
+        }
+        for (uint8_t bus = 0u; bus < 2u; bus++)
+        {
+            FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+            for (uint8_t node = 1u; node <= 4u; node++)
+            {
+                if ((ok_mask[bus] & (1u << node)) == 0u) { continue; }
+                uint8_t d[8] = { 0 };
+                d[0] = SDO_OP_WRITE;
+                d[1] = (uint8_t)(EP_SAVE_CONFIG & 0xFFu);
+                d[2] = (uint8_t)(EP_SAVE_CONFIG >> 8);
+                tx_classic(h, node, CANCFG_RX_SDO, d, 8u);
+                printf("    %s: save sent\r\n", s_joint[bus][node - 1u]);
+                pump_for(300u);
+            }
+        }
+        printf("\r\n=== error rate done: switch MOTOR POWER off and on, then run the dump to confirm ===\r\n");
+    }
 #endif
 #if CANCFG_FIX_MODES
     fix_modes();

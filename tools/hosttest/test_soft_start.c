@@ -144,6 +144,40 @@ static void test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose
     CHECK(soft_start_ignores_residual(), "a residual is passed through during the hold");
 }
 
+static void test_the_ankles_are_free_in_the_hold(void)
+{
+    printf("HOLD: the ankles follow where they are (no spring), everything else holds the pose\n");
+    setup();
+    soft_start_idle();
+    soft_start_armed(s_stand, 1u);
+    float ref[N], vel[N], tau[N], meas[N];
+    for (int t = 0; t <= RAMP; t++) { tick(ref, vel, tau); }
+    CHECK(soft_start_mode() == SOFT_HOLD, "setup: not holding (mode %d)", (int)soft_start_mode());
+
+    /* The feet settled flat: ankles 7 deg away from the start pose. */
+    memcpy(meas, s_pose0, sizeof(meas));
+    meas[NEXUS_J_L_ANKLE_PITCH] += 7.0f * DEG;
+    meas[NEXUS_J_R_ANKLE_PITCH] -= 7.0f * DEG;
+    soft_start_measured(meas, 1u);
+    tick(ref, vel, tau);
+    for (int j = 0; j < N; j++)
+    {
+        int ankle = (j == NEXUS_J_L_ANKLE_PITCH) || (j == NEXUS_J_R_ANKLE_PITCH);
+        float want = (SOFT_HOLD_ANKLES_FREE && ankle) ? meas[j] : s_pose0[j];
+        CHECK(fabsf(ref[j] - want) < 1e-6f, "joint %d: held at %.2f deg, expected %.2f",
+              j, (double)(ref[j] * 360.0f), (double)(want * 360.0f));
+    }
+
+    /* WALK: the gait drives the ankles again. */
+    soft_start_hold_flag(0u);
+    tick(ref, vel, tau);
+    CHECK(soft_start_mode() == SOFT_RUN, "released, but mode %d", (int)soft_start_mode());
+    CHECK(ref[NEXUS_J_L_ANKLE_PITCH] == s_gait[NEXUS_J_L_ANKLE_PITCH],
+          "after WALK the left ankle still follows itself (%.2f deg)", (double)(ref[NEXUS_J_L_ANKLE_PITCH] * 360.0f));
+
+    soft_start_measured(meas, 0u);       /* leave no measured pose behind */
+}
+
 static void test_clearing_hold_releases_into_the_gait(void)
 {
     printf("clearing HOLD at the start pose starts the gait; setting it again does not stop it\n");
@@ -536,6 +570,7 @@ int main(void)
     printf("-----------------------\n");
 
     test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose();
+    test_the_ankles_are_free_in_the_hold();
     test_clearing_hold_releases_into_the_gait();
     test_hold_cleared_mid_ramp_finishes_the_ramp_first();
     test_an_unheld_arm_blends_into_the_running_gait();

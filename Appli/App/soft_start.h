@@ -149,6 +149,17 @@ void soft_start_hold_flag(uint8_t hold);
  */
 #define SOFT_HOLD_TAU_SCALE  0.0f
 
+/*
+ * 1 = in HOLD the ankles' target follows the measured ankle angle, so they
+ * have no stiffness, only the drive's damping (KD 1.2 Nm s/rad): the feet
+ * settle flat under the robot's weight and the builder can set them by hand.
+ * WALK drives them to the gait again - the release check allows the ankles
+ * 10 deg from the start pose. Asked for 2026-11-25: holding the start pose
+ * with powered ankles, the robot sat back on its heels with the front (right)
+ * foot half off the floor, and WALK could not release.
+ */
+#define SOFT_HOLD_ANKLES_FREE  1
+
 void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      const float gait_vel[NEXUS_NUM_JOINTS],
                      const float gait_tau[NEXUS_NUM_JOINTS],
