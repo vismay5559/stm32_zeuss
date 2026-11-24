@@ -308,6 +308,15 @@ typedef struct
 
 extern const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS];
 
+/*
+ * Friction feed-forward, OUTPUT Nm, applied by app.c in the direction of the
+ * commanded velocity: g_friction_ff_nm[j] * v / (|v| + ROBOT_FRICTION_V0).
+ * Half of it at v0 (0.01 turn/s = 3.6 deg/s), 90% by ten times that.
+ * Set a joint to 0 to turn it off.
+ */
+#define ROBOT_FRICTION_V0_TURNS_S   0.01f
+extern const float g_friction_ff_nm[NEXUS_NUM_JOINTS];
+
 /* ===================================================================== */
 /*  Spring encoders                                                       */
 /* ===================================================================== */

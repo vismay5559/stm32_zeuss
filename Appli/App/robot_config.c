@@ -112,6 +112,25 @@ const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS] = {
     /* R ankle_pitch */ { 25.0f,  0.033510f,  0.0f },  /*  30 / 1.2, N^2 225 */
 };
 
+/*
+ * Friction feed-forward (robot_config.h). From the first ground walk,
+ * 2026-11-23 (zeus_20261123_234848.flt, 998.8-1002.8 s), a least-squares fit
+ * of drive torque x gear against sign(velocity) while moving:
+ *
+ *                 measured Coulomb    used    ~fraction
+ *   hip pitch     15.5 L / 15.7 R      9.0      58%
+ *   knee          10.9 L /  4.2 R      4.0      37% of L - R fit is load-confounded
+ *   hip roll       2.2 L /  4.1 R      1.5      68% of L
+ *   ankle          0.8 / -0.3          0        within noise
+ *
+ * Under on purpose (app.c). If hips still stall short with this, raise hip
+ * pitch in steps of 2 Nm and watch for a joint that moves on its own.
+ */
+const float g_friction_ff_nm[NEXUS_NUM_JOINTS] = {
+    /* L hip_pitch */ 9.0f, /* L hip_roll */ 1.5f, /* L knee */ 4.0f, /* L ankle */ 0.0f,
+    /* R hip_pitch */ 9.0f, /* R hip_roll */ 1.5f, /* R knee */ 4.0f, /* R ankle */ 0.0f,
+};
+
 const uint8_t g_leg_springs[2][2] = {
     { NEXUS_ENC_L_HIP_PITCH, NEXUS_ENC_L_KNEE_PITCH },
     { NEXUS_ENC_R_HIP_PITCH, NEXUS_ENC_R_KNEE_PITCH },

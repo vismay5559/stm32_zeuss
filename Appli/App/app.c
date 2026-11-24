@@ -283,8 +283,9 @@ static float s_gait_tau_nm[NEXUS_NUM_JOINTS];
  *
  * s_cmd_ref_turns is what an accepted command is built on: the ramp, the hold
  * pose, or the gait, as soft_start_tick() decides. s_hold_pose_turns is the
- * reference at SOFT_START_PHASE, without spring pre-deflection; it is a
- * property of the compiled gait table, computed once.
+ * drive reference at SOFT_START_PHASE - pre-deflected, exactly what RUN
+ * commands there - and s_hold_tau_nm the gait's torque at that phase. Both
+ * are properties of the compiled gait table, computed once.
  *
  * s_meas_turns is the pose the drives report, and s_pose_ok whether every
  * joint has a finite, recent one. An arm has to ramp FROM somewhere: with a
@@ -292,6 +293,7 @@ static float s_gait_tau_nm[NEXUS_NUM_JOINTS];
  */
 static float   s_cmd_ref_turns[NEXUS_NUM_JOINTS];
 static float   s_hold_pose_turns[NEXUS_NUM_JOINTS];
+static float   s_hold_tau_nm[NEXUS_NUM_JOINTS];
 static float   s_meas_turns[NEXUS_NUM_JOINTS];
 static uint8_t s_pose_ok;
 static uint8_t s_zero_prev;          /* ZERO_ANKLES on the previous command   */
@@ -479,8 +481,9 @@ void app_init(void)
 
     soft_start_idle();
     {
-        float v[NEXUS_NUM_JOINTS], t[NEXUS_NUM_JOINTS];
-        build_reference(SOFT_START_PHASE, s_hold_pose_turns, v, t);
+        float raw[NEXUS_NUM_JOINTS], v[NEXUS_NUM_JOINTS];
+        build_reference(SOFT_START_PHASE, raw, v, s_hold_tau_nm);
+        apply_spring_predeflection(raw, s_hold_tau_nm, s_hold_pose_turns);
     }
     s_pose_ok       = 0;
     s_zero_prev     = 0;
@@ -759,7 +762,26 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
     {
         soft_start_measured(s_meas_turns, s_pose_ok);
         soft_start_tick(s_drive_ref_turns, s_gait_vel_turns, s_gait_tau_nm,
-                        s_hold_pose_turns, s_cmd_ref_turns, ff_vel, ff_tau);
+                        s_hold_pose_turns, s_hold_tau_nm,
+                        s_cmd_ref_turns, ff_vel, ff_tau);
+
+        /*
+         * Gearbox friction, cancelled in the direction the joint is being
+         * told to move. Measured on the first ground walk (2026-11-23, a
+         * Coulomb fit of drive torque against velocity): hip pitch 15.5 Nm,
+         * knee ~11, hip roll 2-4 - against 0.05 Nm in the model the policy
+         * trained in. Uncancelled, hips stalled 7-10 deg short of every peak.
+         *
+         * g_friction_ff_nm is about 60% of that, deliberately under: too
+         * little leaves some stall, too much drives the joint by itself and
+         * can limit-cycle. v / (|v| + v0) is a smooth sign - zero at rest, so
+         * the hold gets none, and no chatter as the command crosses zero.
+         */
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+        {
+            float v = ff_vel[j];
+            ff_tau[j] += g_friction_ff_nm[j] * (v / (fabsf(v) + ROBOT_FRICTION_V0_TURNS_S));
+        }
     }
     else
     {

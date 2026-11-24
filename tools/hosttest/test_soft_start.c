@@ -38,6 +38,9 @@ static const float s_pose0_deg[N] = { 22.4f, -5.4f, -2.9f, -18.7f, -21.8f, 6.5f,
 static float s_pose0[N];
 /* A running gait somewhere else entirely, moving, and pushing. */
 static float s_gait[N], s_gvel[N], s_gtau[N];
+/* The gait's torque at the start phase: what the robot's weight needs there.
+   Different from s_gtau, so a test can tell which one is being fed. */
+static float s_htau[N];
 
 static void setup(void)
 {
@@ -48,13 +51,14 @@ static void setup(void)
         s_gait[j]  = (10.0f + (float)j) * DEG;
         s_gvel[j]  = 0.05f;
         s_gtau[j]  = 3.0f + (float)j;
+        s_htau[j]  = -1.0f - 0.5f * (float)j;
     }
     s_stand[5] = 4.0f * DEG;
 }
 
 static void tick(float ref[N], float vel[N], float tau[N])
 {
-    soft_start_tick(s_gait, s_gvel, s_gtau, s_pose0, ref, vel, tau);
+    soft_start_tick(s_gait, s_gvel, s_gtau, s_pose0, s_htau, ref, vel, tau);
 }
 
 static void test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose(void)
@@ -104,7 +108,14 @@ static void test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose
             CHECK(fabsf(vel[j] - slope) < 2e-4f || t < 2,
                   "t=%d joint %d: velocity feedforward %.5f, commanded slope %.5f turns/s",
                   t, j, (double)vel[j], (double)slope);
-            CHECK(tau[j] == 0.0f, "t=%d joint %d: torque %.2f pushed while held", t, j, (double)tau[j]);
+            /* The start pose's own torque blends in with the pose: by the
+               time the legs reach it they carry the weight it needs. */
+            {
+                float x = (float)t / (float)RAMP, sm = x * x * (3.0f - 2.0f * x);
+                CHECK(fabsf(tau[j] - sm * s_htau[j]) < 1e-4f,
+                      "t=%d joint %d: torque %.3f while held, expected %.3f (the hold torque, blended)",
+                      t, j, (double)tau[j], (double)(sm * s_htau[j]));
+            }
         }
         memcpy(prev, ref, sizeof(prev));
         if (s_fail > 20) { return; }
@@ -119,9 +130,14 @@ static void test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose
     for (int k = 0; k < 500; k++) { tick(ref, vel, tau); }
     for (int j = 0; j < N; j++)
     {
-        CHECK(fabsf(ref[j] - s_pose0[j]) < 1e-6f && vel[j] == 0.0f && tau[j] == 0.0f,
+        CHECK(fabsf(ref[j] - s_pose0[j]) < 1e-6f && vel[j] == 0.0f,
               "joint %d: holding at %.3f deg with v %.4f, expected the phase-0 pose %.3f still",
               j, (double)(ref[j] * 360.0f), (double)vel[j], (double)(s_pose0[j] * 360.0f));
+        /* Zero here is the bug the first ground walk found: the hold sagged
+           6 deg back on one foot because nothing carried the weight. */
+        CHECK(tau[j] == s_htau[j],
+              "joint %d: the hold pushes %.2f Nm, expected the start phase's own %.2f",
+              j, (double)tau[j], (double)s_htau[j]);
     }
     CHECK(soft_start_clock_frozen(), "the clock started on its own during the hold");
     CHECK(soft_start_ignores_residual(), "a residual is passed through during the hold");

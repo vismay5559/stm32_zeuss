@@ -130,6 +130,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      const float gait_vel[NEXUS_NUM_JOINTS],
                      const float gait_tau[NEXUS_NUM_JOINTS],
                      const float hold_pose[NEXUS_NUM_JOINTS],
+                     const float hold_tau[NEXUS_NUM_JOINTS],
                      float out_ref[NEXUS_NUM_JOINTS],
                      float out_vel[NEXUS_NUM_JOINTS],
                      float out_tau[NEXUS_NUM_JOINTS])
@@ -150,12 +151,12 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
 
         for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
         {
-            /* Held: the goal is the frozen start pose and nothing pushes.
-               Running: the goal is the live stride, so its own velocity and
-               torque come in with the blend. */
+            /* Held: the goal is the frozen start pose, and its torque blends
+               in with it (soft_start.h). Running: the goal is the live
+               stride, so its own velocity and torque come in with the blend. */
             float goal = s_ramp_held ? hold_pose[j] : gait_ref[j];
             float gv   = s_ramp_held ? 0.0f         : gait_vel[j];
-            float gt   = s_ramp_held ? 0.0f         : gait_tau[j];
+            float gt   = s_ramp_held ? hold_tau[j]  : gait_tau[j];
 
             out_ref[j] = s_from[j] + s * (goal - s_from[j]);
             out_vel[j] = ds * (goal - s_from[j]) + s * gv;
@@ -180,7 +181,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
         {
             out_ref[j] = hold_pose[j];
             out_vel[j] = 0.0f;
-            out_tau[j] = 0.0f;
+            out_tau[j] = hold_tau[j];
         }
         memcpy(s_last, out_ref, sizeof(s_last));
         return;

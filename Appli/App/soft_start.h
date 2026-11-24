@@ -116,13 +116,23 @@ void soft_start_hold_flag(uint8_t hold);
  *   gait_ref   drive reference at the current phase, pre-deflected (turns)
  *   gait_vel   gait velocity (turns/s)
  *   gait_tau   gait torque (Nm)
- *   hold_pose  the pure reference at SOFT_START_PHASE (turns, no pre-deflection,
- *              since nothing is pushing through the springs while standing)
+ *   hold_pose  the drive reference at SOFT_START_PHASE, pre-deflected exactly
+ *              as gait_ref is there (turns)
+ *   hold_tau   the gait's torque at SOFT_START_PHASE (Nm)
+ *
+ * The hold carries hold_tau. Until 2026-11-24 it carried nothing, on the
+ * theory that nothing pushes through a standing robot's springs - but the
+ * robot's weight does: with no feed-forward the PD can only make that torque
+ * out of position error, and the first ground walk started from a pose sagged
+ * 6 deg back and 5 deg right, on one foot. It also made release a step: the
+ * torque arrived all at once on the first RUN tick. Now the hold IS the gait
+ * at phase 0.95, frozen, and release changes nothing but the clock.
  */
 void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      const float gait_vel[NEXUS_NUM_JOINTS],
                      const float gait_tau[NEXUS_NUM_JOINTS],
                      const float hold_pose[NEXUS_NUM_JOINTS],
+                     const float hold_tau[NEXUS_NUM_JOINTS],
                      float out_ref[NEXUS_NUM_JOINTS],
                      float out_vel[NEXUS_NUM_JOINTS],
                      float out_tau[NEXUS_NUM_JOINTS]);
