@@ -294,11 +294,25 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts)
  *
  *   robot X = -chip Y      robot Y = chip X      robot Z = chip Z
  */
+/*
+ * The 90 degree yaw (robot_config.h), then a LEVEL correction: the board sits
+ * 8.81 deg rolled on the torso. Measured 2026-11-24 from the accelerometer on
+ * six separate occasions with every joint within 1 deg of zero, both foot
+ * switches pressed and the robot still (zeus_20261124_200738.flt): gravity
+ * read (0.022, -1.487, 9.598) m/s^2, i.e. roll -8.7 to -9.0 every time, pitch
+ * scattered about 0 (mean -0.13, not corrected). The builder confirmed the
+ * robot stands straight there. Uncorrected, the tilt guard started every run
+ * 9 deg into its 20, and the policy - tested in sim to +-3 deg of IMU mount
+ * error - would have been told it was falling sideways.
+ *
+ *     R = Rx(-8.805 deg) * Rz(+90 deg)
+ */
 const float g_imu_mount_R[9] = {
-    0.0f, -1.0f, 0.0f,
-    1.0f,  0.0f, 0.0f,
-    0.0f,  0.0f, 1.0f,
+     0.0f,        -1.0f, 0.0f,
+     0.9882142f,   0.0f, 0.1530776f,
+    -0.1530776f,   0.0f, 0.9882142f,
 };
 
-/* R_chip_body: -90 degrees about Z. (cos 45, 0, 0, -sin 45). */
-const float g_imu_mount_q[4] = { 0.70710678f, 0.0f, 0.0f, -0.70710678f };
+/* R_chip_body = R^T as (w, x, y, z). Was (cos 45, 0, 0, -sin 45) before the
+   level correction. test_robot_config.c checks it against the matrix. */
+const float g_imu_mount_q[4] = { 0.70502024f, 0.05428129f, -0.05428129f, -0.70502024f };

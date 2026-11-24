@@ -72,22 +72,26 @@
 
 #define SOFT_START_RAMP_S   3.0f
 /*
- * 0.15, since 2026-11-24: feet side by side under the hips (85 mm apart front
- * to back), both soles flat to within 0.6 deg, foot roll under 2 deg - by the
- * URDF's forward kinematics of the gait at each phase, torso upright.
+ * 0.10, since 2026-11-24 evening. The left (rear) foot 192 mm behind the
+ * right, the left sole 11 mm higher with the torso upright - so a 3 deg lean
+ * back, which this robot takes anyway, puts both soles down, and the rear
+ * foot is a kickstand against leaning further.
  *
- * It was 0.95, chosen from the gait library's contact flags. Both feet are
- * down there, but 276 mm apart front to back with the left foot rolled 5 deg:
- * on the robot the hold settled onto the rear (left) foot, the right switch
- * read open for the whole hold, and with no foot pressed half the time the
- * estimator never stayed OK long enough to allow WALK.
+ * History, all measured on the robot:
+ *   0.95  feet 276 mm apart: the hold leaned back ~6 deg onto the rear foot
+ *         and the front foot lifted - the right switch read open all hold.
+ *   0.15  feet side by side (85 mm): nothing stopped it rolling back; the
+ *         accelerometer read 12-19 deg back in every hold, the soft trained
+ *         ankles were pushed 8 deg off, and the tilt stop kept firing.
+ *   0.0   the left foot already lifting.
+ * The real centre of mass sits further back than the CAD model's (battery and
+ * electronics on top); the first ground walk also fell backward.
  *
  * Inside the policy's start window (0.95-0.30). The closed-loop sim check
- * walks 20 s from rest at 0.15 (tilt p95 4.9 deg), against 5.2 at 0.95
- * (sim_check/RESULTS.md in zeus_8dof_deploy). Before 0.95 it was 0.0, where
- * the left foot is already lifting.
+ * walks 20 s from rest at 0.10 (tilt p95 5.0 deg; sim_check/RESULTS.md in
+ * zeus_8dof_deploy).
  */
-#define SOFT_START_PHASE    0.15f
+#define SOFT_START_PHASE    0.10f
 
 typedef enum
 {

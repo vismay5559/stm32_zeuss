@@ -330,8 +330,10 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
 
     /*
      * The chip is yawed 90 degrees: X to the robot's left, Y to the back, Z
-     * up. Written down first, as what each chip axis must become, so a wrong
-     * table fails here and not as a robot that thinks forward is sideways.
+     * up - and rolled 8.8 degrees off level (2026-11-24). Written down first,
+     * as what each chip axis must become, so a wrong table fails here and
+     * not as a robot that thinks forward is sideways. Within 0.16 of the pure
+     * yaw: the level correction is a small rotation, never an axis swap.
      */
     const float chip_axis[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
     const float want[3][3]      = { { 0, 1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } };
@@ -343,11 +345,38 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
         {
             float got = R[3 * r] * chip_axis[a][0] + R[3 * r + 1] * chip_axis[a][1] +
                         R[3 * r + 2] * chip_axis[a][2];
-            CHECK(fabsf(got - want[a][r]) < 1e-6f,
-                  "chip axis %d lands at robot component %d = %.3f, expected %.0f",
+            CHECK(fabsf(got - want[a][r]) < 0.16f,
+                  "chip axis %d lands at robot component %d = %.3f, expected about %.0f",
                   a, r, (double)got, (double)want[a][r]);
         }
     }
+
+    /* A proper rotation: orthonormal, determinant +1. */
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            float d = R[3 * i] * R[3 * j] + R[3 * i + 1] * R[3 * j + 1] + R[3 * i + 2] * R[3 * j + 2];
+            CHECK(fabsf(d - (i == j ? 1.0f : 0.0f)) < 1e-5f, "mount R rows %d,%d dot %.6f", i, j, (double)d);
+        }
+    }
+
+    /*
+     * The point of the level correction: gravity as the chip measured it with
+     * the robot standing straight on 2026-11-24 (chip axes, m/s^2) must come
+     * out vertical in the robot's frame. Before it, this read 8.8 deg of roll.
+     */
+    const float g_chip[3] = { -1.4867f, -0.0218f, 9.5976f };
+    float g[3];
+    for (int r = 0; r < 3; r++)
+    {
+        g[r] = R[3 * r] * g_chip[0] + R[3 * r + 1] * g_chip[1] + R[3 * r + 2] * g_chip[2];
+    }
+    float roll  = atan2f(g[1], g[2]) * 57.29578f;
+    float pitch = atan2f(-g[0], sqrtf(g[1] * g[1] + g[2] * g[2])) * 57.29578f;
+    CHECK(fabsf(roll) < 0.1f && fabsf(pitch) < 0.3f,
+          "standing straight reads roll %.2f pitch %.2f deg, expected about 0",
+          (double)roll, (double)pitch);
 
     /* The quaternion is R_chip_body = R^T. Its matrix must match entry for
        entry; one sign typed wrong in either is a 180-degree disagreement. */
