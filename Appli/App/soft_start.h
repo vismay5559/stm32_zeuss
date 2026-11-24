@@ -69,14 +69,22 @@
 
 #define SOFT_START_RAMP_S   3.0f
 /*
- * 0.95: double support, both feet down, right foot ~27 cm ahead of the left
- * (the gait library's own sole positions and contact flags at 0.30 m/s).
- * Was 0.0, where the left foot is already lifting - a pose a robot cannot
- * stand in on the floor. Inside the policy's start window (0.95-0.30); the
- * closed-loop sim check walks 20 s from rest at 0.95 (tilt p95 5.2 deg),
- * against 4.7 at phase 0 (sim_check/RESULTS.md in zeus_8dof_deploy).
+ * 0.15, since 2026-11-24: feet side by side under the hips (85 mm apart front
+ * to back), both soles flat to within 0.6 deg, foot roll under 2 deg - by the
+ * URDF's forward kinematics of the gait at each phase, torso upright.
+ *
+ * It was 0.95, chosen from the gait library's contact flags. Both feet are
+ * down there, but 276 mm apart front to back with the left foot rolled 5 deg:
+ * on the robot the hold settled onto the rear (left) foot, the right switch
+ * read open for the whole hold, and with no foot pressed half the time the
+ * estimator never stayed OK long enough to allow WALK.
+ *
+ * Inside the policy's start window (0.95-0.30). The closed-loop sim check
+ * walks 20 s from rest at 0.15 (tilt p95 4.9 deg), against 5.2 at 0.95
+ * (sim_check/RESULTS.md in zeus_8dof_deploy). Before 0.95 it was 0.0, where
+ * the left foot is already lifting.
  */
-#define SOFT_START_PHASE    0.95f
+#define SOFT_START_PHASE    0.15f
 
 typedef enum
 {
@@ -126,7 +134,7 @@ void soft_start_hold_flag(uint8_t hold);
  * out of position error, and the first ground walk started from a pose sagged
  * 6 deg back and 5 deg right, on one foot. It also made release a step: the
  * torque arrived all at once on the first RUN tick. Now the hold IS the gait
- * at phase 0.95, frozen, and release changes nothing but the clock.
+ * at SOFT_START_PHASE, frozen, and release changes nothing but the clock.
  */
 void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      const float gait_vel[NEXUS_NUM_JOINTS],
@@ -138,9 +146,12 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      float out_tau[NEXUS_NUM_JOINTS]);
 
 /*
- * NEXUS_CMD_RETURN as it stands on each accepted command. Set during a held
- * ramp or HOLD: start ramping to zero on every joint. Anywhere else it does
- * nothing - in particular not in RUN.
+ * NEXUS_CMD_RETURN as it stands on each accepted command. Set while armed -
+ * a ramp, the hold, or the running gait - it starts a 3 s ramp to zero on
+ * every joint: from the last reference, or from the MEASURED pose out of RUN.
+ * Already returning or home: nothing. (Out of IDLE the Pi arms with RETURN
+ * set, and the arm's ramp turns into the return on the same command.)
+ * Until 2026-11-24 it worked only from a held ramp or the hold.
  */
 void soft_start_return_flag(uint8_t ret);
 

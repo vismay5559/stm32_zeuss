@@ -86,16 +86,33 @@ static void home_trim(int j)
 
 void soft_start_return_flag(uint8_t ret)
 {
-    uint8_t held = (s_mode == SOFT_HOLD) || ((s_mode == SOFT_RAMP) && s_ramp_held);
-
-    if (ret && held)
+    if (!ret || (s_mode == SOFT_RETURN) || (s_mode == SOFT_HOME) || (s_mode == SOFT_IDLE))
     {
-        /* From the reference the drives were last given, so the way back
-           starts exactly where the way out stopped - mid-ramp included. */
-        memcpy(s_from, s_last, sizeof(s_from));
-        s_t    = 0;
-        s_mode = SOFT_RETURN;
+        return;
     }
+
+    if (s_mode == SOFT_RUN)
+    {
+        /*
+         * From the gait (since 2026-11-24: BACK TO STANDING works from
+         * anywhere). The last target included a policy residual this module
+         * never saw, and the legs can be 10-30 deg off it mid-stride, so start
+         * from where the joints ARE: the target steps toward the robot, which
+         * only ever lowers the torque. Without a measured pose, the last gait
+         * reference is the next best thing.
+         */
+        memcpy(s_from, s_meas_ok ? s_meas : s_last, sizeof(s_from));
+    }
+    else
+    {
+        /* A ramp (held or not) or the hold: from the reference the drives
+           were last given, so the way back starts exactly where the way out
+           stopped - mid-ramp included. */
+        memcpy(s_from, s_last, sizeof(s_from));
+    }
+    memset(s_trim, 0, sizeof(s_trim));
+    s_t    = 0;
+    s_mode = SOFT_RETURN;
 }
 
 soft_mode_t soft_start_mode(void)
@@ -227,6 +244,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
             out_vel[j] = gait_vel[j];
             out_tau[j] = gait_tau[j];
         }
+        memcpy(s_last, out_ref, sizeof(s_last));   /* a RETURN's fallback start */
         return;
     }
 }

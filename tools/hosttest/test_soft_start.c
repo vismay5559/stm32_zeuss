@@ -337,21 +337,50 @@ static void test_return_mid_ramp_turns_round_where_it_is(void)
     }
 }
 
-static void test_return_is_refused_while_walking(void)
+static void test_return_works_from_anywhere_armed(void)
 {
-    printf("RETURN while the gait runs does nothing - a foot may be in the air\n");
+    printf("RETURN from an unheld ramp and from the running gait: back to zero, from where the legs ARE\n");
     setup();
     soft_start_idle();
     soft_start_armed(s_stand, 0u);                 /* unheld: heading for RUN */
-    float ref[N], vel[N], tau[N];
-    tick(ref, vel, tau);
-    soft_start_return_flag(1u);
-    CHECK(soft_start_mode() == SOFT_RAMP, "RETURN hijacked a ramp into the running gait");
+    float ref[N], vel[N], tau[N], meas[N];
     for (int t = 0; t < RAMP + 5; t++) { tick(ref, vel, tau); }
     CHECK(soft_start_mode() == SOFT_RUN, "setup: not running (mode %d)", (int)soft_start_mode());
-    soft_start_return_flag(1u);
-    CHECK(soft_start_mode() == SOFT_RUN, "RETURN stopped a running gait mid-stride");
 
+    /* Mid-stride the legs are well off the gait: 12 deg on every joint. */
+    for (int j = 0; j < N; j++) { meas[j] = s_gait[j] + 12.0f * DEG; }
+    soft_start_measured(meas, 1u);
+    soft_start_return_flag(1u);
+    CHECK(soft_start_mode() == SOFT_RETURN, "RETURN ignored while walking (mode %d)", (int)soft_start_mode());
+    CHECK(soft_start_ignores_residual(), "the policy still steers on the way back");
+    CHECK(soft_start_clock_frozen(), "the gait clock runs on the way back");
+
+    tick(ref, vel, tau);
+    for (int j = 0; j < N; j++)
+    {
+        /* Tick 0 of the way back is the MEASURED pose - not the gait. */
+        CHECK(fabsf(ref[j] - meas[j]) < 1e-6f,
+              "joint %d: way back starts at %.3f deg, the leg is at %.3f",
+              j, (double)(ref[j] * 360.0f), (double)(meas[j] * 360.0f));
+        CHECK(tau[j] == 0.0f, "joint %d: torque %.2f pushed on the way back", j, (double)tau[j]);
+    }
+    /* The legs follow the way back; at zero there is nothing for the HOME
+       trim to push against. */
+    for (int t = 0; t < RAMP; t++) { soft_start_measured(ref, 1u); tick(ref, vel, tau); }
+    CHECK(soft_start_mode() == SOFT_HOME, "did not arrive home (mode %d)", (int)soft_start_mode());
+    for (int j = 0; j < N; j++)
+    {
+        CHECK(fabsf(ref[j]) < 1e-6f, "joint %d: ended at %.3f deg, not zero", j, (double)(ref[j] * 360.0f));
+    }
+
+    /* Mid unheld ramp: turns round where it is. */
+    soft_start_idle();
+    soft_start_armed(s_stand, 0u);
+    for (int t = 0; t < RAMP / 2; t++) { tick(ref, vel, tau); }
+    soft_start_return_flag(1u);
+    CHECK(soft_start_mode() == SOFT_RETURN, "RETURN ignored mid unheld ramp");
+
+    /* Disarmed: nothing to drive back with. */
     soft_start_idle();
     soft_start_return_flag(1u);
     CHECK(soft_start_mode() == SOFT_IDLE, "RETURN did something while disarmed");
@@ -460,7 +489,7 @@ int main(void)
     test_disarming_means_the_next_arm_ramps_again();
     test_return_from_the_hold_goes_back_to_where_it_armed();
     test_return_mid_ramp_turns_round_where_it_is();
-    test_return_is_refused_while_walking();
+    test_return_works_from_anywhere_armed();
     test_home_trim_breaks_friction_then_lets_go();
     test_trim_is_home_only_and_forgotten_on_disarm();
 
