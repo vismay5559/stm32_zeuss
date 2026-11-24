@@ -209,7 +209,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                stride, so its own velocity and torque come in with the blend. */
             float goal = s_ramp_held ? hold_pose[j] : gait_ref[j];
             float gv   = s_ramp_held ? 0.0f         : gait_vel[j];
-            float gt   = s_ramp_held ? hold_tau[j]  : gait_tau[j];
+            float gt   = s_ramp_held ? (SOFT_HOLD_TAU_SCALE * hold_tau[j]) : gait_tau[j];
 
             out_ref[j] = s_from[j] + s * (goal - s_from[j]);
             out_vel[j] = ds * (goal - s_from[j]) + s * gv;
@@ -234,7 +234,7 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
         {
             out_ref[j] = hold_pose[j];
             out_vel[j] = 0.0f;
-            out_tau[j] = hold_tau[j];
+            out_tau[j] = SOFT_HOLD_TAU_SCALE * hold_tau[j];
         }
         memcpy(s_last, out_ref, sizeof(s_last));
         return;

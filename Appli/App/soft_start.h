@@ -135,14 +135,22 @@ void soft_start_hold_flag(uint8_t hold);
  *              as gait_ref is there (turns)
  *   hold_tau   the gait's torque at SOFT_START_PHASE (Nm)
  *
- * The hold carries hold_tau. Until 2026-11-24 it carried nothing, on the
- * theory that nothing pushes through a standing robot's springs - but the
- * robot's weight does: with no feed-forward the PD can only make that torque
- * out of position error, and the first ground walk started from a pose sagged
- * 6 deg back and 5 deg right, on one foot. It also made release a step: the
- * torque arrived all at once on the first RUN tick. Now the hold IS the gait
- * at SOFT_START_PHASE, frozen, and release changes nothing but the clock.
+ * The hold carries SOFT_HOLD_TAU_SCALE * hold_tau - and the scale is 0.
+ *
+ * Tried, measured, and switched off the same day (2026-11-24). Feeding the
+ * gait's own torque at the start phase was meant to stop the hold sagging
+ * under the robot's weight. But those are the optimiser's torques for a robot
+ * MID-STRIDE with a particular foot carrying it: at phase 0.10 that is -13.2 Nm
+ * on the right hip roll (the right leg holding the body up). On the robot the
+ * right foot was in the air in every hold, so the -13 Nm just shoved the free
+ * leg out: commanded +3.8 deg, held at -5.0, drive torque -4 Nm = PD +9 plus
+ * feed-forward -13. WALK could never be released. Zero: the hold is the PD on
+ * the start pose, as on the first ground walk, and the gait's torque arrives
+ * with the gait. Kept as a scale rather than deleted, so a gravity-only
+ * feed-forward can be tried in its place.
  */
+#define SOFT_HOLD_TAU_SCALE  0.0f
+
 void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      const float gait_vel[NEXUS_NUM_JOINTS],
                      const float gait_tau[NEXUS_NUM_JOINTS],

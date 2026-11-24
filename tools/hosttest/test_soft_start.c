@@ -108,13 +108,14 @@ static void test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose
             CHECK(fabsf(vel[j] - slope) < 2e-4f || t < 2,
                   "t=%d joint %d: velocity feedforward %.5f, commanded slope %.5f turns/s",
                   t, j, (double)vel[j], (double)slope);
-            /* The start pose's own torque blends in with the pose: by the
-               time the legs reach it they carry the weight it needs. */
+            /* The start pose's torque, scaled by SOFT_HOLD_TAU_SCALE (0 since
+               it shoved a free leg out, 2026-11-24), blends in with the pose. */
             {
                 float x = (float)t / (float)RAMP, sm = x * x * (3.0f - 2.0f * x);
-                CHECK(fabsf(tau[j] - sm * s_htau[j]) < 1e-4f,
-                      "t=%d joint %d: torque %.3f while held, expected %.3f (the hold torque, blended)",
-                      t, j, (double)tau[j], (double)(sm * s_htau[j]));
+                float want = sm * SOFT_HOLD_TAU_SCALE * s_htau[j];
+                CHECK(fabsf(tau[j] - want) < 1e-4f,
+                      "t=%d joint %d: torque %.3f while held, expected %.3f",
+                      t, j, (double)tau[j], (double)want);
             }
         }
         memcpy(prev, ref, sizeof(prev));
@@ -133,11 +134,11 @@ static void test_a_held_arm_starts_where_the_robot_is_and_ends_at_the_start_pose
         CHECK(fabsf(ref[j] - s_pose0[j]) < 1e-6f && vel[j] == 0.0f,
               "joint %d: holding at %.3f deg with v %.4f, expected the phase-0 pose %.3f still",
               j, (double)(ref[j] * 360.0f), (double)vel[j], (double)(s_pose0[j] * 360.0f));
-        /* Zero here is the bug the first ground walk found: the hold sagged
-           6 deg back on one foot because nothing carried the weight. */
-        CHECK(tau[j] == s_htau[j],
-              "joint %d: the hold pushes %.2f Nm, expected the start phase's own %.2f",
-              j, (double)tau[j], (double)s_htau[j]);
+        /* The gait's mid-stride torque is wrong for a static hold: at phase
+           0.10 its -13 Nm right hip roll shoved a free leg 9 deg off. */
+        CHECK(tau[j] == SOFT_HOLD_TAU_SCALE * s_htau[j],
+              "joint %d: the hold pushes %.2f Nm, expected %.2f",
+              j, (double)tau[j], (double)(SOFT_HOLD_TAU_SCALE * s_htau[j]));
     }
     CHECK(soft_start_clock_frozen(), "the clock started on its own during the hold");
     CHECK(soft_start_ignores_residual(), "a residual is passed through during the hold");
