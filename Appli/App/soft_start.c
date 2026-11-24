@@ -13,6 +13,9 @@ static float       s_from[NEXUS_NUM_JOINTS];
 static float       s_home[NEXUS_NUM_JOINTS];   /* where RETURN goes: all zero  */
 static float       s_last[NEXUS_NUM_JOINTS];   /* the last reference handed out */
 static float       s_trim[NEXUS_NUM_JOINTS];   /* HOME trim, turns past zero    */
+static uint16_t    s_trim_stall[NEXUS_NUM_JOINTS]; /* ticks at full trim, no progress */
+static float       s_trim_at_max[NEXUS_NUM_JOINTS];/* where it was when trim maxed  */
+static uint8_t     s_trim_off[NEXUS_NUM_JOINTS];   /* gave up on this joint          */
 static float       s_meas[NEXUS_NUM_JOINTS];
 static uint8_t     s_meas_ok;
 
@@ -26,6 +29,8 @@ void soft_start_idle(void)
     memset(s_home, 0, sizeof(s_home));
     memset(s_last, 0, sizeof(s_last));
     memset(s_trim, 0, sizeof(s_trim));
+    memset(s_trim_stall, 0, sizeof(s_trim_stall));
+    memset(s_trim_off, 0, sizeof(s_trim_off));
     s_meas_ok = 0u;
 }
 
@@ -35,6 +40,8 @@ void soft_start_armed(const float from[NEXUS_NUM_JOINTS], uint8_t hold)
     memset(s_home, 0, sizeof(s_home));   /* the standing pose - see soft_start.h */
     memcpy(s_last, from, sizeof(s_last));
     memset(s_trim, 0, sizeof(s_trim));
+    memset(s_trim_stall, 0, sizeof(s_trim_stall));
+    memset(s_trim_off, 0, sizeof(s_trim_off));
     s_hold      = (hold != 0u);
     s_ramp_held = s_hold;
     s_t         = 0;
@@ -65,11 +72,38 @@ static uint8_t is_ankle(int j)
 /* One tick of the HOME trim for joint j - see soft_start.h. */
 static void home_trim(int j)
 {
-    if (is_ankle(j) || !s_meas_ok)
+    if (is_ankle(j) || !s_meas_ok || s_trim_off[j])
     {
         return;
     }
     float err = s_home[j] - s_meas[j];
+
+    /*
+     * Give up on a joint that full trim cannot move. Friction breaks within a
+     * second at full trim; a joint that has not moved half a degree after
+     * SOFT_TRIM_GIVEUP_TICKS is not stuck on friction but jammed - on
+     * 2026-11-24 a jammed right knee sat at 5.6 deg under 36 Nm of trim for
+     * as long as HOME lasted, pushing into whatever had caught it. Let go:
+     * the joint holds where it is with the plain PD toward zero, and nothing
+     * escalates. Reset on the next arm.
+     */
+    if (fabsf(s_trim[j]) >= SOFT_TRIM_MAX)
+    {
+        if (s_trim_stall[j] == 0u)
+        {
+            s_trim_at_max[j] = s_meas[j];
+        }
+        if (fabsf(s_meas[j] - s_trim_at_max[j]) > SOFT_TRIM_DEADBAND)
+        {
+            s_trim_stall[j] = 0u;                 /* moving: friction, keep going */
+        }
+        else if (++s_trim_stall[j] >= SOFT_TRIM_GIVEUP_TICKS)
+        {
+            s_trim[j]     = 0.0f;
+            s_trim_off[j] = 1u;
+            return;
+        }
+    }
 
     if (err * s_trim[j] < 0.0f)
     {
@@ -111,6 +145,8 @@ void soft_start_return_flag(uint8_t ret)
         memcpy(s_from, s_last, sizeof(s_from));
     }
     memset(s_trim, 0, sizeof(s_trim));
+    memset(s_trim_stall, 0, sizeof(s_trim_stall));
+    memset(s_trim_off, 0, sizeof(s_trim_off));
     s_t    = 0;
     s_mode = SOFT_RETURN;
 }

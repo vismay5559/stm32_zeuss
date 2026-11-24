@@ -426,9 +426,11 @@ static void test_home_trim_breaks_friction_then_lets_go(void)
           (double)(ref[LA] * 360.0f));
     CHECK(vel[LH] == 0.0f && tau[LH] == 0.0f, "the trim pushed a velocity or torque feedforward");
 
-    for (int t = 0; t < 10000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
+    /* 3 s in all: clamped at 8 deg since ~1.8 s, short of the 2 s at full
+       trim that would mean jammed (test_trim_gives_up_on_a_jammed_joint). */
+    for (int t = 0; t < 2000; t++) { soft_start_measured(meas, 1u); tick(ref, vel, tau); }
     CHECK(fabsf(ref[LH] + 8.0f * DEG) < 1e-6f,
-          "left hip trim %.2f deg after 11 s, expected clamped at -8", (double)(ref[LH] * 360.0f));
+          "left hip trim %.2f deg after 3 s, expected clamped at -8", (double)(ref[LH] * 360.0f));
 
     /* It breaks away and crosses zero: the trim goes at once, so the PD
        brakes it at zero instead of driving on to -8. */
@@ -449,6 +451,56 @@ static void test_home_trim_breaks_friction_then_lets_go(void)
     float before = ref[RH];
     for (int t = 0; t < 1000; t++) { soft_start_measured(meas, 0u); tick(ref, vel, tau); }
     CHECK(ref[RH] == before, "the trim moved on a stale pose");
+}
+
+static void test_trim_gives_up_on_a_jammed_joint(void)
+{
+    printf("HOME trim: a joint full trim cannot move is jammed - drop the trim, do not keep pushing\n");
+    float ref[N], vel[N], tau[N], meas[N];
+    to_home(ref, vel, tau);
+    CHECK(soft_start_mode() == SOFT_HOME, "setup: not HOME (mode %d)", (int)soft_start_mode());
+
+    /* 2026-11-24: the right knee jammed at 5.6 deg and never moved. Every
+       other joint is at zero. */
+    const int K = 6;
+    for (int j = 0; j < N; j++) { meas[j] = 0.0f; }
+    meas[K] = 5.6f * DEG;
+    soft_start_measured(meas, 1u);
+
+    /* Trim grows at 1/s of the error: 5.6 deg would take >1 s to reach 8 deg
+       of trim, so give it 3 s to max out, still under the give-up time. */
+    float peak = 0.0f;
+    for (int t = 0; t < 3000; t++)
+    {
+        tick(ref, vel, tau);
+        if (fabsf(ref[K]) > peak) { peak = fabsf(ref[K]); }
+    }
+    CHECK(peak > 5.0f * DEG, "the trim never pushed (peak %.2f deg)", (double)(peak * 360.0f));
+
+    /* Then 2 s at full trim with no movement: dropped. */
+    for (int t = 0; t < (int)SOFT_TRIM_GIVEUP_TICKS + 100; t++) { tick(ref, vel, tau); }
+    CHECK(fabsf(ref[K]) < 1e-6f,
+          "still pushing a jammed joint: target %.2f deg past zero after giving up",
+          (double)(ref[K] * 360.0f));
+    /* And it stays dropped, even though the error is still there. */
+    for (int t = 0; t < 3000; t++) { tick(ref, vel, tau); }
+    CHECK(fabsf(ref[K]) < 1e-6f, "the trim came back on a jammed joint (%.2f deg)",
+          (double)(ref[K] * 360.0f));
+    for (int j = 0; j < N; j++)
+    {
+        if (j != K)
+        {
+            CHECK(fabsf(ref[j]) < 1e-6f, "joint %d disturbed (%.3f deg)", j, (double)(ref[j] * 360.0f));
+        }
+    }
+
+    /* The next arm forgets it. */
+    soft_start_idle();
+    to_home(ref, vel, tau);
+    soft_start_measured(meas, 1u);
+    for (int t = 0; t < 1500; t++) { tick(ref, vel, tau); }
+    CHECK(fabsf(ref[K]) > 0.5f * DEG, "a fresh arm did not trim the joint again (%.2f deg)",
+          (double)(ref[K] * 360.0f));
 }
 
 static void test_trim_is_home_only_and_forgotten_on_disarm(void)
@@ -491,6 +543,7 @@ int main(void)
     test_return_mid_ramp_turns_round_where_it_is();
     test_return_works_from_anywhere_armed();
     test_home_trim_breaks_friction_then_lets_go();
+    test_trim_gives_up_on_a_jammed_joint();
     test_trim_is_home_only_and_forgotten_on_disarm();
 
     printf("-----------------------\n");

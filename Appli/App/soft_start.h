@@ -66,6 +66,9 @@
 #define SOFT_TRIM_DEADBAND  (0.5f / 360.0f)   /* turns */
 #define SOFT_TRIM_RATE      1.0f              /* 1/s: trim grows err per second */
 #define SOFT_TRIM_MAX       (8.0f / 360.0f)   /* turns */
+/* Full trim for this long without half a degree of progress = jammed, not
+   friction: the trim is dropped for that joint until the next arm. */
+#define SOFT_TRIM_GIVEUP_TICKS  2000u          /* 2 s */
 
 #define SOFT_START_RAMP_S   3.0f
 /*
