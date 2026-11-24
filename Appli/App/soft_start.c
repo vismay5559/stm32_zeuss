@@ -240,7 +240,13 @@ void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                is, so the PD has no spring - only the drive's damping. */
             if (SOFT_HOLD_ANKLES_FREE && is_ankle(j) && s_meas_ok && isfinite(s_meas[j]))
             {
-                out_ref[j] = s_meas[j];
+                /* ...but only within SOFT_HOLD_ANKLE_WINDOW of the start
+                   pose: past it the target stops following and the PD pulls
+                   back, so a free ankle cannot drift out of what WALK allows. */
+                float lo = hold_pose[j] - SOFT_HOLD_ANKLE_WINDOW;
+                float hi = hold_pose[j] + SOFT_HOLD_ANKLE_WINDOW;
+                float m  = s_meas[j];
+                out_ref[j] = (m < lo) ? lo : ((m > hi) ? hi : m);
                 out_tau[j] = 0.0f;
             }
         }

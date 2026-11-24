@@ -168,6 +168,17 @@ static void test_the_ankles_are_free_in_the_hold(void)
               j, (double)(ref[j] * 360.0f), (double)(want * 360.0f));
     }
 
+    /* Drifted past the window: held at its edge, not followed. */
+    meas[NEXUS_J_R_ANKLE_PITCH] = s_pose0[NEXUS_J_R_ANKLE_PITCH] + 15.6f * DEG;
+    soft_start_measured(meas, 1u);
+    tick(ref, vel, tau);
+    if (SOFT_HOLD_ANKLES_FREE)
+    {
+        CHECK(fabsf(ref[NEXUS_J_R_ANKLE_PITCH] - (s_pose0[NEXUS_J_R_ANKLE_PITCH] + SOFT_HOLD_ANKLE_WINDOW)) < 1e-6f,
+              "a free ankle 15.6 deg off is held at %.2f deg from the start pose, expected the 8 deg edge",
+              (double)((ref[NEXUS_J_R_ANKLE_PITCH] - s_pose0[NEXUS_J_R_ANKLE_PITCH]) * 360.0f));
+    }
+
     /* WALK: the gait drives the ankles again. */
     soft_start_hold_flag(0u);
     tick(ref, vel, tau);

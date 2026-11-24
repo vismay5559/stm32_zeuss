@@ -160,6 +160,14 @@ void soft_start_hold_flag(uint8_t hold);
  */
 #define SOFT_HOLD_ANKLES_FREE  1
 
+/*
+ * How far a free ankle may wander from the start pose before the PD holds it.
+ * Free without a limit, the right ankle settled 15.6 deg off (2026-11-25,
+ * +9.9 against -5.7) and WALK - which allows ankles 10 deg - never released.
+ * 8 deg keeps it inside that with margin.
+ */
+#define SOFT_HOLD_ANKLE_WINDOW  (8.0f / 360.0f)   /* turns */
+
 void soft_start_tick(const float gait_ref[NEXUS_NUM_JOINTS],
                      const float gait_vel[NEXUS_NUM_JOINTS],
                      const float gait_tau[NEXUS_NUM_JOINTS],
