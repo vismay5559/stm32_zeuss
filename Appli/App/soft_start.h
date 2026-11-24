@@ -72,26 +72,24 @@
 
 #define SOFT_START_RAMP_S   3.0f
 /*
- * 0.10, since 2026-11-24 evening. The left (rear) foot 192 mm behind the
- * right, the left sole 11 mm higher with the torso upright - so a 3 deg lean
- * back, which this robot takes anyway, puts both soles down, and the rear
- * foot is a kickstand against leaning further.
+ * 0.95 - back to it, 2026-11-24 evening, after trying 0.15 and 0.10 the same
+ * day. The start pose is reached by a ramp UNDER LOAD: stiff hips and knees
+ * (KP 150) bend on schedule while the trained ankles (KP 30) cannot push the
+ * robot's weight forward over its feet, so the shins stay upright, the hips go
+ * back, and it sits onto its heels. How far depends on how much ankle bend the
+ * pose asks for - measured on the robot:
  *
- * History, all measured on the robot:
- *   0.95  feet 276 mm apart: the hold leaned back ~6 deg onto the rear foot
- *         and the front foot lifted - the right switch read open all hold.
- *   0.15  feet side by side (85 mm): nothing stopped it rolling back; the
- *         accelerometer read 12-19 deg back in every hold, the soft trained
- *         ankles were pushed 8 deg off, and the tilt stop kept firing.
- *   0.0   the left foot already lifting.
- * The real centre of mass sits further back than the CAD model's (battery and
- * electronics on top); the first ground walk also fell backward.
+ *   phase   ankle bend L / R    lean back in the hold
+ *   0.95     -8 / -6 deg          ~6 deg   (the first ground walk, 4 s)
+ *   0.15    -22 / -13             12-19    (right ankle pushed 8 deg short)
+ *   0.10    -28 / -16             13-16, toppled (right ankle 7-9 deg short)
  *
- * Inside the policy's start window (0.95-0.30). The closed-loop sim check
- * walks 20 s from rest at 0.10 (tilt p95 5.0 deg; sim_check/RESULTS.md in
- * zeus_8dof_deploy).
+ * 0.95 asks least of the ankles, and it is the only start the robot has
+ * walked from. Its known cost: feet 276 mm apart, and a 6 deg lean back lifts
+ * the front (right) foot off its switch. Inside the policy's start window; the
+ * closed-loop sim check walks 20 s from rest there (tilt p95 5.2 deg).
  */
-#define SOFT_START_PHASE    0.10f
+#define SOFT_START_PHASE    0.95f
 
 typedef enum
 {
