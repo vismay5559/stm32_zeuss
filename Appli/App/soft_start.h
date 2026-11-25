@@ -158,7 +158,9 @@ void soft_start_hold_flag(uint8_t hold);
  * with powered ankles, the robot sat back on its heels with the front (right)
  * foot half off the floor, and WALK could not release.
  */
-#define SOFT_HOLD_ANKLES_FREE  1
+/* 0 since 2026-11-25: back to the first ground walk's configuration (see
+   g_friction_ff_nm); to be re-tested on its own. */
+#define SOFT_HOLD_ANKLES_FREE  0
 
 /*
  * How far a free ankle may wander from the start pose before the PD holds it.

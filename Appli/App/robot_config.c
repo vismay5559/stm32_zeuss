@@ -126,9 +126,16 @@ const drive_gains_t g_drive_gains[NEXUS_NUM_JOINTS] = {
  * Under on purpose (app.c). If hips still stall short with this, raise hip
  * pitch in steps of 2 Nm and watch for a joint that moves on its own.
  */
+/*
+ * OFF since 2026-11-25 - back to the first ground walk's configuration. The
+ * robot walked 4 s on 2026-11-23 without it, and not past 1-3 s since several
+ * changes went in together; they come back one at a time, each tested on its
+ * own. The values to restore are 9 / 1.5 / 4 / 0 (hip pitch, hip roll, knee,
+ * ankle), per the table above.
+ */
 const float g_friction_ff_nm[NEXUS_NUM_JOINTS] = {
-    /* L hip_pitch */ 9.0f, /* L hip_roll */ 1.5f, /* L knee */ 4.0f, /* L ankle */ 0.0f,
-    /* R hip_pitch */ 9.0f, /* R hip_roll */ 1.5f, /* R knee */ 4.0f, /* R ankle */ 0.0f,
+    /* L hip_pitch */ 0.0f, /* L hip_roll */ 0.0f, /* L knee */ 0.0f, /* L ankle */ 0.0f,
+    /* R hip_pitch */ 0.0f, /* R hip_roll */ 0.0f, /* R knee */ 0.0f, /* R ankle */ 0.0f,
 };
 
 const uint8_t g_leg_springs[2][2] = {
