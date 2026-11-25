@@ -313,13 +313,22 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts)
  * error - would have been told it was falling sideways.
  *
  *     R = Rx(-8.805 deg) * Rz(+90 deg)
+ *
+ * RE-LEVELLED 2026-11-26: standing straight at the zero pose, both feet down,
+ * gravity through that table read (0.419, -1.376, 9.876) - another 7.93 deg
+ * of roll. The board has moved on its mount (several falls in between): it
+ * is LOOSE, and must be fixed rigidly and re-levelled; a tilt reading that
+ * drifts is a policy steering on a lie. Roll only, as before; pitch read
+ * -2.4, consistent with the ankles at +2.5 deg.
+ *
+ *     R = Rx(-7.932 deg) * Rx(-8.805 deg) * Rz(+90 deg)
  */
 const float g_imu_mount_R[9] = {
      0.0f,        -1.0f, 0.0f,
-     0.9882142f,   0.0f, 0.1530776f,
-    -0.1530776f,   0.0f, 0.9882142f,
+     0.9576360f,   0.0f, 0.2879814f,
+    -0.2879814f,   0.0f, 0.9576360f,
 };
 
 /* R_chip_body = R^T as (w, x, y, z). Was (cos 45, 0, 0, -sin 45) before the
    level correction. test_robot_config.c checks it against the matrix. */
-const float g_imu_mount_q[4] = { 0.70502024f, 0.05428129f, -0.05428129f, -0.70502024f };
+const float g_imu_mount_q[4] = { 0.69957773f, 0.10291259f, -0.10291259f, -0.69957773f };
