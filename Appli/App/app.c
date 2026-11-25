@@ -307,6 +307,9 @@ static uint16_t s_arm_blocked;       /* ticks left to report ARM_BLOCKED      */
 /* How long ARM_BLOCKED stays visible in the packet after a refused arm, so a
    Pi sampling at 250 Hz or a person reading a plot cannot miss it. */
 #define ARM_BLOCKED_TICKS   200u
+
+/* How far inside g_joint_limit an arm starts a joint that was outside it. */
+#define ARM_LIMIT_MARGIN_TURNS  (0.5f / 360.0f)
 static uint8_t s_gains_seq;   /* echo of the last gains message applied */
 
 static void build_reference(float phase,
@@ -956,6 +959,29 @@ void app_run(void)
                  */
                 nexus_cmd_t c = cmd;
                 const float *ref = armed ? s_cmd_ref_turns : s_meas_turns;
+
+                /*
+                 * An arm starts its ramp where the joints ARE - but a joint
+                 * left outside its g_joint_limit (2026-11-26: the right hip
+                 * roll hanging at -14.3 deg after a fall, limit -12) made that
+                 * first target fail safety_accept_command, so every START and
+                 * BACK TO STANDING was refused, and a non-backdrivable joint
+                 * cannot be pushed back in by hand. Start from the nearest
+                 * point ARM_LIMIT_MARGIN inside the limit instead: a step of a
+                 * few degrees, then the ramp as usual.
+                 */
+                float arm_from[NEXUS_NUM_JOINTS];
+                if (!armed)
+                {
+                    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+                    {
+                        float lo = g_joint_limit[j].min_turns + ARM_LIMIT_MARGIN_TURNS;
+                        float hi = g_joint_limit[j].max_turns - ARM_LIMIT_MARGIN_TURNS;
+                        float m  = s_meas_turns[j];
+                        arm_from[j] = (m < lo) ? lo : ((m > hi) ? hi : m);
+                    }
+                    ref = arm_from;
+                }
 
                 if (!armed || soft_start_ignores_residual())
                 {
