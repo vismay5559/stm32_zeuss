@@ -352,13 +352,22 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts)
  * this table (imu_bno085.c, to_body). Undo it - chip = R^T * imu_accel -
  * before building a new one. Treating it as chip data on 2026-11-26 produced
  * a "21.5 deg" tilt that was this table applied twice.
+ *
+ * TEMPORARY OFFSET 2026-11-27, for one night's walking. The axes above stand
+ * (verified against the legs), but the board is LOOSE on its mount: with the
+ * legs still and both feet flat, roll went 0.3 -> 6.8 -> 7.45 deg within
+ * minutes. The builder stood the torso upright and the chip read
+ * (-1.1635, -0.0463, 9.6345) m/s^2; this table is the one above turned by the
+ * 9.13 deg that brings that reading vertical. It is only true while the
+ * board stays where it was at that moment. FIX THE MOUNT RIGIDLY, then
+ * measure again (two positions, as above).
  */
 const float g_imu_mount_R[9] = {
-    -0.0120437f, -0.9949997f, -0.0991489f,
-    +0.9683927f, -0.0363119f, +0.2467731f,
-    -0.2491394f, -0.0930431f, +0.9639878f,
+    -0.0291713f, -0.9995397f, -0.0083297f,
+    +0.9923589f, -0.0299592f, +0.1196927f,
+    -0.1198871f, -0.0047745f, +0.9927760f,
 };
 
 /* R_chip_body = R^T as (w, x, y, z). Was (cos 45, 0, 0, -sin 45) before any
    level correction. test_robot_config.c checks it against the matrix. */
-const float g_imu_mount_q[4] = { +0.6920318f, +0.1227603f, -0.0541848f, -0.7092854f };
+const float g_imu_mount_q[4] = { +0.6952779f, +0.0447545f, -0.0401125f, -0.7162239f };
