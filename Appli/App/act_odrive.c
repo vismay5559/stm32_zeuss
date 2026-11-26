@@ -16,6 +16,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define ODRV_CMD_GET_ENCODER      0x009u
 #define ODRV_CMD_SET_INPUT_POS    0x00Cu
 #define ODRV_CMD_GET_TORQUES      0x01Cu
+#define ODRV_CMD_GET_BUS_VI       0x017u   /* Get_Bus_Voltage_Current: f32 V, f32 A */
 #define ODRV_CMD_SET_POS_GAIN     0x01Au
 #define ODRV_CMD_SET_VEL_GAINS    0x01Bu
 #define ODRV_CMD_SET_ABS_POS      0x019u   /* Set_Absolute_Position, float32 turns */
@@ -161,6 +162,17 @@ static volatile uint8_t  s_pos_new[NEXUS_NUM_JOINTS];   /* see act_telemetry_t.p
  * good value. ACT_POS_GLITCH_RESYNC in a row are believed anyway, so a real
  * discontinuity (an ankle re-zeroed) cannot lock a joint out.
  */
+/*
+ * Each drive's DC bus, from Get_Bus_Voltage_Current (2026-11-26). A left knee
+ * drive tripped DC_BUS_UNDER_VOLTAGE one second into a walk while every joint
+ * fell behind its command at 60-90 Nm: the motor supply sags under load, and
+ * nothing recorded by how much or where. The drive sends it at its own
+ * bus_voltage_msg_rate_ms (set by CAN_CFG); age in ticks, saturating.
+ */
+static volatile float    s_vbus[NEXUS_NUM_JOINTS];
+static volatile float    s_ibus[NEXUS_NUM_JOINTS];
+static volatile uint16_t s_vbus_age[NEXUS_NUM_JOINTS];
+
 #define ACT_POS_GLITCH_MARGIN_TURNS  (2.0f / 360.0f)
 #define ACT_POS_GLITCH_RESYNC        5u
 static uint8_t  s_pos_reject_run[NEXUS_NUM_JOINTS];
@@ -356,6 +368,9 @@ void act_init(void)
         s_pos_new[j] = 0u;
         s_pos_reject_run[j] = 0u;
         s_pos_rejects[j] = 0u;
+        s_vbus[j] = 0.0f;
+        s_ibus[j] = 0.0f;
+        s_vbus_age[j] = 0xFFFFu;
     }
 
     s_disarmed      = 0;
@@ -432,6 +447,12 @@ void act_on_rx(uint8_t bus_index)
             s_pos_new[j] = 1u;
             break;
         }
+
+        case ODRV_CMD_GET_BUS_VI:
+            s_vbus[j]     = le_f32(&data[0]);
+            s_ibus[j]     = le_f32(&data[4]);
+            s_vbus_age[j] = 0u;
+            break;
 
         case ODRV_CMD_GET_TORQUES:
             s_telem.torque[j] = g_joint_dir[j] * le_f32(&data[4]);
@@ -958,6 +979,10 @@ void act_tick_1khz(void)
         {
             s_pos_age[j]++;
         }
+        if (s_vbus_age[j] < 0xFFFFu)
+        {
+            s_vbus_age[j]++;
+        }
     }
     critical_exit(primask);
 
@@ -1074,5 +1099,18 @@ void act_get(act_telemetry_t *out)
         s_telem.flags[j] = 0;
     }
 
+    critical_exit(primask);
+}
+
+void act_get_bus(float vbus[NEXUS_NUM_JOINTS], float ibus[NEXUS_NUM_JOINTS],
+                 uint16_t age[NEXUS_NUM_JOINTS])
+{
+    uint32_t primask = critical_enter();
+    for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+    {
+        vbus[j] = s_vbus[j];
+        ibus[j] = s_ibus[j];
+        age[j]  = s_vbus_age[j];
+    }
     critical_exit(primask);
 }

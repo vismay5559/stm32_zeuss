@@ -1020,6 +1020,33 @@ static void test_a_position_glitch_is_dropped_but_real_motion_is_not(void)
           (double)(a.pos[K] * 360.0f));
 }
 
+/*
+ * What a failure means on the robot: the motor supply sagged one second into
+ * a walk (a left knee drive tripped DC_BUS_UNDER_VOLTAGE, 2026-11-25) and the
+ * recording had no voltage in it - the sag had to be guessed from symptoms.
+ */
+static void test_each_drive_bus_voltage_lands_on_its_joint(void)
+{
+    printf("Get_Bus_Voltage_Current: voltage and current, per joint, with an age\n");
+    fresh_board();
+    float vb[NEXUS_NUM_JOINTS], ib[NEXUS_NUM_JOINTS];
+    uint16_t age[NEXUS_NUM_JOINTS];
+    act_get_bus(vb, ib, age);
+    CHECK(age[2] == 0xFFFFu, "a joint never heard from has age %u, expected 0xFFFF", age[2]);
+
+    uint8_t d[8];
+    put_f32(&d[0], 21.5f);
+    put_f32(&d[4], 3.25f);
+    host_can_deliver(bus_of(2), id_of(2, 0x017u), d);
+    act_on_rx(bus_of(2));
+    ticks(3);
+    act_get_bus(vb, ib, age);
+    CHECK(NEAR(vb[2], 21.5f, 1e-6f) && NEAR(ib[2], 3.25f, 1e-6f),
+          "left knee bus read %.2f V %.2f A, sent 21.5 V 3.25 A", (double)vb[2], (double)ib[2]);
+    CHECK(age[2] == 3u, "after 3 ticks the reading is %u old", age[2]);
+    CHECK(age[6] == 0xFFFFu, "the reading also landed on joint 6");
+}
+
 static void test_a_wire_that_shuts_itself_down_is_restarted(void)
 {
     printf("a wire in trouble\n");
@@ -1636,6 +1663,7 @@ int main(void)
     test_a_reading_is_handed_over_once_and_then_ages();
     test_a_new_position_survives_the_aging_before_the_read();
     test_a_position_glitch_is_dropped_but_real_motion_is_not();
+    test_each_drive_bus_voltage_lands_on_its_joint();
     test_a_wire_that_shuts_itself_down_is_restarted();
     test_the_emergency_stop_bypasses_everything();
     test_arming_writes_the_gains_to_every_drive();

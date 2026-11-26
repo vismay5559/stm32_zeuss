@@ -143,6 +143,17 @@ extern FDCAN_HandleTypeDef hfdcan2;
  * there too, harmlessly, so every drive reads the same. After the save the
  * drives go quiet until motor power is cycled.
  */
+/*
+ * 1 = set bus_voltage_msg_rate_ms (endpoint 289) to BUS_MSG_MS on every drive,
+ * read back, then save all eight (2026-11-26). Off by default in the drives,
+ * so a supply sag under load was invisible in every recording. 10 ms is about
+ * 5% more traffic per bus. After the save the drives go quiet until motor
+ * power is cycled.
+ */
+#define CANCFG_FIX_BUS_MSG 1
+#define EP_BUS_MSG_MS      289u
+#define BUS_MSG_MS         10u
+
 #define CANCFG_FIX_ERROR_RATE 0   /* done 2026-11-25: all 8 drives 0.700 read back, saved */
 #define EP_SPI0_MAX_ERROR_RATE 673u
 #define ENC_MAX_ERROR_RATE     0.7f
@@ -580,6 +591,9 @@ static const ep_desc_t s_dump[] = {
        interference; which input each drive uses and how many bad reads it
        will tolerate). load_encoder: 5/6/7 = spi_encoder0/1/2, 10-12 = rs485,
        13 = onboard. */
+    { 289u, T_U32,  "can.bus_voltage_msg_rate_ms" },
+    {   1u, T_F32,  "vbus_voltage [V]" },
+    {   2u, T_F32,  "ibus [A]" },
     { 671u, T_U8,   "spi_encoder0.config.mode" },
     { 673u, T_F32,  "spi_encoder0.config.max_error_rate" },
     { 668u, T_U32,  "spi_encoder0.n_errors" },
@@ -805,6 +819,52 @@ void cancfg_run(void)
         }
     }
     printf("\r\n=== ankle vel_limit done ===\r\n");
+#endif
+#if CANCFG_FIX_BUS_MSG
+    {
+        printf("\r\n=== bus_voltage_msg_rate_ms -> %u on every drive. Nothing is armed. ===\r\n",
+               (unsigned)BUS_MSG_MS);
+        uint8_t okm[2] = { 0u, 0u };
+        for (uint8_t bus = 0u; bus < 2u; bus++)
+        {
+            FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+            for (uint8_t node = 1u; node <= 4u; node++)
+            {
+                uint32_t id = 0xFFFFFFFFu, v0 = 0u, v1 = 0u;
+                if ((s_hb_seen[bus] & (1u << node)) == 0u || !sdo_read_u32(h, node, EP_NODE_ID, &id)
+                    || id != node || !sdo_read_u32(h, node, EP_BUS_MSG_MS, &v0))
+                {
+                    printf("    %s: cannot read it - SKIPPED\r\n", s_joint[bus][node - 1u]);
+                    continue;
+                }
+                (void)sdo_write_u32(h, node, EP_BUS_MSG_MS, BUS_MSG_MS);
+                if (!sdo_read_u32(h, node, EP_BUS_MSG_MS, &v1) || v1 != BUS_MSG_MS)
+                {
+                    printf("    %s: %lu -> *** DID NOT TAKE, not saved ***\r\n", s_joint[bus][node - 1u], (unsigned long)v0);
+                    continue;
+                }
+                printf("    %s: bus_voltage_msg_rate_ms %lu -> %lu, read back ok\r\n", s_joint[bus][node - 1u],
+                       (unsigned long)v0, (unsigned long)v1);
+                okm[bus] |= (uint8_t)(1u << node);
+            }
+        }
+        for (uint8_t bus = 0u; bus < 2u; bus++)
+        {
+            FDCAN_HandleTypeDef *h = (bus == 0u) ? &hfdcan1 : &hfdcan2;
+            for (uint8_t node = 1u; node <= 4u; node++)
+            {
+                if ((okm[bus] & (1u << node)) == 0u) { continue; }
+                uint8_t d[8] = { 0 };
+                d[0] = SDO_OP_WRITE;
+                d[1] = (uint8_t)(EP_SAVE_CONFIG & 0xFFu);
+                d[2] = (uint8_t)(EP_SAVE_CONFIG >> 8);
+                tx_classic(h, node, CANCFG_RX_SDO, d, 8u);
+                printf("    %s: save sent\r\n", s_joint[bus][node - 1u]);
+                pump_for(300u);
+            }
+        }
+        printf("\r\n=== bus msg done: switch MOTOR POWER off and on ===\r\n");
+    }
 #endif
 #if CANCFG_FIX_ERROR_RATE
     {

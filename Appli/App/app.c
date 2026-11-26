@@ -310,6 +310,10 @@ static uint16_t s_arm_blocked;       /* ticks left to report ARM_BLOCKED      */
 
 /* How far inside g_joint_limit an arm starts a joint that was outside it. */
 #define ARM_LIMIT_MARGIN_TURNS  (0.5f / 360.0f)
+
+/* A drive's bus reading counts for the packet's minimum while it is this
+   fresh. The drives send it every 10 ms (CAN_CFG); 50 ms is five missed. */
+#define BUS_FRESH_TICKS  50u
 static uint8_t s_gains_seq;   /* echo of the last gains message applied */
 
 static void build_reference(float phase,
@@ -707,8 +711,40 @@ static void build_and_send_state(imu_sample_t *imu_out, uint8_t *enc_valid_out)
     uint32_t stalls = enc_stalls();
     s_state.enc_stalls = (stalls > 0xFFFFu) ? 0xFFFFu : (uint16_t)stalls;
 
-    s_state.reserved0 = 0;
-    s_state.reserved1 = 0;
+    /*
+     * The two spare bytes carry the motor supply (2026-11-26) without a
+     * protocol change, so every recording made before still parses:
+     *   reserved0  the LOWEST bus voltage among the drives heard from in the
+     *              last BUS_FRESH_TICKS, in 0.25 V steps (0 = none heard)
+     *   reserved1  which joint that was (0-7), 0xFF when none
+     * A sag shows as reserved0 dropping, and reserved1 says where.
+     */
+    {
+        float vb[NEXUS_NUM_JOINTS], ib[NEXUS_NUM_JOINTS];
+        uint16_t age[NEXUS_NUM_JOINTS];
+        act_get_bus(vb, ib, age);
+        float vmin = 1e9f;
+        int   jmin = -1;
+        for (int j = 0; j < NEXUS_NUM_JOINTS; j++)
+        {
+            if ((age[j] <= BUS_FRESH_TICKS) && isfinite(vb[j]) && (vb[j] > 0.0f) && (vb[j] < vmin))
+            {
+                vmin = vb[j];
+                jmin = j;
+            }
+        }
+        if (jmin < 0)
+        {
+            s_state.reserved0 = 0u;
+            s_state.reserved1 = 0xFFu;
+        }
+        else
+        {
+            float steps = vmin * 4.0f + 0.5f;
+            s_state.reserved0 = (steps >= 255.0f) ? 255u : (uint8_t)steps;
+            s_state.reserved1 = (uint8_t)jmin;
+        }
+    }
     s_state.gains_seq = s_gains_seq;
     s_state.contact_ticks[0] = contact_stable_ticks(0);
     s_state.contact_ticks[1] = contact_stable_ticks(1);

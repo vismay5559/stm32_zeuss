@@ -323,4 +323,9 @@ uint32_t act_rx_count(uint8_t bus);
    (see pos_believable in act_odrive.c). */
 uint32_t act_pos_rejects(int joint);
 
+/* Each drive's DC bus voltage (V) and current (A), as last reported by
+   Get_Bus_Voltage_Current, and the ticks since (0xFFFF = never). */
+void act_get_bus(float vbus[NEXUS_NUM_JOINTS], float ibus[NEXUS_NUM_JOINTS],
+                 uint16_t age[NEXUS_NUM_JOINTS]);
+
 #endif /* ACT_ODRIVE_H */
