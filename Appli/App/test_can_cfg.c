@@ -150,7 +150,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
  * 5% more traffic per bus. After the save the drives go quiet until motor
  * power is cycled.
  */
-#define CANCFG_FIX_BUS_MSG 1
+#define CANCFG_FIX_BUS_MSG 0   /* done 2026-11-26: all 8 drives 10 ms, read back, saved */
 #define EP_BUS_MSG_MS      289u
 #define BUS_MSG_MS         10u
 
