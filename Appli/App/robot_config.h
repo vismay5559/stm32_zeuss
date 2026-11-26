@@ -186,7 +186,8 @@ extern const float g_joint_gear[NEXUS_NUM_JOINTS];
  *
  * Measured 2026-11-21 by moving each joint by hand and reading the drive. The
  * right hip pitch is the odd one out: its count rises as the leg swings
- * FORWARD. Both ankles count up as the toes go down, as the URDF does.
+ * FORWARD. The right ankle is the other: re-measured 2026-11-26 on its motor
+ * encoder, it counts up as the toes go UP (robot_config.c has the evidence).
  */
 extern const float g_joint_dir[NEXUS_NUM_JOINTS];
 
@@ -406,13 +407,15 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts);
  *     chip Y -> robot BACK  (-X)
  *     chip Z -> robot UP    (+Z)
  * i.e. the chip is yawed +90 degrees about vertical, which is also how the CAD
- * export models the board - and, measured 2026-11-24, rolled 8.8 degrees off
- * level on the torso, which the table also undoes (robot_config.c). The URDF keeps imu_link robot-aligned on purpose
+ * export models the board - and tilted about 15 degrees on the torso, which
+ * the table also undoes (measured in full 2026-11-26, robot_config.c). The URDF keeps imu_link robot-aligned on purpose
  * (zeus_model.yaml explains why): this table is where the 90 degrees lives.
  *
  * TO VERIFY on the robot: stand it level and still - accel must read about
- * (0, 0, +9.8). Tilt it nose-down - gyro Y must go positive, and accel X
- * positive. Roll it to its left side down - gyro X must go negative.
+ * (0, 0, +9.8). Tilt it nose-down - gyro Y must go positive while it moves,
+ * and accel X NEGATIVE once there (the forward axis points below the horizon;
+ * this said positive until 2026-11-26). Roll it to its left side down - gyro
+ * X must go negative.
  */
 extern const float g_imu_mount_R[9];
 extern const float g_imu_mount_q[4];

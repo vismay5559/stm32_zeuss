@@ -162,10 +162,20 @@ const uint8_t g_leg_springs[2][2] = {
  *   right hip roll   count rises as the foot moves inward     +1 (= robot left)
  *   right knee       count rises as the shin swings back      +1
  *   left  ankle      count rises as the toes go down          +1
- *   right ankle      count rises as the toes go down          +1  (LOAD-side
- *                    encoder; the drive was moved to its commutation encoder
- *                    later the same day - RE-MEASURE before the first arm: a
- *                    motor encoder can count the other way through the box)
+ *   right ankle      count rises as the toes go UP            -1  (2026-11-26)
+ *
+ * The right ankle was +1 until 2026-11-26. That was measured on its LOAD-side
+ * encoder; the drive moved to its commutation encoder the same day and the
+ * direction was never re-measured, as this comment warned. It counts the
+ * other way through the box. On the robot, both feet flat, ankles backdriven
+ * by hand - where both ankles must turn the same way:
+ *   - rocked fore and aft: left -13.5, right +13.8 deg at the same instant;
+ *   - tipped FORWARD and held: left -28.8 (toes up against the shin, which
+ *     leaning forward on planted feet must give; toes-down is + in the URDF),
+ *     right +28.5.
+ * So every walk from 2026-11-22 to 2026-11-26 drove the right ankle as the
+ * mirror of what the policy asked - toes up for down - and its reading was
+ * mirrored to match, so nothing on the Pi could tell.
  */
 const float g_joint_dir[NEXUS_NUM_JOINTS] = {
     /* L hip_pitch   */ +1.0f,
@@ -175,7 +185,7 @@ const float g_joint_dir[NEXUS_NUM_JOINTS] = {
     /* R hip_pitch   */ -1.0f,
     /* R hip_roll    */ +1.0f,
     /* R knee_pitch  */ +1.0f,
-    /* R ankle_pitch */ +1.0f,
+    /* R ankle_pitch */ -1.0f,   /* was +1 until 2026-11-26, see above */
 };
 
 /* Encoder turns per output turn - see robot_config.h. Left ankle only. */
@@ -322,13 +332,33 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts)
  * -2.4, consistent with the ankles at +2.5 deg.
  *
  *     R = Rx(-7.932 deg) * Rx(-8.805 deg) * Rz(+90 deg)
+ *
+ * MEASURED IN FULL 2026-11-26 (night), replacing the roll-only corrections
+ * above. Two positions, ankles backdriven, both feet flat:
+ *   1. standing straight, every joint within 0.6 deg of zero, still:
+ *        chip gravity (-2.467, -0.921, 9.545) m/s^2            -> robot +Z
+ *   2. the whole robot tipped FORWARD on its feet and held (left ankle -28.8):
+ *        chip gravity (-2.114, 3.401, 8.797) m/s^2            -> 25.96 deg
+ *   With no ankle roll a robot on flat feet can only pitch, so (2) fixes
+ *   forward exactly. Z from (1); X from the part of (2) at right angles to
+ *   it (nose down: world up leans to the robot's back); Y = Z x X.
+ * Chip X -> robot (-0.012, 0.968, -0.249), chip Y -> (-0.995, -0.036,
+ * -0.093): X left, Y back, as the board's markings say, tilted about 15 deg - 6.2 deg from
+ * the roll-only table, mostly the pitch that table never corrected. The
+ * board did NOT move that evening: straight read the same at 23:01 and 23:08
+ * to 0.03 deg.
+ *
+ * MEASURING IT AGAIN: imu_accel in the state packet is ALREADY rotated by
+ * this table (imu_bno085.c, to_body). Undo it - chip = R^T * imu_accel -
+ * before building a new one. Treating it as chip data on 2026-11-26 produced
+ * a "21.5 deg" tilt that was this table applied twice.
  */
 const float g_imu_mount_R[9] = {
-     0.0f,        -1.0f, 0.0f,
-     0.9576360f,   0.0f, 0.2879814f,
-    -0.2879814f,   0.0f, 0.9576360f,
+    -0.0120437f, -0.9949997f, -0.0991489f,
+    +0.9683927f, -0.0363119f, +0.2467731f,
+    -0.2491394f, -0.0930431f, +0.9639878f,
 };
 
-/* R_chip_body = R^T as (w, x, y, z). Was (cos 45, 0, 0, -sin 45) before the
+/* R_chip_body = R^T as (w, x, y, z). Was (cos 45, 0, 0, -sin 45) before any
    level correction. test_robot_config.c checks it against the matrix. */
-const float g_imu_mount_q[4] = { 0.69957773f, 0.10291259f, -0.10291259f, -0.69957773f };
+const float g_imu_mount_q[4] = { +0.6920318f, +0.1227603f, -0.0541848f, -0.7092854f };

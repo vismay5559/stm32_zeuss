@@ -801,6 +801,16 @@ static void test_a_reversed_drive_is_reversed_both_ways(void)
           "right hip pitch direction is %.1f, measured -1 on 2026-11-21",
           (double)g_joint_dir[NEXUS_J_R_HIP_PITCH]);
 
+    /* The right ankle's motor encoder counts toes-UP, the left's toes-down.
+       At +1 (until 2026-11-26) the right ankle did the mirror of every
+       command, and its reading was mirrored to match, so the Pi saw a
+       perfectly tracking ankle while the foot pushed the wrong way. */
+    CHECK(g_joint_dir[NEXUS_J_R_ANKLE_PITCH] == -1.0f &&
+              g_joint_dir[NEXUS_J_L_ANKLE_PITCH] == +1.0f,
+          "ankle directions are L %.1f R %.1f, measured +1 / -1 on 2026-11-26",
+          (double)g_joint_dir[NEXUS_J_L_ANKLE_PITCH],
+          (double)g_joint_dir[NEXUS_J_R_ANKLE_PITCH]);
+
     const int j = NEXUS_J_R_HIP_PITCH;
 
     fresh_board();
