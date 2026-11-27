@@ -329,14 +329,13 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
     printf("IMU mounting: the matrix and the quaternion are the same rotation\n");
 
     /*
-     * The chip is yawed 90 degrees: X to the robot's left, Y to the back, Z
-     * up - and tilted about 15 degrees off level (measured 2026-11-26). Written down first,
-     * as what each chip axis must become, so a wrong table fails here and
-     * not as a robot that thinks forward is sideways. Within 0.16 of the pure
-     * yaw: the level correction is a tilt, never an axis swap.
+     * Since the re-mount of 2026-11-28 the chip points X to the robot's RIGHT,
+     * Y FORWARD, Z up (measured, within 5 deg). Written down first, as what
+     * each chip axis must become, so a wrong table fails here and not as a
+     * robot that thinks forward is backward - which the previous table did.
      */
     const float chip_axis[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
-    const float want[3][3]      = { { 0, 1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } };
+    const float want[3][3]      = { { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0, 1 } };
     const float *R = g_imu_mount_R;
 
     for (int a = 0; a < 3; a++)
@@ -366,10 +365,10 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
      * the robot standing straight on 2026-11-24 (chip axes, m/s^2) must come
      * out vertical in the robot's frame. Before it, this read 8.8 deg of roll.
      */
-    /* The two positions the table was built from (2026-11-26, night): standing
+    /* The two positions the table was built from (2026-11-28): standing
        straight must read upright, and the robot tipped FORWARD on its flat
        feet must read as PITCH, nose down (+), and no roll at all. */
-    const float g_chip[3] = { -1.1635f, -0.0463f, 9.6345f };   /* upright, 2026-11-27 offset */
+    const float g_chip[3] = { -0.5547f, -0.0280f, 9.7682f };   /* straight, 2026-11-28 */
     float g[3];
     for (int r = 0; r < 3; r++)
     {
@@ -381,18 +380,15 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
           "standing straight reads roll %.2f pitch %.2f deg, expected about 0",
           (double)roll, (double)pitch);
 
-    const float g_fwd[3] = { -2.1141f, 3.4007f, 8.7967f };
+    const float g_fwd[3] = { -0.7014f, -2.7238f, 9.4311f };    /* tipped forward, 2026-11-28 */
     for (int r = 0; r < 3; r++)
     {
         g[r] = R[3 * r] * g_fwd[0] + R[3 * r + 1] * g_fwd[1] + R[3 * r + 2] * g_fwd[2];
     }
     roll  = atan2f(g[1], g[2]) * 57.29578f;
     pitch = atan2f(-g[0], sqrtf(g[1] * g[1] + g[2] * g[2])) * 57.29578f;
-    /* Since the 2026-11-27 offset the board had moved between the two
-       readings, so the forward tilt no longer reads exactly +26 / 0. It must
-       still read as mostly nose-down pitch: forward is still forward. */
-    CHECK(pitch > 15.0f && pitch < 30.0f && fabsf(roll) < 10.0f,
-          "tipped forward 26 deg reads roll %.2f pitch %.2f, expected mostly +pitch",
+    CHECK(fabsf(roll) < 0.1f && fabsf(pitch - 15.93f) < 0.2f,
+          "tipped forward 16 deg reads roll %.2f pitch %.2f, expected 0 and +16",
           (double)roll, (double)pitch);
 
     /* The quaternion is R_chip_body = R^T. Its matrix must match entry for
