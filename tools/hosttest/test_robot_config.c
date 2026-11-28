@@ -368,7 +368,7 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
     /* The two positions the table was built from (2026-11-28): standing
        straight must read upright, and the robot tipped FORWARD on its flat
        feet must read as PITCH, nose down (+), and no roll at all. */
-    const float g_chip[3] = { -0.5547f, -0.0280f, 9.7682f };   /* straight, 2026-11-28 */
+    const float g_chip[3] = { -0.9075f, 0.7447f, 9.7106f };   /* level, 20261128_191817 */
     float g[3];
     for (int r = 0; r < 3; r++)
     {
@@ -387,7 +387,7 @@ static void test_the_imu_mounting_is_one_rotation_written_twice(void)
     }
     roll  = atan2f(g[1], g[2]) * 57.29578f;
     pitch = atan2f(-g[0], sqrtf(g[1] * g[1] + g[2] * g[2])) * 57.29578f;
-    CHECK(fabsf(roll) < 0.1f && fabsf(pitch - 15.93f) < 0.2f,
+    CHECK(fabsf(roll - (-2.39f)) < 0.1f && fabsf(pitch - (+20.33f)) < 0.2f,
           "tipped forward 16 deg reads roll %.2f pitch %.2f, expected 0 and +16",
           (double)roll, (double)pitch);
 

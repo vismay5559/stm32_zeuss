@@ -368,13 +368,18 @@ float robot_spring_deflection(uint8_t enc_index, uint16_t raw_counts)
  *      the IMU - the feet settling into the mat.
  * Chip X -> robot (0.061, -0.997, -0.057), Y -> (0.998, 0.061, -0.003),
  * Z -> (0.006, -0.056, 0.998): within 5 deg of right / forward / up.
+ *
+ * LEVELLED 20261128_191817 against a level on the torso at 0 (zeus imu-level,
+ * tools/imu_level.py): the old table read that as pitch -4.39, roll +2.36
+ * deg; turned by the smallest rotation that reads it level. Chip gravity
+ * then: (-0.9075, 0.7447, 9.7106) m/s^2.
  */
 const float g_imu_mount_R[9] = {
-    +0.0610175f, +0.9981167f, +0.0063250f,
-    -0.9965254f, +0.0612777f, -0.0564111f,
-    -0.0566925f, -0.0028610f, +0.9983876f,
+    +0.0667540f, +0.9953046f, -0.0700915f,
+    -0.9934464f, +0.0597683f, -0.0974273f,
+    -0.0927806f, +0.0761357f, +0.9927714f,
 };
 
 /* R_chip_body = R^T as (w, x, y, z). test_robot_config.c checks it against
    the matrix. */
-const float g_imu_mount_q[4] = { +0.7281282f, -0.0183862f, -0.0216368f, +0.6848526f };
+const float g_imu_mount_q[4] = { +0.7278897f, -0.0596117f, -0.0077928f, +0.6830537f };
